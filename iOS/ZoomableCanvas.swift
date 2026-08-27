@@ -95,7 +95,11 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.35
 
-        for gesture in [tap, twoFingerTap, longPress] {
+        let tapAndDrag = UILongPressGestureRecognizer(target: self, action: #selector(handleTapAndDrag(_:)))
+        tapAndDrag.numberOfTapsRequired = 1
+        tapAndDrag.minimumPressDuration = 0.1
+
+        for gesture in [tap, twoFingerTap, longPress, tapAndDrag] {
             addGestureRecognizer(gesture)
             gesture.delegate = self
         }
@@ -402,6 +406,30 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         guard gesture.state == .began, let point = remotePoint(at: gesture.location(in: self)) else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         directRightTap?(point)
+    }
+
+    @objc private func handleTapAndDrag(_ gesture: UILongPressGestureRecognizer) {
+        guard let point = remotePoint(at: gesture.location(in: self)) else {
+            if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
+                isScrollEnabled = true
+                dragEvent?(.ended)
+            }
+            return
+        }
+
+        switch gesture.state {
+        case .began:
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            isScrollEnabled = false
+            dragEvent?(.began(point))
+        case .changed:
+            dragEvent?(.changed(point))
+        case .ended, .cancelled, .failed:
+            isScrollEnabled = true
+            dragEvent?(.ended)
+        default:
+            break
+        }
     }
 }
 
