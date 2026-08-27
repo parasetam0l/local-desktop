@@ -53,6 +53,7 @@ final class ClientSession: ObservableObject {
     private var lastPongAt = Date()
     private(set) var hasConnectedOnce = false
     private(set) var userInitiatedDisconnect = false
+    private var consecutiveFailures = 0
     var autoReconnect = true
 
     init(deviceName: String) {
@@ -85,6 +86,7 @@ final class ClientSession: ObservableObject {
         if !preserveImage {
             image = nil
             remoteSize = .zero
+            consecutiveFailures = 0
         }
         videoStatus = nil
         serverName = ""
@@ -183,46 +185,47 @@ final class ClientSession: ObservableObject {
     private var countdownTimer: Timer?
 
     private func fail(_ reason: String) {
+        guard !isDead else { return }
+        
         connectionTimeoutTask?.cancel()
         connectionTimeoutTask = nil
         stopPing()
         
-        Task { @MainActor in
-            countdownTimer?.invalidate()
-            countdownTimer = nil
-            reconnectCountdown = nil
-        }
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        reconnectCountdown = nil
         
         keyLock.lock()
         _sessionKey = nil
         keyLock.unlock()
+        
         networkQueue.async { [weak self] in
             self?.receiveBuffer.removeAll()
         }
         
-        Task { @MainActor in
-            guard !self.isDead else { return }
-            self.connection?.cancel()
+        connection?.cancel()
 
-            if self.canReconnect && self.autoReconnect && !self.userInitiatedDisconnect {
-                self.phase = .failed(reason, 5)
-                self.countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        if case .failed(let msg, let current) = self.phase, let current = current, current > 1 {
-                            self.phase = .failed(msg, current - 1)
-                        } else {
-                            timer.invalidate()
-                            self.countdownTimer = nil
-                            if case .failed = self.phase {
-                                self.reconnect()
-                            }
+        consecutiveFailures += 1
+        let waitTime = consecutiveFailures <= 1 ? 1 : 5
+
+        if canReconnect && autoReconnect && !userInitiatedDisconnect {
+            phase = .failed(reason, waitTime)
+            countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if case .failed(let msg, let current) = self.phase, let current = current, current > 1 {
+                        self.phase = .failed(msg, current - 1)
+                    } else {
+                        timer.invalidate()
+                        self.countdownTimer = nil
+                        if case .failed = self.phase {
+                            self.reconnect()
                         }
                     }
                 }
-            } else {
-                self.phase = .failed(reason, nil)
             }
+        } else {
+            phase = .failed(reason, nil)
         }
     }
 
@@ -380,6 +383,7 @@ final class ClientSession: ObservableObject {
             }
             phase = .connected
             hasConnectedOnce = true
+            consecutiveFailures = 0
             stopPing()
             lastPongAt = Date()
             pingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
