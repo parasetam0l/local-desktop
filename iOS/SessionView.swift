@@ -103,7 +103,13 @@ struct SessionView: View {
                     onScroll: { dx, dy in
                         session.scroll(dx: dx, dy: dy)
                     },
-                    onDrag: dragHandler ?? { _ in }
+                    onDragStateChange: { isDown in
+                        if isDown {
+                            session.buttonDown(0)
+                        } else {
+                            session.buttonUp(0)
+                        }
+                    }
                 )
                 
                 if app.settings.showScrollHelpers {

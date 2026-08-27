@@ -13,7 +13,7 @@ final class TouchpadUIView: UIView, UIGestureRecognizerDelegate {
     var onLeftClick: ((CGPoint?) -> Void)?
     var onRightClick: ((CGPoint?) -> Void)?
     var onScroll: ((CGFloat, CGFloat) -> Void)?
-    var onDragEvent: ((DragEvent) -> Void)?
+    var onDragStateChange: ((Bool) -> Void)?
     var onPinch: ((UIPinchGestureRecognizer) -> Void)?
 
     private var dragActive = false
@@ -39,7 +39,11 @@ final class TouchpadUIView: UIView, UIGestureRecognizerDelegate {
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.3
 
-        for gesture in [pan, pinch, tap, twoFingerTap, longPress] {
+        let tapAndDrag = UILongPressGestureRecognizer(target: self, action: #selector(handleTapAndDrag(_:)))
+        tapAndDrag.numberOfTapsRequired = 1
+        tapAndDrag.minimumPressDuration = 0.1
+
+        for gesture in [pan, pinch, tap, twoFingerTap, longPress, tapAndDrag] {
             addGestureRecognizer(gesture)
             gesture.delegate = self
         }
@@ -53,6 +57,14 @@ final class TouchpadUIView: UIView, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer is UIPinchGestureRecognizer || otherGestureRecognizer is UIPinchGestureRecognizer {
+            return true
+        }
+        // Allow tapAndDrag to work with pan so that movement updates position.
+        // We will identify tapAndDrag by its numberOfTapsRequired == 1
+        if let longPress = gestureRecognizer as? UILongPressGestureRecognizer, longPress.numberOfTapsRequired == 1, otherGestureRecognizer is UIPanGestureRecognizer {
+            return true
+        }
+        if let longPress = otherGestureRecognizer as? UILongPressGestureRecognizer, longPress.numberOfTapsRequired == 1, gestureRecognizer is UIPanGestureRecognizer {
             return true
         }
         return false
@@ -96,6 +108,20 @@ final class TouchpadUIView: UIView, UIGestureRecognizerDelegate {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         onRightClick?(nil)
     }
+
+    @objc private func handleTapAndDrag(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            dragActive = true
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onDragStateChange?(true)
+        case .ended, .cancelled, .failed:
+            dragActive = false
+            onDragStateChange?(false)
+        default:
+            break
+        }
+    }
 }
 
 struct TouchpadOverlay: UIViewRepresentable {
@@ -104,7 +130,7 @@ struct TouchpadOverlay: UIViewRepresentable {
     let onLeftClick: (CGPoint?) -> Void
     let onRightClick: (CGPoint?) -> Void
     let onScroll: (CGFloat, CGFloat) -> Void
-    let onDrag: (DragEvent) -> Void
+    let onDragStateChange: (Bool) -> Void
 
     func makeUIView(context: Context) -> TouchpadUIView {
         let view = TouchpadUIView()
@@ -121,7 +147,7 @@ struct TouchpadOverlay: UIViewRepresentable {
         view.onLeftClick = onLeftClick
         view.onRightClick = onRightClick
         view.onScroll = onScroll
-        view.onDragEvent = onDrag
+        view.onDragStateChange = onDragStateChange
         view.onPinch = { [weak controller] gesture in
             controller?.canvas?.handleExternalPinch(gesture)
         }
