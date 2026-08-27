@@ -1,0 +1,61 @@
+name: LocalDesktop
+options:
+  bundleIdPrefix: localdesktop
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+targets:
+  LocalDesktopHost:
+    type: application
+    platform: macOS
+    sources:
+      - Host
+      - Shared
+    info:
+      path: Host/Info.plist
+      properties:
+        CFBundleDisplayName: Local Desktop Host
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "14.0"
+        LSUIElement: true
+        NSLocalNetworkUsageDescription: "Local Desktop advertises this Mac on your local network so your iPhone or iPad can find and control it."
+        NSBonjourServices: ["_rd-desktop._tcp"]
+  LocalDesktopClient:
+    type: application
+    platform: iOS
+    sources:
+      - iOS
+      - Shared
+    info:
+      path: iOS/Info.plist
+      properties:
+        CFBundleDisplayName: Local Desktop
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
+        NSLocalNetworkUsageDescription: "Local Desktop scans your local network for Macs to connect to."
+        NSBonjourServices: ["_rd-desktop._tcp"]
+schemes:
+  LocalDesktopHost:
+    build:
+      targets:
+        LocalDesktopHost: all
+    run:
+      config: Debug
+  LocalDesktopClient:
+    build:
+      targets:
+        LocalDesktopClient: all
+    run:
+      config: Debug
