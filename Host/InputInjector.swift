@@ -88,11 +88,12 @@ enum InputInjector {
     /// dy > 0 scrolls toward the end of the document (finger swipe up on the client).
     static func scroll(dx: Double, dy: Double) {
         if let event = CGEvent(scrollWheelEvent2Source: source,
-                               units: .line,
+                               units: .pixel,
                                wheelCount: 2,
                                wheel1: Int32(dy.rounded()),
                                wheel2: Int32(dx.rounded()),
                                wheel3: 0) {
+            event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
             event.post(tap: .cghidEventTap)
         }
     }
