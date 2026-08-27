@@ -109,10 +109,10 @@ struct SessionView: View {
                 if app.settings.showScrollHelpers {
                     VStack(spacing: 16) {
                         RepeatingScrollButton(iconName: "chevron.up") {
-                            session.scroll(dx: 0, dy: 30)
+                            session.scroll(dx: 0, dy: 1)
                         }
                         RepeatingScrollButton(iconName: "chevron.down") {
-                            session.scroll(dx: 0, dy: -30)
+                            session.scroll(dx: 0, dy: -1)
                         }
                     }
                     .padding(.trailing, 24)
