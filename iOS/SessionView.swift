@@ -314,17 +314,6 @@ struct SessionView: View {
                     .ignoresSafeArea()
 
                 VStack(spacing: 16) {
-                    HStack {
-                        Spacer()
-                        Button {
-                            onDismiss()
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.title2)
-                                .foregroundStyle(.secondary)
-                                .padding(4)
-                        }
-                    }
                     ProgressView()
                         .controlSize(.large)
                     Text(session.image != nil ? "Reconnecting to \(session.hostDescription)…" : "Connecting to \(session.hostDescription)…")
