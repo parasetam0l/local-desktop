@@ -9,6 +9,7 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    DEVELOPMENT_TEAM: "43BPKMT48V"
 targets:
   LocalDesktopHost:
     type: application
@@ -29,6 +30,8 @@ targets:
   LocalDesktopClient:
     type: application
     platform: iOS
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: localdesktop.client
     sources:
       - iOS
       - Shared

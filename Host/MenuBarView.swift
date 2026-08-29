@@ -70,6 +70,18 @@ struct MenuBarView: View {
                             Text(preset.label).tag(preset)
                         }
                     }
+                    Picker("Codec", selection: Binding(
+                        get: { ScreenStreamer.shared.currentCodec },
+                        set: { codec in
+                            Task {
+                                await ScreenStreamer.shared.updateConfiguration(preset: server.preset, codec: codec)
+                            }
+                        }
+                    )) {
+                        ForEach(RDCodec.allCases.filter { $0 != .jpeg }) { codec in
+                            Text(codec.label).tag(codec)
+                        }
+                    }
                     if !server.displays.isEmpty {
                         Picker("Share display", selection: Binding(
                             get: { server.selectedDisplayID ?? server.displays.first?.id ?? CGMainDisplayID() },

@@ -21,8 +21,13 @@ final class HostServer: ObservableObject {
     @Published var lastError: String?
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var screenGranted = false
+    @Published private(set) var isHostLocked = false
+    @Published private(set) var isDisplaySleeping = false
 
     static let computerName: String = Host.current().localizedName ?? "Mac"
+
+    private var displaySleepAssertion: IOPMAssertionID = 0
+    private var systemSleepAssertion: IOPMAssertionID = 0
 
     /// First IPv4 address on a physical interface (en0…), for display in the menu.
     static func primaryLANAddress() -> String? {
@@ -75,6 +80,48 @@ final class HostServer: ObservableObject {
                 self?.lastError = message
             }
         }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.screenIsLocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.isHostLocked = true
+                self?.broadcastHostState()
+            }
+        }
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.isHostLocked = false
+                self?.broadcastHostState()
+            }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.isDisplaySleeping = true
+                self?.broadcastHostState()
+            }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.isDisplaySleeping = false
+                self?.broadcastHostState()
+            }
+        }
+
         Task { @MainActor in
             if AuthStore.shared.hasPIN && CGPreflightScreenCaptureAccess() && InputInjector.checkAccessibility(prompt: false) {
                 self.start()
@@ -161,6 +208,7 @@ final class HostServer: ObservableObject {
         for s in activeSessions { s.close() }
         pendingSessions.removeAll()
         activeSessions.removeAll()
+        releasePowerAssertions()
         listener?.cancel()
         listener = nil
         ScreenStreamer.shared.stop()
@@ -194,7 +242,7 @@ final class HostServer: ObservableObject {
         selectedDisplayID = id
         guard running else { return }
         Task {
-            try await ScreenStreamer.shared.start(displayID: id, preset: preset)
+            try await ScreenStreamer.shared.start(displayID: id, preset: preset, codec: ScreenStreamer.shared.currentCodec)
         }
     }
 
@@ -219,6 +267,11 @@ final class HostServer: ObservableObject {
         // Force wake the display from Dark Wake when a client connects.
         var assertionID: IOPMAssertionID = 0
         IOPMAssertionDeclareUserActivity("Local Desktop Client Connected" as CFString, kIOPMUserActiveLocal, &assertionID)
+        InputInjector.wakeDisplay()
+        acquirePowerAssertions()
+
+        // Inform client of current screen lock & display sleep state
+        session.sendHostState(HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping))
 
         if activeSessions.count == 1 {
             clientName = name
@@ -226,11 +279,11 @@ final class HostServer: ObservableObject {
             clientName = "\(activeSessions.count) devices connected"
         }
         if let keyframe = ScreenStreamer.shared.lastKeyframe {
-            session.sendVideoFrame(keyframe.data, width: keyframe.width, height: keyframe.height, codec: .h264)
+            session.sendVideoFrame(keyframe.data, width: keyframe.width, height: keyframe.height, codec: keyframe.codec)
         }
         Task {
             do {
-                try await ScreenStreamer.shared.start(displayID: selectedDisplayID, preset: preset)
+                try await ScreenStreamer.shared.start(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
             } catch {
                 lastError = "Screen capture: \(error.localizedDescription)"
             }
@@ -243,6 +296,7 @@ final class HostServer: ObservableObject {
         if activeSessions.isEmpty {
             clientName = nil
             captureStats = ""
+            releasePowerAssertions()
             ScreenStreamer.shared.stop()
         } else if activeSessions.count == 1 {
             clientName = activeSessions.first?.peerDisplayName
@@ -251,8 +305,46 @@ final class HostServer: ObservableObject {
         }
     }
 
-    func applyPresetFromClient(_ raw: Int, showRemoteCursor: Bool? = nil) {
+    private func acquirePowerAssertions() {
+        if displaySleepAssertion == 0 {
+            IOPMAssertionCreateWithName(
+                kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                "Local Desktop Active Remote Session" as CFString,
+                &displaySleepAssertion
+            )
+        }
+        if systemSleepAssertion == 0 {
+            IOPMAssertionCreateWithName(
+                kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                "Local Desktop Active Remote Session" as CFString,
+                &systemSleepAssertion
+            )
+        }
+    }
+
+    private func releasePowerAssertions() {
+        if displaySleepAssertion != 0 {
+            IOPMAssertionRelease(displaySleepAssertion)
+            displaySleepAssertion = 0
+        }
+        if systemSleepAssertion != 0 {
+            IOPMAssertionRelease(systemSleepAssertion)
+            systemSleepAssertion = 0
+        }
+    }
+
+    func broadcastHostState() {
+        let msg = HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping)
+        for s in activeSessions {
+            s.sendHostState(msg)
+        }
+    }
+
+    func applyPresetFromClient(_ raw: Int, showRemoteCursor: Bool? = nil, codec rawCodec: Int? = nil) {
         let newPreset = RDQualityPreset.from(raw)
+        let newCodec = rawCodec.flatMap { RDCodec(rawValue: UInt8($0)) } ?? ScreenStreamer.shared.currentCodec
         var needsRestart = false
 
         if let showCursor = showRemoteCursor, ScreenStreamer.shared.showRemoteCursor != showCursor {
@@ -260,7 +352,7 @@ final class HostServer: ObservableObject {
             needsRestart = true
         }
 
-        if newPreset != preset {
+        if newPreset != preset || newCodec != ScreenStreamer.shared.currentCodec {
             preset = newPreset
             UserDefaults.standard.set(preset.rawValue, forKey: "QualityPreset")
             needsRestart = true
@@ -270,7 +362,7 @@ final class HostServer: ObservableObject {
             Task {
                 let currentDisplay = ScreenStreamer.shared.currentDisplay
                 ScreenStreamer.shared.stop()
-                try? await ScreenStreamer.shared.start(displayID: currentDisplay, preset: preset)
+                try? await ScreenStreamer.shared.start(displayID: currentDisplay, preset: preset, codec: newCodec)
             }
         }
     }

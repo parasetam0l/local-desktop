@@ -47,6 +47,12 @@ enum InputInjector {
         moveAbs(base.x + dx, base.y + dy)
     }
 
+    /// Awakens the display from dark wake / power saving state by nudging the cursor
+    static func wakeDisplay() {
+        let base = currentPositionTopLeft
+        moveAbs(base.x, base.y)
+    }
+
     private static var lastClickTime: TimeInterval = 0
     private static var clickCount: Int64 = 1
 

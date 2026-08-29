@@ -140,6 +140,11 @@ final class ClientSession {
         send(.frame, RDFrameCodec.pack(width: width, height: height, codec: .jpeg, data: jpeg), encrypted: true)
     }
 
+    func sendHostState(_ state: HostStateMsg) {
+        guard phase == .active else { return }
+        send(.hostState, RDJSON.encode(state), encrypted: true)
+    }
+
     // MARK: Receiving
 
     private var receiveBuffer = Data()
@@ -250,7 +255,11 @@ final class ClientSession {
 
         case .setQuality:
             guard phase == .active, let msg = RDJSON.decode(SetQualityMsg.self, from: payload) else { break }
-            server?.applyPresetFromClient(msg.preset, showRemoteCursor: msg.cursor)
+            server?.applyPresetFromClient(msg.preset, showRemoteCursor: msg.cursor, codec: msg.codec)
+
+        case .requestKeyframe:
+            guard phase == .active else { break }
+            ScreenStreamer.shared.requestKeyframe()
 
         case .ping:
             guard phase == .active, let msg = RDJSON.decode(PingMsg.self, from: payload) else { break }

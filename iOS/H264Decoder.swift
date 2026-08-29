@@ -3,61 +3,118 @@ import CoreMedia
 import VideoToolbox
 import AVFoundation
 
-final class H264Decoder {
+final class VideoDecoder {
     private var formatDescription: CMVideoFormatDescription?
+    private var currentCodec: RDCodec?
+    private var vpsData: Data?
     private var spsData: Data?
     private var ppsData: Data?
 
-    func decode(annexB: Data, completion: (CMSampleBuffer) -> Void) {
-        let naluRanges = extractNALURanges(from: annexB)
-        guard !naluRanges.isEmpty else { return }
+    func decode(annexB: Data, codec: RDCodec = .hevc, completion: (CMSampleBuffer) -> Void, onError: (() -> Void)? = nil) {
+        if currentCodec != codec {
+            reset()
+            currentCodec = codec
+        }
 
-        var avccData = Data(capacity: annexB.count)
+        let naluRanges = extractNALURanges(from: annexB)
+        guard !naluRanges.isEmpty else {
+            onError?()
+            return
+        }
+
+        var packetData = Data(capacity: annexB.count)
 
         for range in naluRanges {
             let nalu = annexB.subdata(in: range)
             guard !nalu.isEmpty else { continue }
-            let naluType = nalu[0] & 0x1F
 
-            if naluType == 7 { // SPS
-                spsData = nalu
-            } else if naluType == 8 { // PPS
-                ppsData = nalu
+            if codec == .hevc {
+                let naluType = (nalu[0] >> 1) & 0x3F
+                if naluType == 32 { // VPS
+                    vpsData = nalu
+                } else if naluType == 33 { // SPS
+                    spsData = nalu
+                } else if naluType == 34 { // PPS
+                    ppsData = nalu
+                } else {
+                    var length = UInt32(nalu.count).bigEndian
+                    withUnsafeBytes(of: &length) { packetData.append(contentsOf: $0) }
+                    packetData.append(nalu)
+                }
             } else {
-                var length = UInt32(nalu.count).bigEndian
-                withUnsafeBytes(of: &length) { avccData.append(contentsOf: $0) }
-                avccData.append(nalu)
+                let naluType = nalu[0] & 0x1F
+                if naluType == 7 { // SPS
+                    spsData = nalu
+                } else if naluType == 8 { // PPS
+                    ppsData = nalu
+                } else {
+                    var length = UInt32(nalu.count).bigEndian
+                    withUnsafeBytes(of: &length) { packetData.append(contentsOf: $0) }
+                    packetData.append(nalu)
+                }
             }
         }
 
-        if let sps = spsData, let pps = ppsData {
-            sps.withUnsafeBytes { spsBytes in
-                pps.withUnsafeBytes { ppsBytes in
-                    guard let spsPtr = spsBytes.bindMemory(to: UInt8.self).baseAddress,
-                          let ppsPtr = ppsBytes.bindMemory(to: UInt8.self).baseAddress else { return }
-                    let pointers = [spsPtr, ppsPtr]
-                    let sizes = [sps.count, pps.count]
-                    var newFormat: CMVideoFormatDescription?
-                    let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                        allocator: kCFAllocatorDefault,
-                        parameterSetCount: 2,
-                        parameterSetPointers: pointers,
-                        parameterSetSizes: sizes,
-                        nalUnitHeaderLength: 4,
-                        formatDescriptionOut: &newFormat
-                    )
-                    if status == noErr, let format = newFormat {
-                        self.formatDescription = format
+        if codec == .hevc {
+            if let vps = vpsData, let sps = spsData, let pps = ppsData {
+                vps.withUnsafeBytes { vpsBytes in
+                    sps.withUnsafeBytes { spsBytes in
+                        pps.withUnsafeBytes { ppsBytes in
+                            guard let vpsPtr = vpsBytes.bindMemory(to: UInt8.self).baseAddress,
+                                  let spsPtr = spsBytes.bindMemory(to: UInt8.self).baseAddress,
+                                  let ppsPtr = ppsBytes.bindMemory(to: UInt8.self).baseAddress else { return }
+                            let pointers = [vpsPtr, spsPtr, ppsPtr]
+                            let sizes = [vps.count, sps.count, pps.count]
+                            var newFormat: CMVideoFormatDescription?
+                            let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                                allocator: kCFAllocatorDefault,
+                                parameterSetCount: 3,
+                                parameterSetPointers: pointers,
+                                parameterSetSizes: sizes,
+                                nalUnitHeaderLength: 4,
+                                extensions: nil,
+                                formatDescriptionOut: &newFormat
+                            )
+                            if status == noErr, let format = newFormat {
+                                self.formatDescription = format
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            if let sps = spsData, let pps = ppsData {
+                sps.withUnsafeBytes { spsBytes in
+                    pps.withUnsafeBytes { ppsBytes in
+                        guard let spsPtr = spsBytes.bindMemory(to: UInt8.self).baseAddress,
+                              let ppsPtr = ppsBytes.bindMemory(to: UInt8.self).baseAddress else { return }
+                        let pointers = [spsPtr, ppsPtr]
+                        let sizes = [sps.count, pps.count]
+                        var newFormat: CMVideoFormatDescription?
+                        let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: 2,
+                            parameterSetPointers: pointers,
+                            parameterSetSizes: sizes,
+                            nalUnitHeaderLength: 4,
+                            formatDescriptionOut: &newFormat
+                        )
+                        if status == noErr, let format = newFormat {
+                            self.formatDescription = format
+                        }
                     }
                 }
             }
         }
 
-        guard let format = formatDescription, !avccData.isEmpty else { return }
+        guard let format = formatDescription, !packetData.isEmpty else {
+            onError?()
+            return
+        }
 
         var blockBuffer: CMBlockBuffer?
-        let memoryBlock = UnsafeMutableRawPointer.allocate(byteCount: avccData.count, alignment: 1)
-        avccData.copyBytes(to: memoryBlock.assumingMemoryBound(to: UInt8.self), count: avccData.count)
+        let memoryBlock = UnsafeMutableRawPointer.allocate(byteCount: packetData.count, alignment: 1)
+        packetData.copyBytes(to: memoryBlock.assumingMemoryBound(to: UInt8.self), count: packetData.count)
 
         let deallocator = CMBlockBufferCustomBlockSource(
             version: 0,
@@ -72,22 +129,23 @@ final class H264Decoder {
         let blockStatus = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
             memoryBlock: memoryBlock,
-            blockLength: avccData.count,
+            blockLength: packetData.count,
             blockAllocator: kCFAllocatorDefault,
             customBlockSource: &customDeallocator,
             offsetToData: 0,
-            dataLength: avccData.count,
+            dataLength: packetData.count,
             flags: 0,
             blockBufferOut: &blockBuffer
         )
 
         guard blockStatus == noErr, let buffer = blockBuffer else {
             memoryBlock.deallocate()
+            onError?()
             return
         }
 
         var sampleBuffer: CMSampleBuffer?
-        var sampleSizeArray = [avccData.count]
+        var sampleSizeArray = [packetData.count]
         var timing = CMSampleTimingInfo(
             duration: .invalid,
             presentationTimeStamp: CMTime(seconds: CACurrentMediaTime(), preferredTimescale: 1000),
@@ -106,7 +164,10 @@ final class H264Decoder {
             sampleBufferOut: &sampleBuffer
         )
 
-        guard sampleStatus == noErr, let outSample = sampleBuffer else { return }
+        guard sampleStatus == noErr, let outSample = sampleBuffer else {
+            onError?()
+            return
+        }
 
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(outSample, createIfNecessary: true) {
             let count = CFArrayGetCount(attachments)
@@ -168,7 +229,10 @@ final class H264Decoder {
 
     func reset() {
         formatDescription = nil
+        vpsData = nil
         spsData = nil
         ppsData = nil
     }
 }
+
+typealias H264Decoder = VideoDecoder

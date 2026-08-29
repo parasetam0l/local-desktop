@@ -165,7 +165,8 @@ struct SessionView: View {
                             ForEach(RDQualityPreset.allCases) { preset in
                                 Button {
                                     app.settings.qualityRaw = preset.rawValue
-                                    session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor)
+                                    let codec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
+                                    session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
                                 } label: {
                                     if app.settings.qualityRaw == preset.rawValue {
                                         Label(preset.label, systemImage: "checkmark")
@@ -177,6 +178,24 @@ struct SessionView: View {
                         } label: {
                             let currentLabel = RDQualityPreset.from(app.settings.qualityRaw).label
                             Label("Quality: \(currentLabel)", systemImage: "sparkles")
+                        }
+                        Menu {
+                            ForEach(RDCodec.allCases.filter { $0 != .jpeg }) { codec in
+                                Button {
+                                    app.settings.codecRaw = codec.rawValue
+                                    let preset = RDQualityPreset.from(app.settings.qualityRaw)
+                                    session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
+                                } label: {
+                                    if app.settings.codecRaw == codec.rawValue {
+                                        Label(codec.label, systemImage: "checkmark")
+                                    } else {
+                                        Text(codec.label)
+                                    }
+                                }
+                            }
+                        } label: {
+                            let currentCodec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
+                            Label("Codec: \(currentCodec.label)", systemImage: "film")
                         }
                         Menu {
                             let speeds: [(label: String, value: Double)] = [("Slow", 1.0), ("Normal", 1.5), ("Fast", 2.0)]
@@ -195,6 +214,18 @@ struct SessionView: View {
                             let currentSpeedLabel = app.settings.pointerSpeedMultiplier == 2.0 ? "Fast" : (app.settings.pointerSpeedMultiplier == 1.5 ? "Normal" : "Slow")
                             Label("Pointer Speed: \(currentSpeedLabel)", systemImage: "cursorarrow.motionlines")
                         }
+                        Divider()
+                        Button {
+                            session.requestKeyframe(reason: "user_refresh")
+                        } label: {
+                            Label("Refresh Video (Force Keyframe)", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        Button {
+                            session.wakeHostDisplay()
+                        } label: {
+                            Label("Wake Mac Display", systemImage: "sun.max")
+                        }
+                        Divider()
                         Button(role: .destructive) {
                             onDismiss()
                         } label: {
@@ -227,6 +258,58 @@ struct SessionView: View {
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
                 .frame(maxHeight: .infinity, alignment: .bottom)
+
+                // Status banner when Mac is locked or display is sleeping
+                if session.phase == .connected && (session.isHostLocked || session.isDisplaySleeping) {
+                    VStack(spacing: 8) {
+                        if session.isHostLocked {
+                            HStack(spacing: 8) {
+                                Image(systemName: "lock.fill")
+                                    .foregroundStyle(.yellow)
+                                Text("Mac is Locked")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                Button("Enter Password") {
+                                    keyboardVisible = true
+                                }
+                                .font(.caption.weight(.bold))
+                                .buttonStyle(.borderedProminent)
+                                .tint(.blue)
+                                .controlSize(.mini)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                            .shadow(radius: 6)
+                        }
+
+                        if session.isDisplaySleeping {
+                            HStack(spacing: 8) {
+                                Image(systemName: "moon.fill")
+                                    .foregroundStyle(.cyan)
+                                Text("Display Asleep")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                Button("Wake Display") {
+                                    session.wakeHostDisplay()
+                                }
+                                .font(.caption.weight(.bold))
+                                .buttonStyle(.borderedProminent)
+                                .tint(.cyan)
+                                .controlSize(.mini)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                            .shadow(radius: 6)
+                        }
+                    }
+                    .padding(.top, 16)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
