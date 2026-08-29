@@ -19,7 +19,7 @@ struct ConnectView: View {
                             } else {
                                 Image(systemName: "desktopcomputer.trianglebadge.exclamationmark")
                                     .foregroundStyle(.secondary)
-                                Text("No Macs found nearby. Tap Refresh to scan.")
+                                Text("No Macs found nearby.")
                             }
                         }
                         .foregroundStyle(.secondary)
