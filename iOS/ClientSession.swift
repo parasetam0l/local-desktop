@@ -495,9 +495,35 @@ final class ClientSession: ObservableObject {
         sendJSON(.scroll, ScrollMsg(dx: dx, dy: dy))
     }
 
+    private func sendModifier(_ modifier: RDModifiers, down: Bool, currentFlags: UInt8) {
+        let code: UInt16
+        if modifier == .command { code = 55 }
+        else if modifier == .shift { code = 56 }
+        else if modifier == .option { code = 58 }
+        else if modifier == .control { code = 59 }
+        else { return }
+        sendJSON(.keyEvent, KeyEventMsg(code: code, down: down, flags: currentFlags))
+    }
+
+    private func sendModifiersDown(_ modifiers: RDModifiers) {
+        if modifiers.contains(.command) { sendModifier(.command, down: true, currentFlags: modifiers.rawValue) }
+        if modifiers.contains(.shift) { sendModifier(.shift, down: true, currentFlags: modifiers.rawValue) }
+        if modifiers.contains(.option) { sendModifier(.option, down: true, currentFlags: modifiers.rawValue) }
+        if modifiers.contains(.control) { sendModifier(.control, down: true, currentFlags: modifiers.rawValue) }
+    }
+
+    private func sendModifiersUp(_ modifiers: RDModifiers) {
+        if modifiers.contains(.control) { sendModifier(.control, down: false, currentFlags: modifiers.rawValue) }
+        if modifiers.contains(.option) { sendModifier(.option, down: false, currentFlags: modifiers.rawValue) }
+        if modifiers.contains(.shift) { sendModifier(.shift, down: false, currentFlags: modifiers.rawValue) }
+        if modifiers.contains(.command) { sendModifier(.command, down: false, currentFlags: modifiers.rawValue) }
+    }
+
     func keyTap(_ key: RDKey, modifiers: RDModifiers = []) {
+        sendModifiersDown(modifiers)
         sendJSON(.keyEvent, KeyEventMsg(code: key.rawValue, down: true, flags: modifiers.rawValue))
         sendJSON(.keyEvent, KeyEventMsg(code: key.rawValue, down: false, flags: modifiers.rawValue))
+        sendModifiersUp(modifiers)
     }
 
     func sendText(_ text: String) {
@@ -516,6 +542,7 @@ final class ClientSession: ObservableObject {
             sendText(text.uppercased())
             return
         }
+        sendModifiersDown(modifiers)
         for character in text.lowercased() {
             if let code = virtualKey(for: character) {
                 sendJSON(.keyEvent, KeyEventMsg(code: code, down: true, flags: modifiers.rawValue))
@@ -524,6 +551,7 @@ final class ClientSession: ObservableObject {
                 sendText(String(character))
             }
         }
+        sendModifiersUp(modifiers)
     }
 
     private func virtualKey(for character: Character) -> UInt16? {
