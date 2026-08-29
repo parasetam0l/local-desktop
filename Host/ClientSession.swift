@@ -213,7 +213,8 @@ final class ClientSession {
             let response = ServerHelloMsg(serverId: AuthStore.shared.serverId,
                                           serverName: HostServer.computerName,
                                           pubKey: privateKey.publicKey.rawRepresentation,
-                                          requiresPin: true)
+                                          requiresPin: true,
+                                          macAddress: getPrimaryMACAddress())
             send(.serverHello, RDJSON.encode(response), encrypted: false)
 
         case .authPin:

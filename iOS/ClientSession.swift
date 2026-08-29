@@ -23,6 +23,7 @@ final class ClientSession: ObservableObject {
     @Published private(set) var hasVideoFrame = false
     @Published private(set) var remoteSize: CGSize = .zero
     @Published private(set) var serverName = ""
+    private(set) var serverMacAddress: String?
     @Published private(set) var serverId = ""
     @Published private(set) var hostDescription = ""
     @Published private(set) var pinError: String?
@@ -367,6 +368,7 @@ final class ClientSession: ObservableObject {
             keyLock.unlock()
             serverName = msg.serverName
             serverId = msg.serverId
+            serverMacAddress = msg.macAddress
 
             if let token = TrustStore.token(serverId: msg.serverId) {
                 phase = .negotiating

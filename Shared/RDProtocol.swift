@@ -143,6 +143,7 @@ struct ServerHelloMsg: Codable {
     var serverName: String
     var pubKey: Data
     var requiresPin: Bool
+    var macAddress: String?
 }
 
 struct AuthPinMsg: Codable {
