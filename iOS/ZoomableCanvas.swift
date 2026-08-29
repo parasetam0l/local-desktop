@@ -62,6 +62,7 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
     var directRightTap: ((CGPoint) -> Void)?
     var dragEvent: ((DragEvent) -> Void)?
 
+    let containerView = UIView()
     let videoView = VideoLayerView()
     let imageView = UIImageView()
     private(set) var currentContentSize: CGSize = .zero
@@ -84,8 +85,12 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         imageView.isOpaque = true
         imageView.layer.magnificationFilter = .nearest
 
-        addSubview(imageView)
-        addSubview(videoView)
+        videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
+        addSubview(containerView)
+        containerView.addSubview(imageView)
+        containerView.addSubview(videoView)
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
 
@@ -135,8 +140,16 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
             }
         }
 
-        videoView.isHidden = false
-        imageView.isHidden = true
+        if Thread.isMainThread {
+            videoView.isHidden = false
+            imageView.isHidden = true
+        } else {
+            DispatchQueue.main.async {
+                self.videoView.isHidden = false
+                self.imageView.isHidden = true
+            }
+        }
+        
         videoView.enqueue(sampleBuffer)
     }
 
@@ -163,9 +176,10 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         self.maximumZoomScale = 1.0
         self.zoomScale = 1.0
         
-        videoView.transform = .identity
+        containerView.transform = .identity
+        containerView.frame = CGRect(origin: .zero, size: newSize)
+        imageView.frame = CGRect(origin: .zero, size: newSize)
         videoView.frame = CGRect(origin: .zero, size: newSize)
-        videoView.bounds = CGRect(origin: .zero, size: newSize)
         videoView.displayLayer.frame = CGRect(origin: .zero, size: newSize)
         contentSize = newSize
         
@@ -205,8 +219,16 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         videoView.isHidden = true
 
         if isFirst || sizeChanged {
-            imageView.transform = .identity
+            self.minimumZoomScale = 1.0
+            self.maximumZoomScale = 1.0
+            self.zoomScale = 1.0
+
+            containerView.transform = .identity
+            containerView.frame = CGRect(origin: .zero, size: newSize)
             imageView.frame = CGRect(origin: .zero, size: newSize)
+            videoView.frame = CGRect(origin: .zero, size: newSize)
+            videoView.displayLayer.frame = CGRect(origin: .zero, size: newSize)
+
             contentSize = newSize
             updateZoomScales(resetZoom: isFirst)
         }
@@ -305,7 +327,7 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
     // MARK: UIScrollViewDelegate
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-        videoView.isHidden ? imageView : videoView
+        containerView
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
@@ -320,8 +342,7 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
     private func centerImage() {
         guard bounds.width > 0, bounds.height > 0 else { return }
         let boundsSize = bounds.size
-        let targetView: UIView = videoView.isHidden ? imageView : videoView
-        let frame = targetView.frame
+        let frame = containerView.frame
 
         var center = CGPoint(x: frame.width * 0.5, y: frame.height * 0.5)
 
@@ -332,7 +353,7 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
             center.y += (boundsSize.height - frame.height) * 0.5
         }
 
-        targetView.center = center
+        containerView.center = center
     }
 
     func centerOn(remotePoint: CGPoint) {
