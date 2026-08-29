@@ -114,7 +114,7 @@ final class AppModel: ObservableObject {
             // Reconnection is now fully handled inside ClientSession's fail() state machine!
             // We only need to clear the session if the user explicitly ended it, or if it gave up.
         }
-        newSession.connect(to: endpoint)
+        newSession.connect(to: endpoint, fallbackName: fallbackName)
     }
 
     func connectRecent(_ recent: RecentHost) {
@@ -188,9 +188,7 @@ final class AppModel: ObservableObject {
             host = "\(h)"
             port = p.rawValue
         }
-        let name = connected.serverName.isEmpty
-            ? (fallbackName ?? connected.hostDescription)
-            : connected.serverName
+        let name = connected.displayName
         let recent = RecentHost(name: name,
                                 serverId: connected.serverId,
                                 host: host,
