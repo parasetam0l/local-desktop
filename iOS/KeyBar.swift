@@ -21,8 +21,9 @@ struct KeyBar: View {
                 keyButton("tab", .tab)
                 keyButton("enter", .returnKey)
                 Button {
-                    modifiers.insert(.shift)
-                    onKeyTap(.returnKey, modifiers)
+                    var mods = modifiers
+                    mods.insert(.shift)
+                    onKeyTap(.returnKey, mods)
                 } label: {
                     Text("⇧ enter")
                         .font(.footnote)
