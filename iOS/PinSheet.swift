@@ -15,21 +15,44 @@ struct PinSheet: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "lock.shield")
-                .font(.system(size: 40))
-                .foregroundStyle(.tint)
-            Text("Enter the PIN set on \(serverName.isEmpty ? "your Mac" : serverName)")
-                .font(.headline)
-                .multilineTextAlignment(.center)
+        VStack(spacing: 20) {
+            ZStack {
+                Circle()
+                    .fill(Color.blue.opacity(0.18))
+                    .frame(width: 64, height: 64)
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.blue)
+            }
 
-            HStack(spacing: 14) {
+            VStack(spacing: 6) {
+                Text("Enter PIN")
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(.white)
+                Text("Set on \(serverName.isEmpty ? "your Mac" : serverName)")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
+
+            HStack(spacing: 16) {
                 ForEach(0..<4, id: \.self) { index in
-                    Circle()
-                        .fill(index < pin.count ? Color.primary : Color.secondary.opacity(0.35))
-                        .frame(width: 16, height: 16)
+                    ZStack {
+                        Circle()
+                            .stroke(Color.white.opacity(0.3), lineWidth: 1.5)
+                            .frame(width: 18, height: 18)
+
+                        if index < pin.count {
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 12, height: 12)
+                                .transition(.scale.combined(with: .opacity))
+                        }
+                    }
                 }
             }
+            .padding(.vertical, 8)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: pin.count)
 
             TextField("", text: $pin)
                 .keyboardType(.numberPad)
@@ -49,25 +72,28 @@ struct PinSheet: View {
 
             if let errorText {
                 Text(errorText)
-                    .font(.footnote)
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
             }
 
-            Toggle("Trust this device (skip the PIN next time)", isOn: $trust)
+            Toggle("Trust this device (skip PIN next time)", isOn: $trust)
                 .font(.footnote)
+                .foregroundStyle(.white.opacity(0.85))
+                .tint(.blue)
+                .padding(.horizontal, 4)
 
             if let onCancel {
                 Button("Cancel", role: .cancel) {
                     onCancel()
                 }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
+                .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
                 .padding(.top, 4)
             }
         }
-        .padding(24)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .padding(28)
+        .frame(maxWidth: 320)
+        .glassCard(cornerRadius: 24, opacity: 0.16, shadowRadius: 24)
         .padding(24)
         .onAppear {
             focused = true

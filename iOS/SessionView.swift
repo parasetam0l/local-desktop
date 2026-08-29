@@ -263,7 +263,7 @@ struct SessionView: View {
                 if session.phase == .connected && (session.isHostLocked || session.isDisplaySleeping) {
                     VStack(spacing: 8) {
                         if session.isHostLocked {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 10) {
                                 Image(systemName: "lock.fill")
                                     .foregroundStyle(.yellow)
                                 Text("Mac is Locked")
@@ -272,10 +272,7 @@ struct SessionView: View {
                                 Button("Enter Password") {
                                     keyboardVisible = true
                                 }
-                                .font(.caption.weight(.bold))
-                                .buttonStyle(.borderedProminent)
-                                .tint(.blue)
-                                .controlSize(.mini)
+                                .glassButton(variant: .tinted(.blue), size: .mini)
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -285,7 +282,7 @@ struct SessionView: View {
                         }
 
                         if session.isDisplaySleeping {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 10) {
                                 Image(systemName: "moon.fill")
                                     .foregroundStyle(.cyan)
                                 Text("Display Asleep")
@@ -294,10 +291,7 @@ struct SessionView: View {
                                 Button("Wake Display") {
                                     session.wakeHostDisplay()
                                 }
-                                .font(.caption.weight(.bold))
-                                .buttonStyle(.borderedProminent)
-                                .tint(.cyan)
-                                .controlSize(.mini)
+                                .glassButton(variant: .tinted(.cyan), size: .mini)
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -393,38 +387,46 @@ struct SessionView: View {
         switch session.phase {
         case .connecting, .negotiating:
             ZStack {
-                Color.black.opacity(session.image == nil ? 0.6 : 0.35)
+                Color.black.opacity(session.image == nil ? 0.65 : 0.4)
                     .ignoresSafeArea()
 
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .controlSize(.large)
-                    Text(session.image != nil ? "Reconnecting to \(session.displayName)…" : "Connecting to \(session.displayName)…")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.center)
+                VStack(spacing: 20) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.blue.opacity(0.18))
+                            .frame(width: 64, height: 64)
+                        ProgressView()
+                            .controlSize(.large)
+                            .tint(.white)
+                    }
+
+                    VStack(spacing: 6) {
+                        Text(session.image != nil ? "Reconnecting" : "Connecting")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.65))
+                        Text(session.displayName)
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                    }
+
                     Button(role: .cancel) {
                         onDismiss()
                     } label: {
                         Text("Cancel")
-                            .font(.body.weight(.semibold))
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.secondary)
-                    .controlSize(.large)
+                    .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
                     .simultaneousGesture(TapGesture().onEnded {
                         onDismiss()
                     })
                 }
-                .padding(24)
+                .padding(28)
                 .frame(maxWidth: 300)
-                .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 20))
-                .shadow(radius: 12)
+                .glassCard(cornerRadius: 24, opacity: 0.15, shadowRadius: 24)
             }
         case .needPin:
             ZStack {
-                Color.black.opacity(0.6)
+                Color.black.opacity(0.65)
                     .ignoresSafeArea()
 
                 PinSheet(serverName: session.displayName,
@@ -438,52 +440,60 @@ struct SessionView: View {
             }
         case .failed(let message, let countdown):
             ZStack {
-                Color.black.opacity(session.image == nil ? 0.6 : 0.4)
+                Color.black.opacity(session.image == nil ? 0.65 : 0.45)
                     .ignoresSafeArea()
 
-                VStack(spacing: 16) {
-                    Image(systemName: "wifi.exclamationmark")
-                        .font(.system(size: 40))
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .font(.headline)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.primary)
+                VStack(spacing: 20) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.red.opacity(0.18))
+                            .frame(width: 64, height: 64)
+                        Image(systemName: "wifi.exclamationmark")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.red)
+                    }
 
-                    if let countdown = countdown {
-                        Text("Reconnecting in \(countdown)s…")
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                    VStack(spacing: 6) {
+                        Text(message)
+                            .font(.headline.weight(.semibold))
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white)
+
+                        if let countdown = countdown {
+                            Text("Reconnecting in \(countdown)s…")
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
                     }
 
                     HStack(spacing: 12) {
                         Button("Reconnect Now") {
                             session.reconnect()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .glassButton(variant: .primary, size: .regular)
+
                         Button("Close") {
                             onDismiss()
                         }
-                        .buttonStyle(.bordered)
+                        .glassButton(variant: .secondary, size: .regular)
                     }
                 }
-                .padding(24)
+                .padding(28)
                 .frame(maxWidth: 320)
-                .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 20))
-                .shadow(radius: 12)
+                .glassCard(cornerRadius: 24, opacity: 0.15, shadowRadius: 24)
             }
         case .connected:
             if !session.hasVideoFrame && session.image == nil {
-                VStack(spacing: 12) {
+                VStack(spacing: 14) {
                     ProgressView()
                         .controlSize(.large)
+                        .tint(.white)
                     Text("Loading display…")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.8))
                 }
                 .padding(24)
-                .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 20))
-                .shadow(radius: 10)
+                .glassCard(cornerRadius: 20, opacity: 0.15, shadowRadius: 16)
             }
         default:
             EmptyView()
