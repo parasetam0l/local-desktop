@@ -21,11 +21,23 @@ struct KeyBar: View {
                 keyButton("tab", .tab)
                 keyButton("enter", .returnKey)
                 Button {
-                    var mods = modifiers
-                    mods.insert(.shift)
-                    onKeyTap(.returnKey, mods)
+                    modifiers.insert(.shift)
+                    onKeyTap(.returnKey, modifiers)
                 } label: {
                     Text("⇧ enter")
+                        .font(.footnote)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.primary.opacity(0.08), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                
+                Button {
+                    var mods = modifiers
+                    mods.insert(.command)
+                    onKeyTap(.space, mods)
+                } label: {
+                    Text("⌘ space")
                         .font(.footnote)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
