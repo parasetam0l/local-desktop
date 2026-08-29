@@ -10,6 +10,7 @@ struct RecentHost: Codable, Identifiable, Equatable {
     var host: String
     var port: UInt16
     var lastUsed: Date
+    var macAddress: String?
 }
 
 struct AppSettings: Codable {
@@ -115,6 +116,9 @@ final class AppModel: ObservableObject {
     }
 
     func connectRecent(_ recent: RecentHost) {
+        if let mac = recent.macAddress {
+            WakeOnLAN.wake(macAddress: mac)
+        }
         if let live = browser.hosts.first(where: {
             (!recent.serverId.isEmpty && $0.name.contains(recent.serverId)) ||
             $0.name.hasPrefix(recent.name) || recent.name.hasPrefix($0.name)
@@ -189,7 +193,8 @@ final class AppModel: ObservableObject {
                                 serverId: connected.serverId,
                                 host: host,
                                 port: port,
-                                lastUsed: Date())
+                                lastUsed: Date(),
+                                macAddress: connected.serverMacAddress)
         recents.removeAll { $0.id == recent.id }
         recents.insert(recent, at: 0)
         if recents.count > 6 {

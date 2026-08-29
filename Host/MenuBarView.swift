@@ -158,8 +158,10 @@ struct MenuBarView: View {
         .formStyle(.grouped)
         .frame(width: 420, height: 560)
         .task {
-            server.refreshDisplays()
             server.refreshPermissions()
+            if server.screenGranted {
+                server.refreshDisplays()
+            }
         }
     }
 
