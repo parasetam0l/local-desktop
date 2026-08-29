@@ -3,6 +3,7 @@ import Network
 import AppKit
 import CoreGraphics
 import Combine
+import IOKit.pwr_mgt
 
 /// Menu-bar host: listens for client connections, brokers the PIN/trust
 /// handshake, streams screen frames, and injects client input events.
@@ -214,6 +215,11 @@ final class HostServer: ObservableObject {
         if !activeSessions.contains(where: { $0 === session }) {
             activeSessions.append(session)
         }
+
+        // Force wake the display from Dark Wake when a client connects.
+        var assertionID: IOPMAssertionID = 0
+        IOPMAssertionDeclareUserActivity("Local Desktop Client Connected" as CFString, kIOPMUserActiveLocal, &assertionID)
+
         if activeSessions.count == 1 {
             clientName = name
         } else {
