@@ -86,12 +86,7 @@ struct ConnectView: View {
             }
             .navigationTitle("Local Desktop")
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button {
-                        app.browser.restart()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showSettings = true
                     } label: {
