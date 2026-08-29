@@ -22,6 +22,7 @@ final class ClientSession: ObservableObject {
     @Published private(set) var image: UIImage?
     @Published private(set) var hasVideoFrame = false
     @Published private(set) var remoteSize: CGSize = .zero
+    @Published private(set) var targetName = ""
     @Published private(set) var serverName = ""
     private(set) var serverMacAddress: String?
     @Published private(set) var serverId = ""
@@ -32,6 +33,19 @@ final class ClientSession: ObservableObject {
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
     private(set) var framesReceived = 0
+
+    var displayName: String {
+        if !serverName.isEmpty {
+            return serverName
+        }
+        if !targetName.isEmpty {
+            return targetName
+        }
+        if !hostDescription.isEmpty && !hostDescription.contains(":") {
+            return hostDescription
+        }
+        return hostDescription.isEmpty ? "Mac" : hostDescription
+    }
 
     let deviceName: String
     var onConnected: ((ClientSession) -> Void)?
@@ -83,7 +97,7 @@ final class ClientSession: ObservableObject {
 
     // MARK: Connection lifecycle
 
-    func connect(to target: NWEndpoint, preserveImage: Bool = false) {
+    func connect(to target: NWEndpoint, fallbackName: String? = nil, preserveImage: Bool = false) {
         userInitiatedDisconnect = false
         connectionTimeoutTask?.cancel()
         stopPing()
@@ -93,6 +107,9 @@ final class ClientSession: ObservableObject {
             consecutiveFailures = 0
         }
         videoStatus = nil
+        if let fallbackName, !fallbackName.isEmpty {
+            targetName = fallbackName
+        }
         serverName = ""
         serverId = ""
         key = nil
@@ -129,7 +146,7 @@ final class ClientSession: ObservableObject {
 
     func reconnect() {
         guard let target = currentEndpoint else { return }
-        connect(to: target, preserveImage: true)
+        connect(to: target, fallbackName: targetName, preserveImage: true)
     }
 
     func disconnect() {
@@ -374,6 +391,7 @@ final class ClientSession: ObservableObject {
             _sessionKey = sessionKey
             keyLock.unlock()
             serverName = msg.serverName
+            targetName = msg.serverName
             serverId = msg.serverId
             serverMacAddress = msg.macAddress
 

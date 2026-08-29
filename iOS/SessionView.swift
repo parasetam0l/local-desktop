@@ -399,7 +399,7 @@ struct SessionView: View {
                 VStack(spacing: 16) {
                     ProgressView()
                         .controlSize(.large)
-                    Text(session.image != nil ? "Reconnecting to \(session.hostDescription)…" : "Connecting to \(session.hostDescription)…")
+                    Text(session.image != nil ? "Reconnecting to \(session.displayName)…" : "Connecting to \(session.displayName)…")
                         .font(.headline)
                         .foregroundStyle(.primary)
                         .multilineTextAlignment(.center)
@@ -427,7 +427,7 @@ struct SessionView: View {
                 Color.black.opacity(0.6)
                     .ignoresSafeArea()
 
-                PinSheet(serverName: session.serverName,
+                PinSheet(serverName: session.displayName,
                          errorText: session.pinError,
                          refreshToken: session.pinAttemptCounter,
                          onCancel: {
