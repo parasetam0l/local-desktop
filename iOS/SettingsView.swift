@@ -16,13 +16,28 @@ struct SettingsView: View {
                     Text("When enabled, the app will automatically connect to the most recently connected Mac as soon as it is detected on the network.")
                 }
 
+                Section("Video & Streaming") {
+                    Picker("Video Codec", selection: $app.settings.codecRaw) {
+                        Text("HEVC / H.265 (Recommended)").tag(RDCodec.hevc.rawValue)
+                        Text("H.264").tag(RDCodec.h264.rawValue)
+                    }
+                    .onChange(of: app.settings.codecRaw) { codecRaw in
+                        if let session = app.session {
+                            let preset = RDQualityPreset.from(app.settings.qualityRaw)
+                            let codec = RDCodec(rawValue: codecRaw) ?? .hevc
+                            session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
+                        }
+                    }
+                }
+
                 Section("Input") {
                     Toggle("Start sessions in touchpad mode", isOn: $app.settings.defaultTouchpad)
                     Toggle("Show remote Mac cursor", isOn: $app.settings.showRemoteCursor)
                         .onChange(of: app.settings.showRemoteCursor) { showCursor in
                             if let session = app.session {
                                 let preset = RDQualityPreset.from(app.settings.qualityRaw)
-                                session.setQuality(preset, showRemoteCursor: showCursor)
+                                let codec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
+                                session.setQuality(preset, showRemoteCursor: showCursor, codec: codec)
                             }
                         }
                     Picker("Pointer Speed", selection: $app.settings.pointerSpeedMultiplier) {

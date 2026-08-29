@@ -29,6 +29,8 @@ final class ClientSession: ObservableObject {
     @Published private(set) var pinError: String?
     @Published private(set) var pinAttemptCounter = 0
     @Published private(set) var videoStatus: String?
+    @Published private(set) var isHostLocked = false
+    @Published private(set) var isDisplaySleeping = false
     private(set) var framesReceived = 0
 
     let deviceName: String
@@ -37,7 +39,8 @@ final class ClientSession: ObservableObject {
     var onCursorMoved: ((CGPoint) -> Void)?
     var onSampleBuffer: ((CMSampleBuffer, Int, Int) -> Void)?
 
-    private let h264Decoder = H264Decoder()
+    private let videoDecoder = VideoDecoder()
+    private var lastKeyframeRequestAt = Date.distantPast
 
     private(set) var endpoint: NWEndpoint?
     private var actualEndpoint: NWEndpoint?
@@ -316,8 +319,8 @@ final class ClientSession: ObservableObject {
                 guard let (width, height, codec, frameData) = RDFrameCodec.unpack(plain) else { return }
 
                 switch codec {
-                case .h264:
-                    self.h264Decoder.decode(annexB: frameData) { [weak self] sampleBuffer in
+                case .h264, .hevc:
+                    self.videoDecoder.decode(annexB: frameData, codec: codec) { [weak self] sampleBuffer in
                         guard let self else { return }
                         self.onSampleBuffer?(sampleBuffer, width, height)
                         Task { @MainActor in
@@ -330,6 +333,10 @@ final class ClientSession: ObservableObject {
                             if !self.hasVideoFrame {
                                 self.hasVideoFrame = true
                             }
+                        }
+                    } onError: { [weak self] in
+                        Task { @MainActor in
+                            self?.requestKeyframe(reason: "missing_headers_or_corrupted")
                         }
                     }
                 case .jpeg:
@@ -415,6 +422,12 @@ final class ClientSession: ObservableObject {
 
         case .pong:
             lastPongAt = Date()
+
+        case .hostState:
+            guard let key, let plain = RDCrypto.open(payload, key: key),
+                  let msg = RDJSON.decode(HostStateMsg.self, from: plain) else { break }
+            isHostLocked = msg.isLocked
+            isDisplaySleeping = msg.isDisplaySleeping
 
         case .bye:
             fail("The Mac ended the session")
@@ -597,8 +610,21 @@ final class ClientSession: ObservableObject {
         }
     }
 
-    func setQuality(_ preset: RDQualityPreset, showRemoteCursor: Bool) {
-        sendJSON(.setQuality, SetQualityMsg(preset: preset.rawValue, cursor: showRemoteCursor))
+    func setQuality(_ preset: RDQualityPreset, showRemoteCursor: Bool, codec: RDCodec = .hevc) {
+        sendJSON(.setQuality, SetQualityMsg(preset: preset.rawValue, cursor: showRemoteCursor, codec: Int(codec.rawValue)))
+    }
+
+    func requestKeyframe(reason: String? = nil) {
+        guard phase == .connected else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastKeyframeRequestAt) > 0.4 else { return }
+        lastKeyframeRequestAt = now
+        sendJSON(.requestKeyframe, RequestKeyframeMsg(reason: reason))
+    }
+
+    func wakeHostDisplay() {
+        moveRel(dx: 0, dy: 0)
+        requestKeyframe(reason: "wake_display")
     }
 
     private func describe(_ endpoint: NWEndpoint) -> String {

@@ -21,6 +21,7 @@ enum RDWire: UInt8 {
 
     // Video
     case frame = 0x10
+    case requestKeyframe = 0x11
 
     // Mouse
     case mouseMoveAbs = 0x20
@@ -39,6 +40,7 @@ enum RDWire: UInt8 {
 
     // Session
     case setQuality = 0x50
+    case hostState = 0x52
     case bye = 0x60
 }
 
@@ -65,9 +67,20 @@ enum RDFrame {
 
 // MARK: - Video frame payload: [u16 w BE][u16 h BE][u8 codec][pixels]
 
-enum RDCodec: UInt8 {
+enum RDCodec: UInt8, CaseIterable, Identifiable {
     case jpeg = 0
     case h264 = 1
+    case hevc = 2
+
+    var id: UInt8 { rawValue }
+
+    var label: String {
+        switch self {
+        case .jpeg: return "JPEG"
+        case .h264: return "H.264"
+        case .hevc: return "HEVC (H.265)"
+        }
+    }
 }
 
 enum RDFrameCodec {
@@ -198,9 +211,19 @@ struct PingMsg: Codable {
     var t: Double
 }
 
+struct RequestKeyframeMsg: Codable {
+    var reason: String?
+}
+
+struct HostStateMsg: Codable {
+    var isLocked: Bool
+    var isDisplaySleeping: Bool
+}
+
 struct SetQualityMsg: Codable {
     var preset: Int
     var cursor: Bool?   // true = show real Mac cursor in stream, false/nil = hide it
+    var codec: Int?     // RDCodec rawValue (0 = jpeg, 1 = h264, 2 = hevc)
 }
 
 struct ByeMsg: Codable {

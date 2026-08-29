@@ -19,6 +19,7 @@ struct AppSettings: Codable {
     var defaultTouchpad = true
     var centerOnMouse = true
     var qualityRaw = RDQualityPreset.sharp.rawValue
+    var codecRaw = RDCodec.hevc.rawValue
     var showRemoteCursor = false
     var showScrollHelpers = true
     var pointerSpeedMultiplier: Double = 1.5
@@ -106,7 +107,8 @@ final class AppModel: ObservableObject {
             self.reconnectAttempts = 0
             self.recordRecent(connected, fallbackName: fallbackName)
             let preset = RDQualityPreset.from(self.settings.qualityRaw)
-            connected.setQuality(preset, showRemoteCursor: self.settings.showRemoteCursor)
+            let codec = RDCodec(rawValue: self.settings.codecRaw) ?? .hevc
+            connected.setQuality(preset, showRemoteCursor: self.settings.showRemoteCursor, codec: codec)
         }
         newSession.onEnded = { [weak self] ended in
             // Reconnection is now fully handled inside ClientSession's fail() state machine!
