@@ -162,47 +162,6 @@ struct SessionView: View {
                         } label: {
                             Label(touchpadMode ? "Direct Mode" : "Touchpad Mode", systemImage: touchpadMode ? "hand.tap" : "rectangle.on.rectangle")
                         }
-                        Button {
-                            app.settings.showScrollHelpers.toggle()
-                        } label: {
-                            Label(app.settings.showScrollHelpers ? "Hide Scroll Helpers" : "Show Scroll Helpers", systemImage: "arrow.up.and.down")
-                        }
-                        Menu {
-                            ForEach(RDQualityPreset.allCases) { preset in
-                                Button {
-                                    app.settings.qualityRaw = preset.rawValue
-                                    let codec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
-                                    session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
-                                } label: {
-                                    if app.settings.qualityRaw == preset.rawValue {
-                                        Label(preset.label, systemImage: "checkmark")
-                                    } else {
-                                        Text(preset.label)
-                                    }
-                                }
-                            }
-                        } label: {
-                            let currentLabel = RDQualityPreset.from(app.settings.qualityRaw).shortLabel
-                            Label("Quality: \(currentLabel)", systemImage: "sparkles")
-                        }
-                        Menu {
-                            ForEach(RDCodec.allCases.filter { $0 != .jpeg }) { codec in
-                                Button {
-                                    app.settings.codecRaw = codec.rawValue
-                                    let preset = RDQualityPreset.from(app.settings.qualityRaw)
-                                    session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
-                                } label: {
-                                    if app.settings.codecRaw == codec.rawValue {
-                                        Label(codec.label, systemImage: "checkmark")
-                                    } else {
-                                        Text(codec.label)
-                                    }
-                                }
-                            }
-                        } label: {
-                            let currentCodec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
-                            Label("Codec: \(currentCodec.label)", systemImage: "film")
-                        }
                         Menu {
                             let speeds: [(label: String, value: Double)] = [("Slow", 1.0), ("Normal", 1.5), ("Fast", 2.0)]
                             ForEach(speeds, id: \.value) { speed in
@@ -220,11 +179,79 @@ struct SessionView: View {
                             let currentSpeedLabel = app.settings.pointerSpeedMultiplier == 2.0 ? "Fast" : (app.settings.pointerSpeedMultiplier == 1.5 ? "Normal" : "Slow")
                             Label("Pointer Speed: \(currentSpeedLabel)", systemImage: "cursorarrow.motionlines")
                         }
-                        Divider()
                         Button {
-                            session.requestKeyframe(reason: "user_refresh")
+                            app.settings.showScrollHelpers.toggle()
                         } label: {
-                            Label("Refresh Video (Force Keyframe)", systemImage: "arrow.triangle.2.circlepath")
+                            Label(app.settings.showScrollHelpers ? "Hide Scroll Helpers" : "Show Scroll Helpers", systemImage: "arrow.up.and.down")
+                        }
+                        Divider()
+                        Menu {
+                            Menu {
+                                ForEach(RDQualityPreset.allCases) { preset in
+                                    Button {
+                                        app.settings.qualityRaw = preset.rawValue
+                                        let codec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
+                                        session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
+                                    } label: {
+                                        if app.settings.qualityRaw == preset.rawValue {
+                                            Label(preset.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(preset.label)
+                                        }
+                                    }
+                                }
+                            } label: {
+                                let currentLabel = RDQualityPreset.from(app.settings.qualityRaw).shortLabel
+                                Label("Preset: \(currentLabel)", systemImage: "sparkles")
+                            }
+                            Menu {
+                                ForEach(RDCodec.allCases.filter { $0 != .jpeg }) { codec in
+                                    Button {
+                                        app.settings.codecRaw = codec.rawValue
+                                        let preset = RDQualityPreset.from(app.settings.qualityRaw)
+                                        session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
+                                    } label: {
+                                        if app.settings.codecRaw == codec.rawValue {
+                                            Label(codec.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(codec.label)
+                                        }
+                                    }
+                                }
+                            } label: {
+                                let currentCodec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
+                                Label("Codec: \(currentCodec.label)", systemImage: "film")
+                            }
+                            Divider()
+                            Button {
+                                session.requestKeyframe(reason: "user_refresh")
+                            } label: {
+                                Label("Refresh Video", systemImage: "arrow.triangle.2.circlepath")
+                            }
+                        } label: {
+                            let currentLabel = RDQualityPreset.from(app.settings.qualityRaw).shortLabel
+                            Label("Display & Quality: \(currentLabel)", systemImage: "display")
+                        }
+                        if canvasController.isPiPSupported {
+                            Menu {
+                                Button {
+                                    canvasController.togglePiP()
+                                } label: {
+                                    Label(canvasController.isPiPActive ? "Exit Picture in Picture" : "Picture in Picture",
+                                          systemImage: canvasController.isPiPActive ? "pip.exit" : "pip.enter")
+                                }
+                                Button {
+                                    canvasController.isAutoPiPEnabled.toggle()
+                                } label: {
+                                    if canvasController.isAutoPiPEnabled {
+                                        Label("Auto PiP: ON", systemImage: "checkmark")
+                                    } else {
+                                        Text("Auto PiP: OFF")
+                                    }
+                                }
+                            } label: {
+                                Label("Picture in Picture", systemImage: "pip")
+                            }
                         }
                         Divider()
                         Button(role: .destructive) {
@@ -241,6 +268,11 @@ struct SessionView: View {
                             .foregroundStyle(.white)
                             .shadow(radius: 4)
                     }
+                    .simultaneousGesture(TapGesture().onEnded {
+                        if keyboardVisible {
+                            keyboardVisible = false
+                        }
+                    })
                     
                     Spacer()
                     
