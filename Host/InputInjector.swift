@@ -158,9 +158,27 @@ enum InputInjector {
     }
 
     static func key(code: CGKeyCode, down: Bool, flags: CGEventFlags) {
-        let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)
-        event?.flags = flags
-        event?.post(tap: .cghidEventTap)
+        let isModifier = (code == 56 || code == 60 || code == 55 || code == 54 || code == 58 || code == 61 || code == 59 || code == 62)
+        
+        if isModifier {
+            if let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) {
+                event.type = .flagsChanged
+                var cleanFlags = flags
+                if !down {
+                    if code == 56 || code == 60 { cleanFlags.remove(.maskShift) }
+                    if code == 55 || code == 54 { cleanFlags.remove(.maskCommand) }
+                    if code == 58 || code == 61 { cleanFlags.remove(.maskAlternate) }
+                    if code == 59 || code == 62 { cleanFlags.remove(.maskControl) }
+                }
+                event.flags = cleanFlags
+                event.post(tap: .cghidEventTap)
+            }
+        } else {
+            if let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) {
+                event.flags = flags
+                event.post(tap: .cghidEventTap)
+            }
+        }
     }
 
     static func flags(_ modifiers: RDModifiers) -> CGEventFlags {
