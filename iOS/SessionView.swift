@@ -226,11 +226,6 @@ struct SessionView: View {
                         } label: {
                             Label("Refresh Video (Force Keyframe)", systemImage: "arrow.triangle.2.circlepath")
                         }
-                        Button {
-                            session.wakeHostDisplay()
-                        } label: {
-                            Label("Wake Mac Display", systemImage: "sun.max")
-                        }
                         Divider()
                         Button(role: .destructive) {
                             onDismiss()
@@ -480,13 +475,9 @@ struct SessionView: View {
                     ProgressView()
                         .controlSize(.large)
                         .tint(.white)
-                    Text(session.isDisplaySleeping ? "Display is sleeping" : "Loading display…")
+                    Text("Loading display…")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.white.opacity(0.8))
-                    Button("Wake Mac Display") {
-                        session.wakeHostDisplay()
-                    }
-                    .glassButton(variant: .tinted(.cyan), size: .regular)
                 }
                 .padding(24)
                 .glassCard(cornerRadius: 20, opacity: 0.15, shadowRadius: 16)

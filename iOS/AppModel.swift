@@ -4,7 +4,11 @@ import UIKit
 import Combine
 
 struct RecentHost: Codable, Identifiable, Equatable {
-    var id: String { "\(serverId)#\(name)" }
+    var id: String {
+        if !serverId.isEmpty { return serverId }
+        if let mac = macAddress, !mac.isEmpty { return mac }
+        return name.trimmingCharacters(in: .whitespaces).lowercased()
+    }
     var name: String
     var serverId: String
     var host: String
@@ -44,7 +48,7 @@ final class AppModel: ObservableObject {
     init() {
         if let data = UserDefaults.standard.data(forKey: "rd.recents"),
            let list = try? JSONDecoder().decode([RecentHost].self, from: data) {
-            recents = list
+            recents = AppModel.deduplicateRecents(list)
         }
         if let data = UserDefaults.standard.data(forKey: "rd.settings"),
            let saved = try? JSONDecoder().decode(AppSettings.self, from: data) {
@@ -52,6 +56,7 @@ final class AppModel: ObservableObject {
         } else {
             settings = AppSettings()
         }
+        persistRecents()
 
         browser.objectWillChange
             .sink { [weak self] _ in
@@ -122,7 +127,8 @@ final class AppModel: ObservableObject {
             WakeOnLAN.wake(macAddress: mac)
         }
         if let live = browser.hosts.first(where: {
-            (!recent.serverId.isEmpty && $0.name.contains(recent.serverId)) ||
+            (!recent.serverId.isEmpty && $0.serverId == recent.serverId) ||
+            (!recent.serverId.isEmpty && $0.name.contains(String(recent.serverId.prefix(4)))) ||
             $0.name.hasPrefix(recent.name) || recent.name.hasPrefix($0.name)
         }) {
             connect(endpoint: live.endpoint, fallbackName: live.name)
@@ -173,7 +179,11 @@ final class AppModel: ObservableObject {
     private func hostsChanged(_ hosts: [DiscoveredHost]) {
         guard settings.autoConnect, !didAutoConnect, session == nil,
               let target = recents.first, !target.name.isEmpty else { return }
-        if let match = hosts.first(where: { $0.name.hasPrefix(target.name) || target.name.hasPrefix($0.name) }) {
+        if let match = hosts.first(where: {
+            (!target.serverId.isEmpty && $0.serverId == target.serverId) ||
+            (!target.serverId.isEmpty && $0.name.contains(String(target.serverId.prefix(4)))) ||
+            $0.name.hasPrefix(target.name) || target.name.hasPrefix($0.name)
+        }) {
             didAutoConnect = true
             connect(endpoint: match.endpoint, fallbackName: target.name)
         }
@@ -195,12 +205,39 @@ final class AppModel: ObservableObject {
                                 port: port,
                                 lastUsed: Date(),
                                 macAddress: connected.serverMacAddress)
-        recents.removeAll { $0.id == recent.id }
+        let cleanName = recent.name.trimmingCharacters(in: .whitespaces).lowercased()
+        recents.removeAll { existing in
+            existing.id == recent.id ||
+            (!recent.serverId.isEmpty && existing.serverId == recent.serverId) ||
+            (existing.macAddress != nil && recent.macAddress != nil && existing.macAddress == recent.macAddress) ||
+            existing.name.trimmingCharacters(in: .whitespaces).lowercased() == cleanName
+        }
         recents.insert(recent, at: 0)
+        recents = AppModel.deduplicateRecents(recents)
         if recents.count > 6 {
             recents = Array(recents.prefix(6))
         }
         persistRecents()
+    }
+
+    static func deduplicateRecents(_ list: [RecentHost]) -> [RecentHost] {
+        var seenNames = Set<String>()
+        var seenServerIds = Set<String>()
+        var seenMacs = Set<String>()
+        var unique: [RecentHost] = []
+
+        for item in list {
+            let cleanName = item.name.trimmingCharacters(in: .whitespaces).lowercased()
+            if !cleanName.isEmpty && seenNames.contains(cleanName) { continue }
+            if !item.serverId.isEmpty && seenServerIds.contains(item.serverId) { continue }
+            if let mac = item.macAddress, !mac.isEmpty && seenMacs.contains(mac) { continue }
+
+            if !cleanName.isEmpty { seenNames.insert(cleanName) }
+            if !item.serverId.isEmpty { seenServerIds.insert(item.serverId) }
+            if let mac = item.macAddress, !mac.isEmpty { seenMacs.insert(mac) }
+            unique.append(item)
+        }
+        return unique
     }
 
     func persistRecents() {
