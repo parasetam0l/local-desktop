@@ -41,6 +41,7 @@ enum RDWire: UInt8 {
     // Session
     case setQuality = 0x50
     case hostState = 0x52
+    case wakeDisplay = 0x53
     case bye = 0x60
 }
 
@@ -247,6 +248,7 @@ enum RDKey: UInt16 {
     case down = 125
     case left = 123
     case right = 124
+    case key5 = 23
     case f1 = 122
     case f2 = 120
     case f3 = 99

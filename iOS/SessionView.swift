@@ -95,9 +95,15 @@ struct SessionView: View {
                         }
                     },
                     onLeftClick: { point in
+                        if session.isDisplaySleeping {
+                            session.wakeHostDisplay()
+                        }
                         session.click(button: 0, atRemote: point ?? (virtualCursor != .zero ? virtualCursor : nil))
                     },
                     onRightClick: { point in
+                        if session.isDisplaySleeping {
+                            session.wakeHostDisplay()
+                        }
                         session.click(button: 1, atRemote: point ?? (virtualCursor != .zero ? virtualCursor : nil))
                     },
                     onScroll: { dx, dy in
@@ -354,12 +360,18 @@ struct SessionView: View {
 
     private var directTapHandler: ((CGPoint) -> Void)? {
         session.phase == .connected && !touchpadMode ? { point in
+            if session.isDisplaySleeping {
+                session.wakeHostDisplay()
+            }
             session.click(button: 0, atRemote: point)
         } : nil
     }
 
     private var directRightTapHandler: ((CGPoint) -> Void)? {
         session.phase == .connected && !touchpadMode ? { point in
+            if session.isDisplaySleeping {
+                session.wakeHostDisplay()
+            }
             session.click(button: 1, atRemote: point)
         } : nil
     }
@@ -369,6 +381,9 @@ struct SessionView: View {
     }
 
     private func handleDragEvent(_ event: DragEvent) {
+        if session.isDisplaySleeping {
+            session.wakeHostDisplay()
+        }
         switch event {
         case .began(let point):
             session.moveAbs(Double(point.x), Double(point.y))
@@ -488,9 +503,13 @@ struct SessionView: View {
                     ProgressView()
                         .controlSize(.large)
                         .tint(.white)
-                    Text("Loading display…")
+                    Text(session.isDisplaySleeping ? "Display is sleeping" : "Loading display…")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.white.opacity(0.8))
+                    Button("Wake Mac Display") {
+                        session.wakeHostDisplay()
+                    }
+                    .glassButton(variant: .tinted(.cyan), size: .regular)
                 }
                 .padding(24)
                 .glassCard(cornerRadius: 20, opacity: 0.15, shadowRadius: 16)

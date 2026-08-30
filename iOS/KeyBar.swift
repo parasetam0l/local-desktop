@@ -45,6 +45,20 @@ struct KeyBar: View {
                         .background(Color.primary.opacity(0.08), in: Capsule())
                 }
                 .buttonStyle(.plain)
+                
+                Button {
+                    var mods = modifiers
+                    mods.insert(.command)
+                    mods.insert(.shift)
+                    onKeyTap(.key5, mods)
+                } label: {
+                    Text("⌘ ⇧ 5")
+                        .font(.footnote)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.primary.opacity(0.08), in: Capsule())
+                }
+                .buttonStyle(.plain)
                 keyButton("⌫", .delete)
                 keyButton("←", .left)
                 keyButton("↑", .up)

@@ -641,7 +641,12 @@ final class ClientSession: ObservableObject {
     }
 
     func wakeHostDisplay() {
-        moveRel(dx: 0, dy: 0)
+        guard phase == .connected else { return }
+        send(.wakeDisplay, Data(), encrypted: true)
+        moveRel(dx: 1, dy: 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.moveRel(dx: -1, dy: -1)
+        }
         requestKeyframe(reason: "wake_display")
     }
 
