@@ -216,6 +216,11 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var frameSize: CGSize = .zero
     private(set) var lastKeyframe: (data: Data, width: Int, height: Int, codec: RDCodec)?
     private(set) var framesEmitted = 0
+    private(set) var lastFrameTime: Date = .distantPast
+
+    var timeSinceLastFrame: TimeInterval {
+        Date().timeIntervalSince(lastFrameTime)
+    }
 
     private var stream: SCStream?
     private var preset: RDQualityPreset = .high
@@ -258,9 +263,9 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    func start(displayID: CGDirectDisplayID?, preset newPreset: RDQualityPreset, codec: RDCodec = .hevc) async throws {
+    func start(displayID: CGDirectDisplayID?, preset newPreset: RDQualityPreset, codec: RDCodec = .hevc, forceRestart: Bool = false) async throws {
         let target = displayID ?? CGMainDisplayID()
-        if runningDisplay == target, stream != nil {
+        if !forceRestart, runningDisplay == target, stream != nil {
             if newPreset != preset || codec != currentCodec {
                 await updateConfiguration(preset: newPreset, codec: codec)
             }
@@ -293,6 +298,15 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = newStream
         runningDisplay = display.displayID
         currentDisplay = display.displayID
+        forceNextKeyframe = true
+    }
+
+    func restart(displayID: CGDirectDisplayID? = nil, preset newPreset: RDQualityPreset? = nil, codec: RDCodec? = nil) async throws {
+        let targetID = displayID ?? runningDisplay ?? CGMainDisplayID()
+        let targetPreset = newPreset ?? preset
+        let targetCodec = codec ?? currentCodec
+        try await start(displayID: targetID, preset: targetPreset, codec: targetCodec, forceRestart: true)
+        requestKeyframe()
     }
 
     func updatePreset(_ newPreset: RDQualityPreset) async {
@@ -368,6 +382,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastFrameTime = Date()
         if let isReady, !isReady() { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)

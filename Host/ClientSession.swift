@@ -257,9 +257,17 @@ final class ClientSession {
             guard phase == .active, let msg = RDJSON.decode(SetQualityMsg.self, from: payload) else { break }
             server?.applyPresetFromClient(msg.preset, showRemoteCursor: msg.cursor, codec: msg.codec)
 
+        case .wakeDisplay:
+            guard phase == .active else { break }
+            server?.handleWakeDisplayRequest()
+
         case .requestKeyframe:
             guard phase == .active else { break }
+            let msg = RDJSON.decode(RequestKeyframeMsg.self, from: payload)
             ScreenStreamer.shared.requestKeyframe()
+            if msg?.reason == "user_refresh" || ScreenStreamer.shared.timeSinceLastFrame > 1.5 || !ScreenStreamer.shared.isRunning {
+                server?.handleRefreshVideoRequest()
+            }
 
         case .ping:
             guard phase == .active, let msg = RDJSON.decode(PingMsg.self, from: payload) else { break }

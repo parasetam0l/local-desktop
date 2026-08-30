@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import IOKit.pwr_mgt
 
 /// Posts mouse, scroll, and keyboard events into the system event stream.
 enum InputInjector {
@@ -47,10 +48,49 @@ enum InputInjector {
         moveAbs(base.x + dx, base.y + dy)
     }
 
-    /// Awakens the display from dark wake / power saving state by nudging the cursor
+    /// Awakens the display from dark wake / power saving state using a multi-vector wake sequence:
+    /// 1. IOKit local user active power assertion
+    /// 2. Asynchronous caffeinate -u invocation
+    /// 3. Non-zero hardware cursor delta nudge
+    /// 4. Non-destructive modifier key pulse (Shift key tap)
     static func wakeDisplay() {
+        // 1. Declare User Activity to IOKit Power Management
+        var assertionID: IOPMAssertionID = 0
+        let ret = IOPMAssertionDeclareUserActivity("Local Desktop Wake Display" as CFString, kIOPMUserActiveLocal, &assertionID)
+        if ret == kIOReturnSuccess && assertionID != 0 {
+            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 1.5) {
+                IOPMAssertionRelease(assertionID)
+            }
+        }
+
+        // 2. Invoke caffeinate -u -t 3 asynchronously to trigger system display wake via powerd
+        DispatchQueue.global(qos: .userInteractive).async {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+            proc.arguments = ["-u", "-t", "3"]
+            try? proc.run()
+        }
+
+        // 3. Move cursor by an actual non-zero delta (+2, +2 then back) so WindowServer processes motion
         let base = currentPositionTopLeft
-        moveAbs(base.x, base.y)
+        let bounds = CGDisplayBounds(CGMainDisplayID())
+        let offsetX: Double = (base.x + 2 > bounds.maxX) ? -2 : 2
+        let offsetY: Double = (base.y + 2 > bounds.maxY) ? -2 : 2
+        moveAbs(base.x + offsetX, base.y + offsetY)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            moveAbs(base.x, base.y)
+        }
+
+        // 4. Inject a quick non-destructive modifier pulse (Shift key down and up: keyCode 0x38)
+        let shiftKeyCode: CGKeyCode = 0x38
+        if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: shiftKeyCode, keyDown: true) {
+            eventDown.post(tap: .cghidEventTap)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            if let eventUp = CGEvent(keyboardEventSource: source, virtualKey: shiftKeyCode, keyDown: false) {
+                eventUp.post(tap: .cghidEventTap)
+            }
+        }
     }
 
     private static var lastClickTime: TimeInterval = 0

@@ -117,8 +117,12 @@ final class HostServer: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.isDisplaySleeping = false
-                self?.broadcastHostState()
+                guard let self else { return }
+                self.isDisplaySleeping = false
+                self.broadcastHostState()
+                if !self.activeSessions.isEmpty {
+                    try? await ScreenStreamer.shared.restart(displayID: self.selectedDisplayID, preset: self.preset, codec: ScreenStreamer.shared.currentCodec)
+                }
             }
         }
 
@@ -265,10 +269,9 @@ final class HostServer: ObservableObject {
         }
 
         // Force wake the display from Dark Wake when a client connects.
-        var assertionID: IOPMAssertionID = 0
-        IOPMAssertionDeclareUserActivity("Local Desktop Client Connected" as CFString, kIOPMUserActiveLocal, &assertionID)
-        InputInjector.wakeDisplay()
         acquirePowerAssertions()
+        InputInjector.wakeDisplay()
+        isDisplaySleeping = false
 
         // Inform client of current screen lock & display sleep state
         session.sendHostState(HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping))
@@ -283,10 +286,26 @@ final class HostServer: ObservableObject {
         }
         Task {
             do {
-                try await ScreenStreamer.shared.start(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
+                try await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
             } catch {
                 lastError = "Screen capture: \(error.localizedDescription)"
             }
+        }
+    }
+
+    func handleWakeDisplayRequest() {
+        acquirePowerAssertions()
+        InputInjector.wakeDisplay()
+        isDisplaySleeping = false
+        broadcastHostState()
+        Task {
+            try? await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
+        }
+    }
+
+    func handleRefreshVideoRequest() {
+        Task {
+            try? await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
         }
     }
 
