@@ -182,7 +182,7 @@ struct SessionView: View {
                                 }
                             }
                         } label: {
-                            let currentLabel = RDQualityPreset.from(app.settings.qualityRaw).label
+                            let currentLabel = RDQualityPreset.from(app.settings.qualityRaw).shortLabel
                             Label("Quality: \(currentLabel)", systemImage: "sparkles")
                         }
                         Menu {
@@ -265,47 +265,24 @@ struct SessionView: View {
                 .padding(.bottom, 24)
                 .frame(maxHeight: .infinity, alignment: .bottom)
 
-                // Status banner when Mac is locked or display is sleeping
-                if session.phase == .connected && (session.isHostLocked || session.isDisplaySleeping) {
-                    VStack(spacing: 8) {
-                        if session.isHostLocked {
-                            HStack(spacing: 10) {
-                                Image(systemName: "lock.fill")
-                                    .foregroundStyle(.yellow)
-                                Text("Mac is Locked")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.white)
-                                Button("Enter Password") {
-                                    keyboardVisible = true
-                                }
-                                .glassButton(variant: .tinted(.blue), size: .mini)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
-                            .shadow(radius: 6)
+                // Status banner when Mac is locked
+                if session.phase == .connected && session.isHostLocked {
+                    HStack(spacing: 10) {
+                        Image(systemName: "lock.fill")
+                            .foregroundStyle(.yellow)
+                        Text("Mac is Locked")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Button("Enter Password") {
+                            keyboardVisible = true
                         }
-
-                        if session.isDisplaySleeping {
-                            HStack(spacing: 10) {
-                                Image(systemName: "moon.fill")
-                                    .foregroundStyle(.cyan)
-                                Text("Display Asleep")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.white)
-                                Button("Wake Display") {
-                                    session.wakeHostDisplay()
-                                }
-                                .glassButton(variant: .tinted(.cyan), size: .mini)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
-                            .shadow(radius: 6)
-                        }
+                        .glassButton(variant: .tinted(.blue), size: .mini)
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                    .shadow(radius: 6)
                     .padding(.top, 16)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .transition(.move(edge: .top).combined(with: .opacity))

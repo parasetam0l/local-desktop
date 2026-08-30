@@ -33,6 +33,8 @@ final class ClientSession {
 
     private(set) var framesSent = 0
     private(set) var framesDropped = 0
+    private var consecutiveDrops = 0
+    private var currentBitrateFactor: Double = 1.0
     private var lastActivityAt = Date()
     private var watchdogTimer: Timer?
 
@@ -127,7 +129,10 @@ final class ClientSession {
 
     func sendVideoFrame(_ data: Data, width: Int, height: Int, codec: RDCodec) {
         guard phase == .active else { return }
-        guard canSendFrame else { framesDropped += 1; return }
+        guard canSendFrame else {
+            framesDropped += 1
+            return
+        }
         framesSent += 1
         send(.frame, RDFrameCodec.pack(width: width, height: height, codec: codec, data: data), encrypted: true)
     }
@@ -135,7 +140,10 @@ final class ClientSession {
     func sendFrame(_ jpeg: Data, width: Int, height: Int) {
         // Drop frames when the network can't keep up instead of queueing them.
         guard phase == .active else { return }
-        guard canSendFrame else { framesDropped += 1; return }
+        guard canSendFrame else {
+            framesDropped += 1
+            return
+        }
         framesSent += 1
         send(.frame, RDFrameCodec.pack(width: width, height: height, codec: .jpeg, data: jpeg), encrypted: true)
     }
@@ -273,6 +281,10 @@ final class ClientSession {
             guard phase == .active, let msg = RDJSON.decode(PingMsg.self, from: payload) else { break }
             send(.pong, RDJSON.encode(PingMsg(t: msg.t)), encrypted: true)
 
+        case .networkStats:
+            guard phase == .active, let msg = RDJSON.decode(NetworkStatsMsg.self, from: payload) else { break }
+            handleNetworkStats(msg)
+
         case .bye:
             finish(reason: "client disconnected")
 
@@ -321,6 +333,21 @@ final class ClientSession {
         if phase != .closed {
             receiveLoop()
         }
+    }
+
+    private func handleNetworkStats(_ stats: NetworkStatsMsg) {
+        let currentPreset = server?.preset ?? .balanced
+        let baseBitrate = currentPreset.targetBitrate
+
+        if stats.rttMs > 45.0 || stats.droppedFrames > 0 {
+            // Wi-Fi congestion or jitter detected - scale down bitrate by 20%
+            currentBitrateFactor = max(0.35, currentBitrateFactor * 0.8)
+        } else if stats.rttMs < 18.0 && stats.droppedFrames == 0 {
+            // Network is clear and fast - gradually scale up bitrate for higher fidelity
+            currentBitrateFactor = min(1.25, currentBitrateFactor + 0.05)
+        }
+        let dynamicBitrate = Int(Double(baseBitrate) * currentBitrateFactor)
+        ScreenStreamer.shared.setDynamicBitrate(dynamicBitrate)
     }
 
     private func finishAuth(trustRequested: Bool, alreadyTrusted: Bool) {
