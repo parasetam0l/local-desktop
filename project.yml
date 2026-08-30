@@ -14,6 +14,9 @@ targets:
   LocalDesktopHost:
     type: application
     platform: macOS
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: localdesktop.host
+      CODE_SIGN_IDENTITY: "Apple Development"
     sources:
       - Host
       - Shared
@@ -47,6 +50,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UIRequiresFullScreen: true
+        CADisableMinimumFrameDurationOnPhone: true
         NSLocalNetworkUsageDescription: "Local Desktop scans your local network for Macs to connect to."
         NSBonjourServices: ["_rd-desktop._tcp"]
 schemes:

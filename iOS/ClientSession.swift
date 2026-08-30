@@ -66,6 +66,9 @@ final class ClientSession: ObservableObject {
     private let networkQueue = DispatchQueue(label: "rd.client.network", qos: .userInteractive)
     private let decodeQueue = DispatchQueue(label: "rd.client.decode", qos: .userInteractive)
     private var receiveBuffer = Data()
+    @Published private(set) var currentRTT: Double = 0.0
+    private var lastDecodeTime: Double = 0.0
+    private var lastStatsReport = Date()
     private var pingTimer: Timer?
     private var connectionTimeoutTask: Task<Void, Never>?
     private var lastPongAt = Date()
@@ -335,14 +338,17 @@ final class ClientSession: ObservableObject {
                 guard let plain = RDCrypto.open(payload, key: sessionKey) else { return }
                 guard let (width, height, codec, frameData) = RDFrameCodec.unpack(plain) else { return }
 
+                let decodeStart = CACurrentMediaTime()
                 switch codec {
                 case .h264, .hevc:
                     self.videoDecoder.decode(annexB: frameData, codec: codec) { [weak self] sampleBuffer in
                         guard let self else { return }
+                        let decodeDuration = (CACurrentMediaTime() - decodeStart) * 1000.0
                         self.onSampleBuffer?(sampleBuffer, width, height)
                         Task { @MainActor in
                             guard self.phase == .connected else { return }
                             self.framesReceived += 1
+                            self.lastDecodeTime = decodeDuration
                             self.videoStatus = nil
                             if self.remoteSize.width != CGFloat(width) || self.remoteSize.height != CGFloat(height) {
                                 self.remoteSize = CGSize(width: width, height: height)
@@ -426,6 +432,7 @@ final class ClientSession: ObservableObject {
             if let token = msg.token, !serverId.isEmpty {
                 TrustStore.setToken(token, serverId: serverId)
             }
+            wakeHostDisplay()
             onConnected?(self)
 
         case .authFailed:
@@ -440,12 +447,22 @@ final class ClientSession: ObservableObject {
 
         case .pong:
             lastPongAt = Date()
+            let plain = key.flatMap { RDCrypto.open(payload, key: $0) } ?? payload
+            if let msg = RDJSON.decode(PingMsg.self, from: plain) {
+                let rtt = max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)
+                currentRTT = rtt
+                reportNetworkStatsIfNeeded()
+            }
 
         case .hostState:
             guard let key, let plain = RDCrypto.open(payload, key: key),
                   let msg = RDJSON.decode(HostStateMsg.self, from: plain) else { break }
             isHostLocked = msg.isLocked
+            let wasSleeping = isDisplaySleeping
             isDisplaySleeping = msg.isDisplaySleeping
+            if msg.isDisplaySleeping && !wasSleeping {
+                wakeHostDisplay()
+            }
 
         case .bye:
             fail("The Mac ended the session")
@@ -455,20 +472,32 @@ final class ClientSession: ObservableObject {
         }
     }
 
-    // MARK: Keepalive
+    // MARK: Keepalive & Telemetry
 
     private func startPing() {
         lastPongAt = Date()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.phase == .connected else { return }
-                if Date().timeIntervalSince(self.lastPongAt) > 16 {
+                if Date().timeIntervalSince(self.lastPongAt) > 10.0 {
                     self.fail("Lost connection to the Mac")
                     return
                 }
                 self.send(.ping, RDJSON.encode(PingMsg(t: Date().timeIntervalSince1970)), encrypted: true)
             }
         }
+    }
+
+    private func reportNetworkStatsIfNeeded() {
+        guard phase == .connected, Date().timeIntervalSince(lastStatsReport) >= 1.0 else { return }
+        lastStatsReport = Date()
+        let stats = NetworkStatsMsg(
+            rttMs: currentRTT,
+            decodeMs: lastDecodeTime,
+            fps: 60.0,
+            droppedFrames: 0
+        )
+        send(.networkStats, RDJSON.encode(stats), encrypted: true)
     }
 
     private func stopPing() {

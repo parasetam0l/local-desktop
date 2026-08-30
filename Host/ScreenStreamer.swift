@@ -52,24 +52,33 @@ final class HardwareVideoEncoder {
         self.session = session
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         if codec == .hevc {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
         } else {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
         }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFTypeRef)
         
         let bytesPerSecond = bitrate / 8
-        let limits: [NSNumber] = [NSNumber(value: bytesPerSecond * 2), NSNumber(value: 1)]
+        let limits: [NSNumber] = [NSNumber(value: Int(Double(bytesPerSecond) * 1.5)), NSNumber(value: 1)]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: 1.0 as CFTypeRef)
         
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (fps * 2) as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFTypeRef)
         VTCompressionSessionPrepareToEncodeFrames(session)
+    }
+
+    func setDynamicBitrate(_ newBitrate: Int) {
+        guard let session, newBitrate > 0 else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: newBitrate as CFTypeRef)
+        let bytesPerSecond = newBitrate / 8
+        let limits: [NSNumber] = [NSNumber(value: Int(Double(bytesPerSecond) * 1.5)), NSNumber(value: 1)]
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
     }
 
     func encode(pixelBuffer: CVPixelBuffer, pts: CMTime, forceKeyframe: Bool = false) {
@@ -332,6 +341,10 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    func setDynamicBitrate(_ newBitrate: Int) {
+        encoder.setDynamicBitrate(newBitrate)
+    }
+
     func stop() {
         stream?.stopCapture { _ in }
         stream = nil
@@ -345,7 +358,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private func makeConfiguration(for display: SCDisplay) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(preset.fps))
-        config.queueDepth = 5
+        config.queueDepth = 3
         config.showsCursor = showRemoteCursor
         // Native NV12 YUV 4:2:0 bi-planar video range for zero-copy hardware encoding
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange

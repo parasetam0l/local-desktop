@@ -321,7 +321,10 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         guard !cursorIndicator.isHidden, currentContentSize.width > 0, currentContentSize.height > 0 else { return }
         let targetView: UIView = videoView.isHidden ? imageView : videoView
         let pointInScroll = targetView.convert(currentCursorPosition, to: self)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         cursorIndicator.frame.origin = CGPoint(x: pointInScroll.x - 10, y: pointInScroll.y - 10)
+        CATransaction.commit()
     }
 
     // MARK: UIScrollViewDelegate

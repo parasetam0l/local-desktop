@@ -34,9 +34,10 @@ enum RDWire: UInt8 {
     case keyEvent = 0x30
     case textEvent = 0x31
 
-    // Keepalive
+    // Keepalive & Telemetry
     case ping = 0x40
     case pong = 0x41
+    case networkStats = 0x42
 
     // Session
     case setQuality = 0x50
@@ -212,6 +213,13 @@ struct PingMsg: Codable {
     var t: Double
 }
 
+struct NetworkStatsMsg: Codable {
+    var rttMs: Double
+    var decodeMs: Double
+    var fps: Double
+    var droppedFrames: Int
+}
+
 struct RequestKeyframeMsg: Codable {
     var reason: String?
 }
@@ -283,6 +291,15 @@ enum RDQualityPreset: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
+        case .low: return "Low (30 FPS)"
+        case .balanced: return "Balanced (60 FPS)"
+        case .high: return "High (60 FPS)"
+        case .sharp: return "Sharp (Native 60 FPS)"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
         case .low: return "Low"
         case .balanced: return "Balanced"
         case .high: return "High"
@@ -312,22 +329,20 @@ enum RDQualityPreset: Int, CaseIterable, Identifiable {
     var fps: Int {
         switch self {
         case .low: return 30
-        case .balanced: return 60
-        case .high: return 60
-        case .sharp: return 60
+        case .balanced, .high, .sharp: return 60
         }
     }
 
     var targetBitrate: Int {
         switch self {
         case .low: return 8_000_000
-        case .balanced: return 24_000_000
-        case .high: return 48_000_000
-        case .sharp: return 120_000_000
+        case .balanced: return 20_000_000
+        case .high: return 36_000_000
+        case .sharp: return 50_000_000
         }
     }
 
     static func from(_ raw: Int) -> RDQualityPreset {
-        RDQualityPreset(rawValue: raw) ?? .balanced
+        RDQualityPreset(rawValue: raw) ?? .high
     }
 }

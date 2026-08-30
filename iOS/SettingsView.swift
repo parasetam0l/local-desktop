@@ -17,6 +17,19 @@ struct SettingsView: View {
                 }
 
                 Section("Video & Streaming") {
+                    Picker("Default Quality", selection: $app.settings.qualityRaw) {
+                        ForEach(RDQualityPreset.allCases) { preset in
+                            Text(preset.label).tag(preset.rawValue)
+                        }
+                    }
+                    .onChange(of: app.settings.qualityRaw) { qualityRaw in
+                        if let session = app.session {
+                            let preset = RDQualityPreset.from(qualityRaw)
+                            let codec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
+                            session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
+                        }
+                    }
+
                     Picker("Video Codec", selection: $app.settings.codecRaw) {
                         Text("HEVC / H.265 (Recommended)").tag(RDCodec.hevc.rawValue)
                         Text("H.264").tag(RDCodec.h264.rawValue)
