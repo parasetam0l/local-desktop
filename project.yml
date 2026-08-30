@@ -51,6 +51,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIRequiresFullScreen: true
         CADisableMinimumFrameDurationOnPhone: true
+        UIBackgroundModes:
+          - audio
         NSLocalNetworkUsageDescription: "Local Desktop scans your local network for Macs to connect to."
         NSBonjourServices: ["_rd-desktop._tcp"]
 schemes:

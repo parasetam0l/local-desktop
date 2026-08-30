@@ -1,6 +1,6 @@
 import SwiftUI
 import UIKit
-import AVFoundation
+import AVKit
 
 enum DragEvent {
     case began(CGPoint) // remote coordinates
@@ -9,9 +9,57 @@ enum DragEvent {
 }
 
 /// Shared handle so the touchpad overlay and session can map screen points into remote
-/// coordinates and push hardware video sample buffers.
+/// coordinates, control Picture-in-Picture, and push hardware video sample buffers.
 final class CanvasController: ObservableObject {
     weak var canvas: CanvasScrollView?
+
+    @Published var isPiPActive = false
+    @Published var isPiPSupported = AVPictureInPictureController.isPictureInPictureSupported()
+    @Published var isAutoPiPEnabled = false {
+        didSet {
+            canvas?.setAutoPiP(isAutoPiPEnabled)
+        }
+    }
+
+    func startPiP() {
+        canvas?.startPiP()
+    }
+
+    func stopPiP() {
+        canvas?.stopPiP()
+    }
+
+    func togglePiP() {
+        if isPiPActive {
+            stopPiP()
+        } else {
+            startPiP()
+        }
+    }
+}
+
+// MARK: - Picture-in-Picture Playback Delegate
+
+final class PiPPlaybackDelegate: NSObject, AVPictureInPictureSampleBufferPlaybackDelegate {
+    func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
+        // Continuous live desktop stream
+    }
+
+    func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
+        // Positive indefinite time range for live streaming
+        return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+    }
+
+    func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
+        return false
+    }
+
+    func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
+    }
+
+    func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion: @escaping () -> Void) {
+        completion()
+    }
 }
 
 // MARK: - Video Layer View (AVSampleBufferDisplayLayer)
@@ -61,6 +109,10 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
     var directTap: ((CGPoint) -> Void)?
     var directRightTap: ((CGPoint) -> Void)?
     var dragEvent: ((DragEvent) -> Void)?
+
+    weak var controller: CanvasController?
+    private var pipController: AVPictureInPictureController?
+    private var pipPlaybackDelegate: PiPPlaybackDelegate?
 
     let containerView = UIView()
     let videoView = VideoLayerView()
@@ -455,6 +507,103 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
             break
         }
     }
+
+    // MARK: - Picture-in-Picture
+
+    private static func setupAudioSessionForPiP() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+            try session.setActive(true)
+        } catch {
+            print("Audio session configuration error for PiP: \(error)")
+        }
+    }
+
+    func setupPiP() {
+        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        guard pipController == nil else { return }
+        CanvasScrollView.setupAudioSessionForPiP()
+        let playbackDelegate = PiPPlaybackDelegate()
+        self.pipPlaybackDelegate = playbackDelegate
+        let source = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: videoView.displayLayer, playbackDelegate: playbackDelegate)
+        let pip = AVPictureInPictureController(contentSource: source)
+        pip.delegate = self
+        pip.canStartPictureInPictureAutomaticallyFromInline = false
+        self.pipController = pip
+    }
+
+    func setAutoPiP(_ enabled: Bool) {
+        if enabled {
+            setupPiP()
+            pipController?.canStartPictureInPictureAutomaticallyFromInline = true
+        } else {
+            pipController?.canStartPictureInPictureAutomaticallyFromInline = false
+            if !((pipController?.isPictureInPictureActive) ?? false) {
+                pipController = nil
+                pipPlaybackDelegate = nil
+            }
+        }
+    }
+
+    func startPiP() {
+        setupPiP()
+        guard let pip = pipController else { return }
+        if pip.isPictureInPicturePossible {
+            pip.startPictureInPicture()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                pip.startPictureInPicture()
+            }
+        }
+    }
+
+    func stopPiP() {
+        pipController?.stopPictureInPicture()
+    }
+}
+
+// MARK: - AVPictureInPictureControllerDelegate
+
+extension CanvasScrollView: AVPictureInPictureControllerDelegate {
+    func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor in
+            self.controller?.isPiPActive = true
+        }
+    }
+
+    func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor in
+            self.controller?.isPiPActive = true
+        }
+    }
+
+    func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor in
+            self.controller?.isPiPActive = false
+            if !(self.controller?.isAutoPiPEnabled ?? false) {
+                self.pipController = nil
+                self.pipPlaybackDelegate = nil
+            }
+        }
+    }
+
+    func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+        Task { @MainActor in
+            self.controller?.isPiPActive = false
+            if !(self.controller?.isAutoPiPEnabled ?? false) {
+                self.pipController = nil
+                self.pipPlaybackDelegate = nil
+            }
+        }
+    }
+
+    func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        completionHandler(true)
+    }
 }
 
 struct ZoomableCanvas: UIViewRepresentable {
@@ -474,7 +623,9 @@ struct ZoomableCanvas: UIViewRepresentable {
 
     func makeUIView(context: Context) -> CanvasScrollView {
         let view = CanvasScrollView()
+        view.controller = controller
         controller.canvas = view
+        view.setAutoPiP(controller.isAutoPiPEnabled)
         if let image {
             view.setNewImage(image)
             context.coordinator.lastImage = image
@@ -483,6 +634,7 @@ struct ZoomableCanvas: UIViewRepresentable {
     }
 
     func updateUIView(_ view: CanvasScrollView, context: Context) {
+        view.controller = controller
         controller.canvas = view
         view.directTap = onTap
         view.directRightTap = onRightTap
