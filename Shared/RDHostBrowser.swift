@@ -6,6 +6,7 @@ struct DiscoveredHost: Identifiable, Equatable {
     /// Bonjour instance name, e.g. "MacBook Pro [A1B2]".
     let id: String
     let name: String
+    let serverId: String?
     let endpoint: NWEndpoint
 }
 
@@ -26,6 +27,7 @@ final class HostBrowser: ObservableObject {
                                               port: NWEndpoint.Port(rawValue: 52341)!)
         let simHost = DiscoveredHost(id: "local_mac_sim",
                                      name: "Mac (Local Simulator)",
+                                     serverId: "local_mac_sim",
                                      endpoint: simEndpoint)
         hosts = [simHost]
         #endif
@@ -36,14 +38,16 @@ final class HostBrowser: ObservableObject {
             let items = results.compactMap { result -> DiscoveredHost? in
                 guard case let .service(name, _, _, _) = result.endpoint else { return nil }
                 var activeEndpoint = result.endpoint
+                var serverId: String?
                 if case let .bonjour(record) = result.metadata {
+                    serverId = record["sid"]
                     if let ip = record["ip"], !ip.isEmpty,
                        let portStr = record["port"], let port = UInt16(portStr),
                        let portEndpoint = NWEndpoint.Port(rawValue: port) {
                         activeEndpoint = .hostPort(host: NWEndpoint.Host(ip), port: portEndpoint)
                     }
                 }
-                return DiscoveredHost(id: name, name: name, endpoint: activeEndpoint)
+                return DiscoveredHost(id: name, name: name, serverId: serverId, endpoint: activeEndpoint)
             }
             Task { @MainActor in
                 guard let self else { return }

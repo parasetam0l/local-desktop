@@ -175,6 +175,8 @@ final class HostServer: ObservableObject {
             if let ip = HostServer.primaryLANAddress() {
                 initialTxt["ip"] = ip
             }
+            initialTxt["sid"] = AuthStore.shared.serverId
+            initialTxt["name"] = HostServer.computerName
             newListener.service = NWListener.Service(name: bonjourName,
                                                      type: RDService.type,
                                                      domain: nil,

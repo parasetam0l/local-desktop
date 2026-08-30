@@ -34,8 +34,19 @@ final class AuthStore: ObservableObject {
         static let pinHash = "rd.pinHash"
     }
 
+    private static func hardwareUUID() -> String? {
+        let dev = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+        guard dev != 0 else { return nil }
+        defer { IOObjectRelease(dev) }
+        guard let property = IORegistryEntryCreateCFProperty(dev, kIOPlatformUUIDKey as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String else { return nil }
+        return property
+    }
+
     private init() {
-        if let sid = defaults.string(forKey: Keys.serverId) {
+        if let hwId = AuthStore.hardwareUUID(), !hwId.isEmpty {
+            serverId = hwId
+            defaults.set(hwId, forKey: Keys.serverId)
+        } else if let sid = defaults.string(forKey: Keys.serverId) {
             serverId = sid
         } else {
             let sid = UUID().uuidString
