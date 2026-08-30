@@ -544,10 +544,23 @@ final class ClientSession: ObservableObject {
     }
 
     private func sendModifiersUp(_ modifiers: RDModifiers) {
-        if modifiers.contains(.control) { sendModifier(.control, down: false, currentFlags: modifiers.rawValue) }
-        if modifiers.contains(.option) { sendModifier(.option, down: false, currentFlags: modifiers.rawValue) }
-        if modifiers.contains(.shift) { sendModifier(.shift, down: false, currentFlags: modifiers.rawValue) }
-        if modifiers.contains(.command) { sendModifier(.command, down: false, currentFlags: modifiers.rawValue) }
+        var remaining = modifiers
+        if modifiers.contains(.control) {
+            remaining.remove(.control)
+            sendModifier(.control, down: false, currentFlags: remaining.rawValue)
+        }
+        if modifiers.contains(.option) {
+            remaining.remove(.option)
+            sendModifier(.option, down: false, currentFlags: remaining.rawValue)
+        }
+        if modifiers.contains(.shift) {
+            remaining.remove(.shift)
+            sendModifier(.shift, down: false, currentFlags: remaining.rawValue)
+        }
+        if modifiers.contains(.command) {
+            remaining.remove(.command)
+            sendModifier(.command, down: false, currentFlags: remaining.rawValue)
+        }
     }
 
     func keyTap(_ key: RDKey, modifiers: RDModifiers = []) {
