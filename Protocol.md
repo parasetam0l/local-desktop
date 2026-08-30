@@ -9,19 +9,20 @@ TCP transport (Network.framework). Every message is framed as:
 ```
 
 Video frames use a binary payload: `[u16 width BE][u16 height BE][u8 codec][pixels]`.
-Codec `0` = JPEG, `1` = H.264. All other messages carry a JSON body. Max payload: 32 MiB.
+Codec `0` = JPEG, `1` = H.264, `2` = HEVC (H.265). All other messages carry a JSON body. Max payload: 32 MiB.
 
 ## Message types
 
 | Type | Name           | Direction  | Body (JSON) |
 |------|----------------|------------|-------------|
 | 0x01 | hello          | C → S      | `{version, deviceId, deviceName, pubKey}` |
-| 0x02 | serverHello    | S → C      | `{version, serverId, serverName, pubKey, requiresPin}` |
+| 0x02 | serverHello    | S → C      | `{version, serverId, serverName, pubKey, requiresPin, macAddress?}` |
 | 0x03 | authPin        | C → S 🔒   | `{pin, trust}` |
 | 0x04 | authToken      | C → S 🔒   | `{token}` |
 | 0x05 | authOK         | S → C 🔒   | `{serverName, trusted, token?}` |
 | 0x06 | authFailed     | S → C      | `{reason}` |
 | 0x10 | frame          | S → C 🔒   | binary (see above) |
+| 0x11 | requestKeyframe| C → S 🔒   | `{reason?}` |
 | 0x20 | mouseMoveAbs   | C → S 🔒   | `{x, y}` — frame pixel space |
 | 0x21 | mouseMoveRel   | C → S 🔒   | `{dx, dy}` — screen points |
 | 0x22 | mouseDown      | C → S 🔒   | `{button}` (0 left, 1 right) |
@@ -31,7 +32,10 @@ Codec `0` = JPEG, `1` = H.264. All other messages carry a JSON body. Max payload
 | 0x31 | textEvent      | C → S 🔒   | `{s}` — unicode text |
 | 0x40 | ping           | C → S 🔒   | `{t}` |
 | 0x41 | pong           | S → C 🔒   | `{t}` |
-| 0x50 | setQuality     | C → S 🔒   | `{preset, cursor?}` (preset: 0 low, 1 balanced, 2 high, 3 sharp. cursor: true to show mac cursor) |
+| 0x42 | networkStats   | C → S 🔒   | `{rttMs, decodeMs, fps, droppedFrames}` |
+| 0x50 | setQuality     | C → S 🔒   | `{preset, cursor?, codec?}` (preset: 0 low, 1 balanced, 2 high, 3 sharp. codec: 0 jpeg, 1 h264, 2 hevc) |
+| 0x52 | hostState      | S → C 🔒   | `{isLocked, isDisplaySleeping}` |
+| 0x53 | wakeDisplay    | C → S 🔒   | `{}` |
 | 0x60 | bye            | both       | `{reason?}` |
 
 🔒 = payload encrypted with the session key (`nonce(12) || ciphertext || tag(16)`, ChaCha20-Poly1305).

@@ -12,14 +12,18 @@ Both apps speak the same custom TCP protocol (see [`Protocol.md`](Protocol.md)) 
 
 - **Auto-discovery** — Macs advertise themselves via Bonjour (`_rd-desktop._tcp`); the iOS app lists them automatically.
 - **Auto-connection** — the client dials the last *trusted* Mac on launch (or as soon as it appears on the network) and auto-reconnects with backoff when a session drops.
+- **Hardware-Accelerated Video (HEVC & H.264)** — real-time sub-2ms hardware video compression via `VideoToolbox` with zero-copy GPU video rendering via `AVSampleBufferDisplayLayer`.
+- **Live Adaptive Bitrate (ABR) & Anti-Bufferbloat** — real-time RTT telemetry dynamically scales bitrate and drops stale P-frames on Wi-Fi jitter to guarantee sub-10ms latency.
+- **Automatic Display Wake** — multi-vector background wake pulses wake sleeping displays immediately upon connection without manual interaction.
 - **4-digit PIN authentication** — first connection requires the PIN set on the Mac (PBKDF2-hashed at rest, encrypted in transit, 5-attempt limit).
 - **Trusted devices** — after a successful PIN entry the device gets a 256-bit token stored in the iOS Keychain; later connections skip the PIN. The Mac shows trusted devices and can revoke them at any time.
 - **Encryption** — every connection runs an X25519 key exchange; the PIN, tokens, video, and input are sealed with ChaCha20-Poly1305.
+- **Instant Cursor Prediction** — 0ms perceived pointer latency in touchpad and direct modes with local 120Hz display refresh tracking.
 - **Zoom on mobile** — pinch to zoom (fit → 8×), pan while zoomed, double-tap to toggle zoom.
 - **Direct mode** — tap = left click, two-finger tap = right click, long-press drag = press & drag.
 - **Touchpad mode** — the whole screen becomes a trackpad: one-finger drag moves the pointer (with on-screen cursor), tap = click, two-finger tap = right click, two-finger drag = scroll, long-press + drag = click-drag.
 - **Keyboard** — full system keyboard via a hidden capture field, plus a bar with sticky modifiers (⇧⌃⌥⌘), Esc/Tab/arrows/Home/End/Page keys, so shortcuts like ⌘C work.
-- **Quality control** — Low/Balanced/High/Sharp presets (resolution + JPEG quality + FPS), switchable live from the client.
+- **Quality presets** — Low (30 FPS), Balanced (60 FPS), High (60 FPS), and Sharp (Native 60 FPS) presets, switchable live from the client.
 
 ## Project layout
 
