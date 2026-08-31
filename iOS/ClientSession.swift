@@ -344,17 +344,21 @@ final class ClientSession: ObservableObject {
                     self.videoDecoder.decode(annexB: frameData, codec: codec) { [weak self] sampleBuffer in
                         guard let self else { return }
                         let decodeDuration = (CACurrentMediaTime() - decodeStart) * 1000.0
+                        self.lastDecodeTime = decodeDuration
+                        self.framesReceived += 1
                         self.onSampleBuffer?(sampleBuffer, width, height)
-                        Task { @MainActor in
-                            guard self.phase == .connected else { return }
-                            self.framesReceived += 1
-                            self.lastDecodeTime = decodeDuration
-                            self.videoStatus = nil
-                            if self.remoteSize.width != CGFloat(width) || self.remoteSize.height != CGFloat(height) {
-                                self.remoteSize = CGSize(width: width, height: height)
-                            }
-                            if !self.hasVideoFrame {
-                                self.hasVideoFrame = true
+                        
+                        let sizeChanged = self.remoteSize.width != CGFloat(width) || self.remoteSize.height != CGFloat(height)
+                        if !self.hasVideoFrame || sizeChanged || self.videoStatus != nil {
+                            Task { @MainActor in
+                                guard self.phase == .connected else { return }
+                                self.videoStatus = nil
+                                if sizeChanged {
+                                    self.remoteSize = CGSize(width: width, height: height)
+                                }
+                                if !self.hasVideoFrame {
+                                    self.hasVideoFrame = true
+                                }
                             }
                         }
                     } onError: { [weak self] in
@@ -364,9 +368,9 @@ final class ClientSession: ObservableObject {
                     }
                 case .jpeg:
                     guard let decoded = UIImage(data: frameData) else { return }
+                    self.framesReceived += 1
                     Task { @MainActor in
                         guard self.phase == .connected else { return }
-                        self.framesReceived += 1
                         self.videoStatus = nil
                         self.remoteSize = CGSize(width: width, height: height)
                         self.hasVideoFrame = true
