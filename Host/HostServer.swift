@@ -138,7 +138,13 @@ final class HostServer: ObservableObject {
                 forName: notif,
                 object: nil,
                 queue: .main
-            ) { [weak self] _ in
+            ) { [weak self] notif in
+                if notif.name == NSWorkspace.didActivateApplicationNotification,
+                   let activeApp = NSWorkspace.shared.frontmostApplication,
+                   activeApp.activationPolicy == .regular,
+                   let bid = activeApp.bundleIdentifier {
+                    self?.trackAppActivation(bid)
+                }
                 self?.broadcastRunningApps()
             }
         }
@@ -348,10 +354,25 @@ final class HostServer: ObservableObject {
         return base64
     }
 
+    private var appMRUOrder: [String] = []
+
+    func trackAppActivation(_ bundleId: String) {
+        if let idx = appMRUOrder.firstIndex(of: bundleId) {
+            appMRUOrder.remove(at: idx)
+        }
+        appMRUOrder.insert(bundleId, at: 0)
+    }
+
     func getRunningApps() -> [RDRunningApp] {
+        if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.activationPolicy == .regular,
+           let bid = frontmost.bundleIdentifier {
+            trackAppActivation(bid)
+        }
+
         let running = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular }
-        return running.compactMap { app in
+        let apps: [RDRunningApp] = running.compactMap { (app: NSRunningApplication) -> RDRunningApp? in
             guard let bundleId = app.bundleIdentifier, !bundleId.isEmpty else { return nil }
             let name = app.localizedName ?? bundleId
             let icon = self.getAppIconPNG(for: app)
@@ -362,9 +383,16 @@ final class HostServer: ObservableObject {
                 isHidden: app.isHidden,
                 iconPNG: icon
             )
-        }.sorted { app1, app2 in
+        }
+
+        return apps.sorted { app1, app2 in
             if app1.isActive != app2.isActive {
                 return app1.isActive
+            }
+            let idx1 = appMRUOrder.firstIndex(of: app1.bundleId) ?? Int.max
+            let idx2 = appMRUOrder.firstIndex(of: app2.bundleId) ?? Int.max
+            if idx1 != idx2 {
+                return idx1 < idx2
             }
             return app1.name.localizedCaseInsensitiveCompare(app2.name) == .orderedAscending
         }
