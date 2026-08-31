@@ -192,13 +192,15 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
             }
         }
 
-        if Thread.isMainThread {
-            videoView.isHidden = false
-            imageView.isHidden = true
-        } else {
-            DispatchQueue.main.async {
-                self.videoView.isHidden = false
-                self.imageView.isHidden = true
+        if videoView.isHidden {
+            if Thread.isMainThread {
+                videoView.isHidden = false
+                imageView.isHidden = true
+            } else {
+                DispatchQueue.main.async {
+                    self.videoView.isHidden = false
+                    self.imageView.isHidden = true
+                }
             }
         }
         
