@@ -32,6 +32,7 @@ final class ClientSession: ObservableObject {
     @Published private(set) var videoStatus: String?
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
+    @Published private(set) var runningApps: [RDRunningApp] = []
     private(set) var framesReceived = 0
 
     var displayName: String {
@@ -468,6 +469,11 @@ final class ClientSession: ObservableObject {
                 wakeHostDisplay()
             }
 
+        case .runningApps:
+            guard let key, let plain = RDCrypto.open(payload, key: key),
+                  let msg = RDJSON.decode(RDRunningAppsMsg.self, from: plain) else { break }
+            self.runningApps = msg.apps
+
         case .bye:
             fail("The Mac ended the session")
 
@@ -694,6 +700,23 @@ final class ClientSession: ObservableObject {
             self?.moveRel(dx: -1, dy: -1)
         }
         requestKeyframe(reason: "wake_display")
+    }
+
+    func requestRunningApps() {
+        guard phase == .connected else { return }
+        send(.requestApps, Data(), encrypted: true)
+    }
+
+    func activateApp(bundleId: String) {
+        guard phase == .connected else { return }
+        let msg = RDActivateAppMsg(bundleId: bundleId)
+        send(.activateApp, RDJSON.encode(msg), encrypted: true)
+    }
+
+    func triggerSystemAction(_ action: RDSystemActionType) {
+        guard phase == .connected else { return }
+        let msg = RDSystemActionMsg(action: action)
+        send(.systemAction, RDJSON.encode(msg), encrypted: true)
     }
 
     private func describe(_ endpoint: NWEndpoint) -> String {

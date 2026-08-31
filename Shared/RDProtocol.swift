@@ -44,6 +44,12 @@ enum RDWire: UInt8 {
     case hostState = 0x52
     case wakeDisplay = 0x53
     case bye = 0x60
+
+    // App Switcher & Actions
+    case requestApps = 0x70
+    case runningApps = 0x71
+    case activateApp = 0x72
+    case systemAction = 0x73
 }
 
 // MARK: - Stream framing: [u32 length BE][u8 type][payload]
@@ -345,4 +351,34 @@ enum RDQualityPreset: Int, CaseIterable, Identifiable {
     static func from(_ raw: Int) -> RDQualityPreset {
         RDQualityPreset(rawValue: raw) ?? .high
     }
+}
+
+// MARK: - App Switcher
+
+struct RDRunningApp: Codable, Identifiable, Equatable {
+    var id: String { bundleId }
+    let bundleId: String
+    let name: String
+    let isActive: Bool
+    let isHidden: Bool
+    let iconPNG: String?
+}
+
+struct RDRunningAppsMsg: Codable {
+    let apps: [RDRunningApp]
+}
+
+struct RDActivateAppMsg: Codable {
+    let bundleId: String
+}
+
+enum RDSystemActionType: String, Codable {
+    case showDesktop
+    case missionControl
+    case launchpad
+    case lockScreen
+}
+
+struct RDSystemActionMsg: Codable {
+    let action: RDSystemActionType
 }

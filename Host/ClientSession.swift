@@ -2,6 +2,7 @@ import Foundation
 import Network
 import CryptoKit
 import CoreGraphics
+import AppKit
 
 /// One client connection on the host: performs the ECDH handshake and
 /// PIN/token authentication, then relays input events to InputInjector and
@@ -151,6 +152,11 @@ final class ClientSession {
     func sendHostState(_ state: HostStateMsg) {
         guard phase == .active else { return }
         send(.hostState, RDJSON.encode(state), encrypted: true)
+    }
+
+    func sendRunningApps(_ apps: [RDRunningApp]) {
+        guard phase == .active else { return }
+        send(.runningApps, RDJSON.encode(RDRunningAppsMsg(apps: apps)), encrypted: true)
     }
 
     // MARK: Receiving
@@ -325,6 +331,40 @@ final class ClientSession {
         case .textEvent:
             guard phase == .active, let msg = RDJSON.decode(TextMsg.self, from: payload) else { break }
             InputInjector.text(msg.s)
+
+        case .requestApps:
+            guard phase == .active, let server else { break }
+            sendRunningApps(server.getRunningApps())
+
+        case .activateApp:
+            guard phase == .active, let msg = RDJSON.decode(RDActivateAppMsg.self, from: payload) else { break }
+            server?.didActivateApp(bundleId: msg.bundleId)
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: msg.bundleId).first {
+                if app.isHidden {
+                    app.unhide()
+                }
+                app.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+                if let bundleURL = app.bundleURL {
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.activates = true
+                    config.addsToRecentItems = false
+                    NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { _, _ in }
+                }
+            }
+
+        case .systemAction:
+            guard phase == .active, let msg = RDJSON.decode(RDSystemActionMsg.self, from: payload) else { break }
+            switch msg.action {
+            case .showDesktop:
+                server?.toggleShowDesktop()
+            case .missionControl:
+                let _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/open"), arguments: ["-a", "Mission Control"])
+            case .launchpad:
+                let _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/open"), arguments: ["-a", "Launchpad"])
+            case .lockScreen:
+                InputInjector.key(code: 12, down: true, flags: [.maskControl, .maskCommand])
+                InputInjector.key(code: 12, down: false, flags: [.maskControl, .maskCommand])
+            }
 
         default:
             break
