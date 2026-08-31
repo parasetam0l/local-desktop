@@ -50,6 +50,11 @@ enum RDWire: UInt8 {
     case runningApps = 0x71
     case activateApp = 0x72
     case systemAction = 0x73
+
+    // Hardware Controls
+    case getHardwareControls = 0x80
+    case setHardwareControls = 0x81
+    case hardwareControlsState = 0x82
 }
 
 // MARK: - Stream framing: [u32 length BE][u8 type][payload]
@@ -381,4 +386,20 @@ enum RDSystemActionType: String, Codable {
 
 struct RDSystemActionMsg: Codable {
     let action: RDSystemActionType
+}
+
+// MARK: - Hardware Controls
+
+struct RDHardwareControls: Codable, Equatable {
+    var brightness: Float // 0.0 ... 1.0
+    var volume: Int       // 0 ... 100
+    var isMuted: Bool
+}
+
+struct RDSetHardwareControlsMsg: Codable {
+    var brightness: Float?
+    var volume: Int?
+    var isMuted: Bool?
+    var sleepDisplay: Bool?
+    var lockScreen: Bool?
 }

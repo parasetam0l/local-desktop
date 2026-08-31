@@ -33,7 +33,14 @@ final class ClientSession: ObservableObject {
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
     @Published private(set) var runningApps: [RDRunningApp] = []
+    @Published private(set) var hardwareControls = RDHardwareControls(brightness: 0.5, volume: 50, isMuted: false)
+    @Published var showDebugHUD = false
+    @Published private(set) var liveFPS: Double = 0.0
+    @Published private(set) var liveBitrateMbps: Double = 0.0
+    @Published private(set) var liveDecodeMs: Double = 0.0
     private(set) var framesReceived = 0
+    private var bytesReceivedInLastSec = 0
+    private var framesReceivedInLastSec = 0
 
     var displayName: String {
         if !serverName.isEmpty {
@@ -329,7 +336,9 @@ final class ClientSession: ObservableObject {
     }
 
     private func dispatchPayload(_ wire: RDWire, payload: Data) {
+        bytesReceivedInLastSec += payload.count
         if wire == .frame {
+            framesReceivedInLastSec += 1
             keyLock.lock()
             let sessionKey = _sessionKey
             keyLock.unlock()
@@ -463,16 +472,17 @@ final class ClientSession: ObservableObject {
             guard let key, let plain = RDCrypto.open(payload, key: key),
                   let msg = RDJSON.decode(HostStateMsg.self, from: plain) else { break }
             isHostLocked = msg.isLocked
-            let wasSleeping = isDisplaySleeping
             isDisplaySleeping = msg.isDisplaySleeping
-            if msg.isDisplaySleeping && !wasSleeping {
-                wakeHostDisplay()
-            }
 
         case .runningApps:
             guard let key, let plain = RDCrypto.open(payload, key: key),
                   let msg = RDJSON.decode(RDRunningAppsMsg.self, from: plain) else { break }
             self.runningApps = msg.apps
+
+        case .hardwareControlsState:
+            guard let key, let plain = RDCrypto.open(payload, key: key),
+                  let msg = RDJSON.decode(RDHardwareControls.self, from: plain) else { break }
+            self.hardwareControls = msg
 
         case .bye:
             fail("The Mac ended the session")
@@ -499,12 +509,25 @@ final class ClientSession: ObservableObject {
     }
 
     private func reportNetworkStatsIfNeeded() {
-        guard phase == .connected, Date().timeIntervalSince(lastStatsReport) >= 1.0 else { return }
-        lastStatsReport = Date()
+        guard phase == .connected else { return }
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastStatsReport)
+        guard elapsed >= 1.0 else { return }
+        lastStatsReport = now
+
+        let fps = Double(framesReceivedInLastSec) / elapsed
+        let bitrate = (Double(bytesReceivedInLastSec) * 8.0) / (elapsed * 1_000_000.0)
+        framesReceivedInLastSec = 0
+        bytesReceivedInLastSec = 0
+
+        self.liveFPS = fps
+        self.liveBitrateMbps = bitrate
+        self.liveDecodeMs = lastDecodeTime
+
         let stats = NetworkStatsMsg(
             rttMs: currentRTT,
             decodeMs: lastDecodeTime,
-            fps: 60.0,
+            fps: fps > 0 ? fps : 60.0,
             droppedFrames: 0
         )
         send(.networkStats, RDJSON.encode(stats), encrypted: true)
@@ -717,6 +740,39 @@ final class ClientSession: ObservableObject {
         guard phase == .connected else { return }
         let msg = RDSystemActionMsg(action: action)
         send(.systemAction, RDJSON.encode(msg), encrypted: true)
+    }
+
+    func requestHardwareControls() {
+        guard phase == .connected else { return }
+        send(.getHardwareControls, Data(), encrypted: true)
+    }
+
+    func setBrightness(_ value: Float) {
+        guard phase == .connected else { return }
+        hardwareControls.brightness = value
+        sendJSON(.setHardwareControls, RDSetHardwareControlsMsg(brightness: value))
+    }
+
+    func setVolume(_ value: Int) {
+        guard phase == .connected else { return }
+        hardwareControls.volume = value
+        sendJSON(.setHardwareControls, RDSetHardwareControlsMsg(volume: value))
+    }
+
+    func setMuted(_ value: Bool) {
+        guard phase == .connected else { return }
+        hardwareControls.isMuted = value
+        sendJSON(.setHardwareControls, RDSetHardwareControlsMsg(isMuted: value))
+    }
+
+    func sleepHostDisplay() {
+        guard phase == .connected else { return }
+        sendJSON(.setHardwareControls, RDSetHardwareControlsMsg(sleepDisplay: true))
+    }
+
+    func lockHostScreen() {
+        guard phase == .connected else { return }
+        sendJSON(.setHardwareControls, RDSetHardwareControlsMsg(lockScreen: true))
     }
 
     private func describe(_ endpoint: NWEndpoint) -> String {

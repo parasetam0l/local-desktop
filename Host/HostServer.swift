@@ -4,6 +4,8 @@ import AppKit
 import CoreGraphics
 import Combine
 import IOKit.pwr_mgt
+import CoreAudio
+import AudioToolbox
 
 /// Menu-bar host: listens for client connections, brokers the PIN/trust
 /// handshake, streams screen frames, and injects client input events.
@@ -304,6 +306,9 @@ final class HostServer: ObservableObject {
         // Send running applications list to newly connected client
         session.sendRunningApps(getRunningApps())
 
+        // Send current Mac hardware controls (brightness, volume, mute)
+        session.sendHardwareControls(HardwareController.getState())
+
         if activeSessions.count == 1 {
             clientName = name
         } else {
@@ -563,5 +568,159 @@ final class HostServer: ObservableObject {
         let y = (mousePos.y - bounds.minY) / bounds.height * Double(size.height)
         return (x: min(max(x, 0), Double(size.width)),
                 y: min(max(y, 0), Double(size.height)))
+    }
+}
+
+// MARK: - Native Mac Hardware Controller
+
+enum HardwareController {
+    private typealias GetBrightness = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
+    private typealias SetBrightness = @convention(c) (CGDirectDisplayID, Float) -> Int32
+
+    private static let displayServicesHandle: UnsafeMutableRawPointer? = {
+        dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY)
+    }()
+
+    static func getBrightness() -> Float {
+        guard let handle = displayServicesHandle,
+              let sym = dlsym(handle, "DisplayServicesGetBrightness") else { return 0.5 }
+        let fn = unsafeBitCast(sym, to: GetBrightness.self)
+        var brightness: Float = 0.5
+        let _ = fn(CGMainDisplayID(), &brightness)
+        return max(0.0, min(1.0, brightness))
+    }
+
+    static func setBrightness(_ value: Float) {
+        guard let handle = displayServicesHandle,
+              let sym = dlsym(handle, "DisplayServicesSetBrightness") else { return }
+        let fn = unsafeBitCast(sym, to: SetBrightness.self)
+        let clamped = max(0.0, min(1.0, value))
+        let _ = fn(CGMainDisplayID(), clamped)
+    }
+
+    private static func getDefaultAudioOutputDeviceID() -> AudioObjectID? {
+        var defaultOutputDeviceID = AudioObjectID(kAudioObjectUnknown)
+        var propertySize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress,
+            0,
+            nil,
+            &propertySize,
+            &defaultOutputDeviceID
+        )
+
+        guard status == noErr, defaultOutputDeviceID != kAudioObjectUnknown else { return nil }
+        return defaultOutputDeviceID
+    }
+
+    static func getVolumeSettings() -> (volume: Int, isMuted: Bool) {
+        guard let deviceID = getDefaultAudioOutputDeviceID() else {
+            return (50, false)
+        }
+
+        var vol: Float32 = 0.5
+        var volAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var volSize = UInt32(MemoryLayout<Float32>.size)
+        let volStatus = AudioObjectGetPropertyData(deviceID, &volAddress, 0, nil, &volSize, &vol)
+
+        var isMuted: UInt32 = 0
+        var muteAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var muteSize = UInt32(MemoryLayout<UInt32>.size)
+        let muteStatus = AudioObjectGetPropertyData(deviceID, &muteAddress, 0, nil, &muteSize, &isMuted)
+
+        let volumeInt = volStatus == noErr ? Int(round(vol * 100.0)) : 50
+        let mutedBool = muteStatus == noErr ? (isMuted != 0) : false
+
+        return (max(0, min(100, volumeInt)), mutedBool)
+    }
+
+    static func setVolume(_ volume: Int) {
+        let clamped = max(0, min(100, volume))
+        if let deviceID = getDefaultAudioOutputDeviceID() {
+            var vol = Float32(clamped) / 100.0
+            var volAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioHardwareServiceSetPropertyData(
+                deviceID,
+                &volAddress,
+                0,
+                nil,
+                UInt32(MemoryLayout<Float32>.size),
+                &vol
+            )
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let script = NSAppleScript(source: "set volume output volume \(clamped)") {
+                var error: NSDictionary?
+                script.executeAndReturnError(&error)
+            }
+        }
+    }
+
+    static func setMuted(_ muted: Bool) {
+        if let deviceID = getDefaultAudioOutputDeviceID() {
+            var isMuted: UInt32 = muted ? 1 : 0
+            var muteAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyMute,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectSetPropertyData(
+                deviceID,
+                &muteAddress,
+                0,
+                nil,
+                UInt32(MemoryLayout<UInt32>.size),
+                &isMuted
+            )
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let script = NSAppleScript(source: "set volume output muted \(muted ? "true" : "false")") {
+                var error: NSDictionary?
+                script.executeAndReturnError(&error)
+            }
+        }
+    }
+
+    static func sleepDisplay() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/pmset"), arguments: ["displaysleepnow"])
+        }
+    }
+
+    static func lockScreen() {
+        if let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/login", RTLD_LAZY),
+           let sym = dlsym(handle, "SACLockScreenImmediate") {
+            typealias SACLockScreenImmediateType = @convention(c) () -> Void
+            let fn = unsafeBitCast(sym, to: SACLockScreenImmediateType.self)
+            fn()
+        } else {
+            InputInjector.key(code: 12, down: true, flags: [.maskControl, .maskCommand])
+            InputInjector.key(code: 12, down: false, flags: [.maskControl, .maskCommand])
+        }
+    }
+
+    static func getState() -> RDHardwareControls {
+        let (vol, muted) = getVolumeSettings()
+        let brightness = getBrightness()
+        return RDHardwareControls(brightness: brightness, volume: vol, isMuted: muted)
     }
 }
