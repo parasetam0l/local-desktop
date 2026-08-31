@@ -150,6 +150,9 @@ struct SessionView: View {
                     },
                     onReturnKey: {
                         session.keyTap(.returnKey, modifiers: modifiers)
+                    },
+                    onArrowKey: { key in
+                        session.keyTap(key, modifiers: modifiers)
                     }
                 )
                 .allowsHitTesting(false)
