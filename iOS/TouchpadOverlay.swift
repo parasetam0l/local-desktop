@@ -75,7 +75,21 @@ final class TouchpadUIView: UIView, UIGestureRecognizerDelegate {
     private func applyBallistics(dx: CGFloat, dy: CGFloat) -> (CGFloat, CGFloat) {
         let speed = hypot(dx, dy)
         guard speed > 0 else { return (0, 0) }
-        let factor = max(1.2, min(2.4, 1.2 + speed * 0.04))
+
+        // Non-linear acceleration curve:
+        // - Micro-movements (< 3.0 pt): 0.65x sub-pixel precision for accurate targeting
+        // - Medium speeds (3.0 - 12.0 pt): 1.0x - 1.45x natural 1:1 motion
+        // - Fast flicks (> 12.0 pt): power curve up to 3.0x to cover multi-monitor/retina displays
+        let factor: CGFloat
+        if speed < 3.0 {
+            factor = 0.65 + (speed / 3.0) * 0.35
+        } else if speed < 12.0 {
+            factor = 1.0 + ((speed - 3.0) / 9.0) * 0.45
+        } else {
+            let extra = min(speed - 12.0, 30.0)
+            factor = 1.45 + (extra / 30.0) * 1.55
+        }
+
         return (dx * factor, dy * factor)
     }
 
