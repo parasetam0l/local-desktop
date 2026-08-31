@@ -159,6 +159,11 @@ final class ClientSession {
         send(.runningApps, RDJSON.encode(RDRunningAppsMsg(apps: apps)), encrypted: true)
     }
 
+    func sendHardwareControls(_ controls: RDHardwareControls) {
+        guard phase == .active else { return }
+        send(.hardwareControlsState, RDJSON.encode(controls), encrypted: true)
+    }
+
     // MARK: Receiving
 
     private var receiveBuffer = Data()
@@ -362,9 +367,31 @@ final class ClientSession {
             case .launchpad:
                 let _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/open"), arguments: ["-a", "Launchpad"])
             case .lockScreen:
-                InputInjector.key(code: 12, down: true, flags: [.maskControl, .maskCommand])
-                InputInjector.key(code: 12, down: false, flags: [.maskControl, .maskCommand])
+                HardwareController.lockScreen()
             }
+
+        case .getHardwareControls:
+            guard phase == .active else { break }
+            sendHardwareControls(HardwareController.getState())
+
+        case .setHardwareControls:
+            guard phase == .active, let msg = RDJSON.decode(RDSetHardwareControlsMsg.self, from: payload) else { break }
+            if let b = msg.brightness {
+                HardwareController.setBrightness(b)
+            }
+            if let v = msg.volume {
+                HardwareController.setVolume(v)
+            }
+            if let m = msg.isMuted {
+                HardwareController.setMuted(m)
+            }
+            if msg.sleepDisplay == true {
+                HardwareController.sleepDisplay()
+            }
+            if msg.lockScreen == true {
+                HardwareController.lockScreen()
+            }
+            sendHardwareControls(HardwareController.getState())
 
         default:
             break

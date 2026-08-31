@@ -187,28 +187,32 @@ struct SessionView: View {
                 .padding(.bottom, 24)
                 .frame(maxHeight: .infinity, alignment: .bottom)
 
-                // Status banner when Mac is locked
-                if session.phase == .connected && session.isHostLocked {
-                    HStack(spacing: 10) {
-                        Image(systemName: "lock.fill")
-                            .foregroundStyle(.yellow)
-                        Text("Mac is Locked")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
-                        Button("Enter Password") {
-                            keyboardVisible = true
-                        }
-                        .glassButton(variant: .tinted(.blue), size: .mini)
+                // Top Overlays: Debug HUD & Mac Locked Banner
+                VStack(spacing: 8) {
+                    if session.showDebugHUD {
+                        DebugHUDView(session: session)
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
-                    .shadow(radius: 6)
-                    .padding(.top, 16)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+
+                    if session.isHostLocked {
+                        HStack(spacing: 8) {
+                            Image(systemName: "lock.fill")
+                                .font(.subheadline)
+                                .foregroundStyle(.yellow)
+                            Text("Mac is Locked")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                        .shadow(radius: 6)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                 }
+                .padding(.top, 16)
+                .frame(maxHeight: .infinity, alignment: .top)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -397,7 +401,31 @@ struct SessionView: View {
                 .glassCard(cornerRadius: 24, opacity: 0.15, shadowRadius: 24)
             }
         case .connected:
-            if !session.hasVideoFrame && session.image == nil {
+            if session.isDisplaySleeping {
+                VStack(spacing: 14) {
+                    Image(systemName: "moon.stars.fill")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.indigo)
+                    Text("Mac Display is Sleeping")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text("Tap anywhere to wake the screen")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                    Button {
+                        session.wakeHostDisplay()
+                    } label: {
+                        Label("Wake Display", systemImage: "sun.max.fill")
+                    }
+                    .glassButton(variant: .primary, size: .regular)
+                }
+                .padding(28)
+                .glassCard(cornerRadius: 24, opacity: 0.25, shadowRadius: 20)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    session.wakeHostDisplay()
+                }
+            } else if !session.hasVideoFrame && session.image == nil {
                 VStack(spacing: 14) {
                     ProgressView()
                         .controlSize(.large)
@@ -424,9 +452,27 @@ struct SessionMenuButton: View {
     let session: ClientSession
     @ObservedObject var canvasController: CanvasController
     let onDismiss: () -> Void
+    @State private var showHardwareSheet = false
 
     var body: some View {
         Menu {
+            Button {
+                showHardwareSheet = true
+            } label: {
+                Label("Mac Hardware Controls…", systemImage: "slider.horizontal.3")
+            }
+
+            Button {
+                withAnimation {
+                    session.showDebugHUD.toggle()
+                }
+            } label: {
+                Label(session.showDebugHUD ? "Hide Performance HUD" : "Show Performance HUD",
+                      systemImage: "chart.xyaxis.line")
+            }
+
+            Divider()
+
             Button {
                 touchpadMode.toggle()
             } label: {
@@ -541,6 +587,9 @@ struct SessionMenuButton: View {
                 .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 0.5))
                 .foregroundStyle(.white)
                 .shadow(radius: 4)
+        }
+        .sheet(isPresented: $showHardwareSheet) {
+            MacHardwareControlsSheet(session: session, isPresented: $showHardwareSheet)
         }
     }
 }
@@ -706,6 +755,233 @@ struct AppSwitcherView: View {
         .presentationBackground(.ultraThinMaterial)
         .onAppear {
             session.requestRunningApps()
+        }
+    }
+}
+
+// MARK: - Performance & Debug HUD
+
+struct DebugHUDView: View {
+    @ObservedObject var session: ClientSession
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // FPS
+            HStack(spacing: 4) {
+                Text("FPS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.1f", session.liveFPS > 0 ? session.liveFPS : 60.0))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(session.liveFPS >= 55 || session.liveFPS == 0 ? .green : (session.liveFPS >= 30 ? .yellow : .red))
+            }
+
+            Divider()
+                .frame(height: 12)
+
+            // RTT / Ping
+            HStack(spacing: 4) {
+                Text("RTT")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.1fms", session.currentRTT))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(session.currentRTT < 20 ? .green : (session.currentRTT < 50 ? .yellow : .red))
+            }
+
+            Divider()
+                .frame(height: 12)
+
+            // Bitrate
+            HStack(spacing: 4) {
+                Text("RATE")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.1fM", session.liveBitrateMbps))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.primary)
+            }
+
+            Divider()
+                .frame(height: 12)
+
+            // Decode Latency
+            HStack(spacing: 4) {
+                Text("DEC")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.1fms", session.liveDecodeMs))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(session.liveDecodeMs < 8 ? .green : (session.liveDecodeMs < 16 ? .yellow : .red))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+        .shadow(radius: 6)
+    }
+}
+
+// MARK: - Mac Hardware Controls Sheet
+
+struct MacHardwareControlsSheet: View {
+    @ObservedObject var session: ClientSession
+    @Binding var isPresented: Bool
+
+    @State private var localBrightness: Float = 0.5
+    @State private var isDraggingBrightness = false
+    @State private var localVolume: Double = 50
+    @State private var isDraggingVolume = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Clean Custom Header
+            HStack {
+                Text("Mac Hardware")
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.primary)
+
+                Spacer()
+
+                Button {
+                    isPresented = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Color.secondary.opacity(0.18), in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+
+            ScrollView {
+                VStack(spacing: 16) {
+                    // Brightness Control
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Label("Display Brightness", systemImage: "sun.max.fill")
+                                .font(.headline)
+                            Spacer()
+                            Text("\(Int(localBrightness * 100))%")
+                                .font(.subheadline.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack(spacing: 12) {
+                            Image(systemName: "sun.min")
+                                .foregroundStyle(.secondary)
+                            Slider(
+                                value: $localBrightness,
+                                in: 0...1,
+                                onEditingChanged: { editing in
+                                    isDraggingBrightness = editing
+                                    if !editing {
+                                        session.setBrightness(localBrightness)
+                                    }
+                                }
+                            )
+                            Image(systemName: "sun.max.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(16)
+                    .glassCard(cornerRadius: 16, opacity: 0.12)
+
+                    // Volume Control
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Label("System Volume", systemImage: session.hardwareControls.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                                .font(.headline)
+                            Spacer()
+                            Text(session.hardwareControls.isMuted ? "Muted" : "\(Int(localVolume))%")
+                                .font(.subheadline.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(session.hardwareControls.isMuted ? .red : .secondary)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button {
+                                session.setMuted(!session.hardwareControls.isMuted)
+                            } label: {
+                                Image(systemName: session.hardwareControls.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                                    .foregroundStyle(session.hardwareControls.isMuted ? .red : .primary)
+                                    .font(.title3)
+                                    .frame(width: 32, height: 32)
+                            }
+
+                            Slider(
+                                value: $localVolume,
+                                in: 0...100,
+                                onEditingChanged: { editing in
+                                    isDraggingVolume = editing
+                                    if !editing {
+                                        session.setVolume(Int(localVolume))
+                                    }
+                                }
+                            )
+
+                            Text("\(Int(localVolume))%")
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 36, alignment: .trailing)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(16)
+                    .glassCard(cornerRadius: 16, opacity: 0.12)
+
+                    // Display & Power Actions
+                    VStack(spacing: 12) {
+                        Button {
+                            session.lockHostScreen()
+                            isPresented = false
+                        } label: {
+                            Label("Lock Mac Screen", systemImage: "lock.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
+
+                        Button {
+                            session.sleepHostDisplay()
+                        } label: {
+                            Label("Sleep Mac Display", systemImage: "moon.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
+
+                        Button {
+                            session.wakeHostDisplay()
+                        } label: {
+                            Label("Wake Mac Display", systemImage: "sun.horizon.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
+                    }
+                    .padding(16)
+                    .glassCard(cornerRadius: 16, opacity: 0.12)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 20)
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(.ultraThinMaterial)
+        .onAppear {
+            localBrightness = session.hardwareControls.brightness
+            localVolume = Double(session.hardwareControls.volume)
+            session.requestHardwareControls()
+        }
+        .onChange(of: session.hardwareControls) { _, newControls in
+            if !isDraggingBrightness {
+                localBrightness = newControls.brightness
+            }
+            if !isDraggingVolume {
+                localVolume = Double(newControls.volume)
+            }
         }
     }
 }
