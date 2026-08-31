@@ -126,6 +126,23 @@ final class HostServer: ObservableObject {
             }
         }
 
+        let wsNotifications = [
+            NSWorkspace.didActivateApplicationNotification,
+            NSWorkspace.didLaunchApplicationNotification,
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.didHideApplicationNotification,
+            NSWorkspace.didUnhideApplicationNotification
+        ]
+        for notif in wsNotifications {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: notif,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.broadcastRunningApps()
+            }
+        }
+
         Task { @MainActor in
             if AuthStore.shared.hasPIN && CGPreflightScreenCaptureAccess() && InputInjector.checkAccessibility(prompt: false) {
                 self.start()
@@ -278,6 +295,9 @@ final class HostServer: ObservableObject {
         // Inform client of current screen lock & display sleep state
         session.sendHostState(HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping))
 
+        // Send running applications list to newly connected client
+        session.sendRunningApps(getRunningApps())
+
         if activeSessions.count == 1 {
             clientName = name
         } else {
@@ -292,6 +312,113 @@ final class HostServer: ObservableObject {
             } catch {
                 lastError = "Screen capture: \(error.localizedDescription)"
             }
+        }
+    }
+
+    private var iconCache: [String: String] = [:]
+
+    private func getAppIconPNG(for app: NSRunningApplication) -> String? {
+        guard let bundleId = app.bundleIdentifier else { return nil }
+        if let cached = iconCache[bundleId] {
+            return cached
+        }
+        guard let icon = app.icon else { return nil }
+        let size = NSSize(width: 64, height: 64)
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 64,
+            pixelsHigh: 64,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+        guard let rep else { return nil }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        icon.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let pngData = rep.representation(using: .png, properties: [:]) else { return nil }
+        let base64 = pngData.base64EncodedString()
+        iconCache[bundleId] = base64
+        return base64
+    }
+
+    func getRunningApps() -> [RDRunningApp] {
+        let running = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+        return running.compactMap { app in
+            guard let bundleId = app.bundleIdentifier, !bundleId.isEmpty else { return nil }
+            let name = app.localizedName ?? bundleId
+            let icon = self.getAppIconPNG(for: app)
+            return RDRunningApp(
+                bundleId: bundleId,
+                name: name,
+                isActive: app.isActive,
+                isHidden: app.isHidden,
+                iconPNG: icon
+            )
+        }.sorted { app1, app2 in
+            if app1.isActive != app2.isActive {
+                return app1.isActive
+            }
+            return app1.name.localizedCaseInsensitiveCompare(app2.name) == .orderedAscending
+        }
+    }
+
+    func broadcastRunningApps() {
+        guard !activeSessions.isEmpty else { return }
+        let apps = getRunningApps()
+        for session in activeSessions {
+            session.sendRunningApps(apps)
+        }
+    }
+
+    private var appsHiddenForDesktop: [String] = []
+
+    func toggleShowDesktop() {
+        if !appsHiddenForDesktop.isEmpty {
+            // Restore previously hidden apps
+            for bundleId in appsHiddenForDesktop {
+                if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first {
+                    app.unhide()
+                }
+            }
+            if let lastFocused = appsHiddenForDesktop.first,
+               let app = NSRunningApplication.runningApplications(withBundleIdentifier: lastFocused).first {
+                app.activate(options: [.activateIgnoringOtherApps])
+            }
+            appsHiddenForDesktop.removeAll()
+        } else {
+            // Hide all visible apps to reveal desktop
+            var toHide: [String] = []
+            if let activeApp = NSWorkspace.shared.frontmostApplication,
+               let bid = activeApp.bundleIdentifier, bid != "com.apple.finder" {
+                toHide.append(bid)
+            }
+            for app in NSWorkspace.shared.runningApplications {
+                guard app.activationPolicy == .regular,
+                      !app.isHidden,
+                      let bid = app.bundleIdentifier,
+                      bid != "com.apple.finder" else { continue }
+                if !toHide.contains(bid) {
+                    toHide.append(bid)
+                }
+                app.hide()
+            }
+            appsHiddenForDesktop = toHide
+            NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first?.activate(options: [.activateIgnoringOtherApps])
+        }
+        broadcastRunningApps()
+    }
+
+    func didActivateApp(bundleId: String) {
+        if let idx = appsHiddenForDesktop.firstIndex(of: bundleId) {
+            appsHiddenForDesktop.remove(at: idx)
         }
     }
 
