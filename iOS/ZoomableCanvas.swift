@@ -340,10 +340,10 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
 
     private let cursorIndicator: UIView = {
         let view = UIView(frame: CGRect(x: 0, y: 0, width: 20, height: 20))
-        view.backgroundColor = .white.withAlphaComponent(0.8)
+        view.backgroundColor = .white.withAlphaComponent(0.85)
         view.layer.cornerRadius = 10
         view.layer.borderWidth = 1.5
-        view.layer.borderColor = UIColor.black.withAlphaComponent(0.3).cgColor
+        view.layer.borderColor = UIColor.black.withAlphaComponent(0.35).cgColor
         view.layer.shadowColor = UIColor.black.cgColor
         view.layer.shadowOpacity = 0.5
         view.layer.shadowRadius = 4
@@ -416,19 +416,39 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
               currentContentSize.width > 0, currentContentSize.height > 0 else { return }
 
         let targetView: UIView = videoView.isHidden ? imageView : videoView
-        let pointInView = targetView.convert(remotePoint, to: self)
+        let pointInScroll = targetView.convert(remotePoint, to: self)
 
-        var newOffset = CGPoint(
-            x: pointInView.x - bounds.width * 0.5,
-            y: pointInView.y - bounds.height * 0.5
-        )
+        let viewWidth = bounds.width
+        let viewHeight = bounds.height
+        guard viewWidth > 0, viewHeight > 0 else { return }
 
-        let maxOffsetX = max(0, contentSize.width - bounds.width)
-        let maxOffsetY = max(0, contentSize.height - bounds.height)
+        // Deadzone margin (outer 18% / at least 60pt)
+        let marginX = max(60.0, viewWidth * 0.18)
+        let marginY = max(60.0, viewHeight * 0.18)
+
+        var newOffset = contentOffset
+
+        let cursorVisibleX = pointInScroll.x - contentOffset.x
+        let cursorVisibleY = pointInScroll.y - contentOffset.y
+
+        if cursorVisibleX < marginX {
+            newOffset.x = pointInScroll.x - marginX
+        } else if cursorVisibleX > viewWidth - marginX {
+            newOffset.x = pointInScroll.x - (viewWidth - marginX)
+        }
+
+        if cursorVisibleY < marginY {
+            newOffset.y = pointInScroll.y - marginY
+        } else if cursorVisibleY > viewHeight - marginY {
+            newOffset.y = pointInScroll.y - (viewHeight - marginY)
+        }
+
+        let maxOffsetX = max(0, contentSize.width - viewWidth)
+        let maxOffsetY = max(0, contentSize.height - viewHeight)
         newOffset.x = min(max(newOffset.x, 0), maxOffsetX)
         newOffset.y = min(max(newOffset.y, 0), maxOffsetY)
 
-        if abs(newOffset.x - contentOffset.x) > 1.0 || abs(newOffset.y - contentOffset.y) > 1.0 {
+        if abs(newOffset.x - contentOffset.x) > 0.5 || abs(newOffset.y - contentOffset.y) > 0.5 {
             setContentOffset(newOffset, animated: false)
         }
     }
