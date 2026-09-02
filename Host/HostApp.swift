@@ -29,12 +29,14 @@ struct LocalDesktopHostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var server = HostServer.shared
     @StateObject private var auth = AuthStore.shared
+    @StateObject private var launchManager = LaunchManager.shared
 
     var body: some Scene {
         MenuBarExtra("Local Desktop Host", systemImage: "desktopcomputer") {
             MenuBarView()
                 .environmentObject(server)
                 .environmentObject(auth)
+                .environmentObject(launchManager)
         }
         .menuBarExtraStyle(.window)
     }
