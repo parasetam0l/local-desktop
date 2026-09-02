@@ -4,6 +4,7 @@ import AppKit
 struct MenuBarView: View {
     @EnvironmentObject private var server: HostServer
     @EnvironmentObject private var auth: AuthStore
+    @EnvironmentObject private var launchManager: LaunchManager
 
     @State private var newPIN = ""
     @State private var changePIN = ""
@@ -141,6 +142,30 @@ struct MenuBarView: View {
             }
 
             Section {
+                Toggle("Start automatically on restart", isOn: Binding(
+                    get: { launchManager.isEnabled },
+                    set: { launchManager.setLaunchOnRestart($0) }
+                ))
+                if launchManager.status == .requiresApproval {
+                    Label("Approval required in macOS System Settings.", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                        .font(.caption)
+                    Button("Open Login Items Settings…") {
+                        launchManager.openSystemSettings()
+                    }
+                }
+                if let error = launchManager.lastError {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                }
+            } header: {
+                Text("General")
+            } footer: {
+                Text("Automatically launches Local Desktop Host when your Mac starts up or restarts.")
+            }
+
+            Section {
                 if !server.screenGranted {
                     Label("Grant Screen Recording so clients can see this Mac.", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
@@ -168,9 +193,10 @@ struct MenuBarView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 560)
+        .frame(width: 420, height: 600)
         .task {
             server.refreshPermissions()
+            launchManager.refreshStatus()
             if server.screenGranted {
                 server.refreshDisplays()
             }
