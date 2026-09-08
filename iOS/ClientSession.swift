@@ -710,7 +710,7 @@ final class ClientSession: ObservableObject {
     func requestKeyframe(reason: String? = nil) {
         guard phase == .connected else { return }
         let now = Date()
-        guard now.timeIntervalSince(lastKeyframeRequestAt) > 0.4 else { return }
+        guard now.timeIntervalSince(lastKeyframeRequestAt) > 0.25 else { return }
         lastKeyframeRequestAt = now
         sendJSON(.requestKeyframe, RequestKeyframeMsg(reason: reason))
     }

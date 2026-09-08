@@ -36,6 +36,7 @@ final class ClientSession {
     private(set) var framesDropped = 0
     private var consecutiveDrops = 0
     private var currentBitrateFactor: Double = 1.0
+    private var needsKeyframeRecovery = false
     private var lastActivityAt = Date()
     private var watchdogTimer: Timer?
 
@@ -128,12 +129,26 @@ final class ClientSession {
         })
     }
 
-    func sendVideoFrame(_ data: Data, width: Int, height: Int, codec: RDCodec) {
+    func sendVideoFrame(_ data: Data, isKeyframe: Bool = false, width: Int, height: Int, codec: RDCodec) {
         guard phase == .active else { return }
-        guard canSendFrame else {
+
+        // Drop non-keyframes while recovering to prevent sending corrupted P-frames
+        if needsKeyframeRecovery && !isKeyframe {
             framesDropped += 1
             return
         }
+
+        guard canSendFrame else {
+            framesDropped += 1
+            needsKeyframeRecovery = true
+            ScreenStreamer.shared.requestKeyframe()
+            return
+        }
+
+        if isKeyframe {
+            needsKeyframeRecovery = false
+        }
+
         framesSent += 1
         send(.frame, RDFrameCodec.pack(width: width, height: height, codec: codec, data: data), encrypted: true)
     }
@@ -284,6 +299,10 @@ final class ClientSession {
             guard phase == .active else { break }
             let msg = RDJSON.decode(RequestKeyframeMsg.self, from: payload)
             ScreenStreamer.shared.requestKeyframe()
+            if let keyframe = ScreenStreamer.shared.lastKeyframe,
+               ScreenStreamer.shared.timeSinceLastFrame > 0.3 {
+                sendVideoFrame(keyframe.data, isKeyframe: true, width: keyframe.width, height: keyframe.height, codec: keyframe.codec)
+            }
             if msg?.reason == "user_refresh" || ScreenStreamer.shared.timeSinceLastFrame > 1.5 || !ScreenStreamer.shared.isRunning {
                 server?.handleRefreshVideoRequest()
             }
@@ -301,6 +320,7 @@ final class ClientSession {
 
         case .mouseMoveAbs:
             guard phase == .active, let msg = RDJSON.decode(MouseMoveAbsMsg.self, from: payload) else { break }
+            InputInjector.tickleUserActivity()
             if let point = server?.globalPoint(x: msg.x, y: msg.y) {
                 InputInjector.moveAbs(Double(point.x), Double(point.y))
                 if let cur = server?.currentCursorInFrame() {
@@ -310,6 +330,7 @@ final class ClientSession {
 
         case .mouseMoveRel:
             guard phase == .active, let msg = RDJSON.decode(MouseMoveRelMsg.self, from: payload) else { break }
+            InputInjector.tickleUserActivity()
             InputInjector.moveRel(dx: msg.dx, dy: msg.dy)
             if let cur = server?.currentCursorInFrame() {
                 send(.mouseMoveAbs, RDJSON.encode(MouseMoveAbsMsg(x: cur.x, y: cur.y)), encrypted: true)
@@ -317,24 +338,29 @@ final class ClientSession {
 
         case .mouseDown:
             guard phase == .active, let msg = RDJSON.decode(MouseButtonMsg.self, from: payload) else { break }
+            InputInjector.tickleUserActivity()
             InputInjector.buttonDown(msg.button)
 
         case .mouseUp:
             guard phase == .active, let msg = RDJSON.decode(MouseButtonMsg.self, from: payload) else { break }
+            InputInjector.tickleUserActivity()
             InputInjector.buttonUp(msg.button)
 
         case .scroll:
             guard phase == .active, let msg = RDJSON.decode(ScrollMsg.self, from: payload) else { break }
+            InputInjector.tickleUserActivity()
             InputInjector.scroll(dx: msg.dx, dy: msg.dy)
 
         case .keyEvent:
             guard phase == .active, let msg = RDJSON.decode(KeyEventMsg.self, from: payload) else { break }
+            InputInjector.tickleUserActivity()
             InputInjector.key(code: CGKeyCode(msg.code),
                               down: msg.down,
                               flags: InputInjector.flags(RDModifiers(rawValue: msg.flags)))
 
         case .textEvent:
             guard phase == .active, let msg = RDJSON.decode(TextMsg.self, from: payload) else { break }
+            InputInjector.tickleUserActivity()
             InputInjector.text(msg.s)
 
         case .requestApps:

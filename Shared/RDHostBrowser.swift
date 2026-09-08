@@ -6,7 +6,7 @@ struct DiscoveredHost: Identifiable, Equatable {
     /// Bonjour instance name, e.g. "MacBook Pro [A1B2]".
     let id: String
     let name: String
-    let serverId: String?
+    var serverId: String? = nil
     let endpoint: NWEndpoint
 }
 
@@ -57,6 +57,7 @@ final class HostBrowser: ObservableObject {
                                                       port: NWEndpoint.Port(rawValue: 52341)!)
                 let simHost = DiscoveredHost(id: "local_mac_sim",
                                              name: "Mac (Local Simulator)",
+                                             serverId: "local_mac_sim",
                                              endpoint: simEndpoint)
                 if !allItems.contains(where: { $0.id == simHost.id }) {
                     allItems.insert(simHost, at: 0)
