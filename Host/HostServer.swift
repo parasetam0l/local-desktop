@@ -30,6 +30,7 @@ final class HostServer: ObservableObject {
 
     private var displaySleepAssertion: IOPMAssertionID = 0
     private var systemSleepAssertion: IOPMAssertionID = 0
+    private var caffeinateProcess: Process?
 
     /// First IPv4 address on a physical interface (en0…), for display in the menu.
     static func primaryLANAddress() -> String? {
@@ -65,11 +66,11 @@ final class HostServer: ObservableObject {
     }
 
     private init() {
-        ScreenStreamer.shared.onVideoPacket = { [weak self] data, width, height, codec in
+        ScreenStreamer.shared.onVideoPacket = { [weak self] data, isKeyframe, width, height, codec in
             Task { @MainActor in
                 guard let self, !self.activeSessions.isEmpty else { return }
                 for session in self.activeSessions {
-                    session.sendVideoFrame(data, width: width, height: height, codec: codec)
+                    session.sendVideoFrame(data, isKeyframe: isKeyframe, width: width, height: height, codec: codec)
                 }
             }
         }
@@ -315,7 +316,7 @@ final class HostServer: ObservableObject {
             clientName = "\(activeSessions.count) devices connected"
         }
         if let keyframe = ScreenStreamer.shared.lastKeyframe {
-            session.sendVideoFrame(keyframe.data, width: keyframe.width, height: keyframe.height, codec: keyframe.codec)
+            session.sendVideoFrame(keyframe.data, isKeyframe: true, width: keyframe.width, height: keyframe.height, codec: keyframe.codec)
         }
         Task {
             do {
@@ -503,6 +504,13 @@ final class HostServer: ObservableObject {
                 &systemSleepAssertion
             )
         }
+        if caffeinateProcess == nil || caffeinateProcess?.isRunning == false {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+            proc.arguments = ["-disu", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
+            try? proc.run()
+            caffeinateProcess = proc
+        }
     }
 
     private func releasePowerAssertions() {
@@ -513,6 +521,12 @@ final class HostServer: ObservableObject {
         if systemSleepAssertion != 0 {
             IOPMAssertionRelease(systemSleepAssertion)
             systemSleepAssertion = 0
+        }
+        if let proc = caffeinateProcess {
+            if proc.isRunning {
+                proc.terminate()
+            }
+            caffeinateProcess = nil
         }
     }
 
@@ -568,6 +582,18 @@ final class HostServer: ObservableObject {
         let y = (mousePos.y - bounds.minY) / bounds.height * Double(size.height)
         return (x: min(max(x, 0), Double(size.width)),
                 y: min(max(y, 0), Double(size.height)))
+    }
+
+    deinit {
+        if displaySleepAssertion != 0 {
+            IOPMAssertionRelease(displaySleepAssertion)
+        }
+        if systemSleepAssertion != 0 {
+            IOPMAssertionRelease(systemSleepAssertion)
+        }
+        if let proc = caffeinateProcess, proc.isRunning {
+            proc.terminate()
+        }
     }
 }
 

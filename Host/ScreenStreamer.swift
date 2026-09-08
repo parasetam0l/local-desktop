@@ -19,12 +19,26 @@ final class HardwareVideoEncoder {
     private(set) var codec: RDCodec = .hevc
     var onPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)? // data, isKeyframe, width, height, codec
 
+    private let lock = NSLock()
+    private var isTornDown = false
+
     func setup(width: Int32, height: Int32, fps: Int, bitrate: Int, codec: RDCodec = .hevc) {
-        if session != nil && self.width == width && self.height == height && self.codec == codec { return }
-        teardown()
+        lock.lock()
+        if session != nil && self.width == width && self.height == height && self.codec == codec && !isTornDown {
+            lock.unlock()
+            return
+        }
+        let oldSession = session
+        session = nil
+        isTornDown = false
         self.width = width
         self.height = height
         self.codec = codec
+        lock.unlock()
+
+        if let oldSession {
+            VTCompressionSessionInvalidate(oldSession)
+        }
 
         var newSession: VTCompressionSession?
         let callback: VTCompressionOutputCallback = { outputCallbackRefCon, _, status, _, sampleBuffer in
@@ -49,7 +63,6 @@ final class HardwareVideoEncoder {
         )
 
         guard status == noErr, let session = newSession else { return }
-        self.session = session
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
@@ -68,13 +81,19 @@ final class HardwareVideoEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
         
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFTypeRef)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (fps * 10) as CFTypeRef)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 10.0 as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(Double(fps) * 2.5) as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.5 as CFTypeRef)
         VTCompressionSessionPrepareToEncodeFrames(session)
+
+        lock.lock()
+        self.session = session
+        lock.unlock()
     }
 
     func setDynamicBitrate(_ newBitrate: Int) {
-        guard let session, newBitrate > 0 else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let session, !isTornDown, newBitrate > 0 else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: newBitrate as CFTypeRef)
         let bytesPerSecond = newBitrate / 8
         let limits: [NSNumber] = [NSNumber(value: Int(Double(bytesPerSecond) * 2.5)), NSNumber(value: 1)]
@@ -82,7 +101,11 @@ final class HardwareVideoEncoder {
     }
 
     func encode(pixelBuffer: CVPixelBuffer, pts: CMTime, forceKeyframe: Bool = false) {
-        guard let session else { return }
+        lock.lock()
+        guard let session, !isTornDown else {
+            lock.unlock()
+            return
+        }
         var flags: VTEncodeInfoFlags = []
         var frameProperties: [String: Any]?
         if forceKeyframe {
@@ -97,6 +120,7 @@ final class HardwareVideoEncoder {
             sourceFrameRefcon: nil,
             infoFlagsOut: &flags
         )
+        lock.unlock()
     }
 
     private func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
@@ -205,9 +229,14 @@ final class HardwareVideoEncoder {
     }
 
     func teardown() {
-        if let session {
-            VTCompressionSessionInvalidate(session)
-            self.session = nil
+        lock.lock()
+        isTornDown = true
+        let oldSession = session
+        session = nil
+        lock.unlock()
+
+        if let oldSession {
+            VTCompressionSessionInvalidate(oldSession)
         }
     }
 }
@@ -217,7 +246,7 @@ final class HardwareVideoEncoder {
 final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     static let shared = ScreenStreamer()
 
-    var onVideoPacket: ((Data, Int, Int, RDCodec) -> Void)?
+    var onVideoPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)?
     var onError: ((String) -> Void)?
     var isReady: (() -> Bool)?
 
@@ -239,6 +268,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let captureQueue = DispatchQueue(label: "rd.capture", qos: .userInteractive)
     private let encoder = HardwareVideoEncoder()
     private var forceNextKeyframe = false
+    private var isCapturing = false
+    private var restartDebounceTask: Task<Void, Error>?
 
     private override init() {
         super.init()
@@ -249,7 +280,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.lastKeyframe = (data, width, height, codec)
             }
             self.framesEmitted += 1
-            self.onVideoPacket?(data, width, height, codec)
+            self.onVideoPacket?(data, isKeyframe, width, height, codec)
         }
     }
 
@@ -308,14 +339,22 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         runningDisplay = display.displayID
         currentDisplay = display.displayID
         forceNextKeyframe = true
+        isCapturing = true
     }
 
     func restart(displayID: CGDirectDisplayID? = nil, preset newPreset: RDQualityPreset? = nil, codec: RDCodec? = nil) async throws {
-        let targetID = displayID ?? runningDisplay ?? CGMainDisplayID()
-        let targetPreset = newPreset ?? preset
-        let targetCodec = codec ?? currentCodec
-        try await start(displayID: targetID, preset: targetPreset, codec: targetCodec, forceRestart: true)
-        requestKeyframe()
+        restartDebounceTask?.cancel()
+        let task = Task {
+            try await Task.sleep(nanoseconds: 150_000_000)
+            try Task.checkCancellation()
+            let targetID = displayID ?? runningDisplay ?? CGMainDisplayID()
+            let targetPreset = newPreset ?? preset
+            let targetCodec = codec ?? currentCodec
+            try await start(displayID: targetID, preset: targetPreset, codec: targetCodec, forceRestart: true)
+            requestKeyframe()
+        }
+        restartDebounceTask = task
+        try await task.value
     }
 
     func updatePreset(_ newPreset: RDQualityPreset) async {
@@ -346,6 +385,9 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stop() {
+        isCapturing = false
+        restartDebounceTask?.cancel()
+        restartDebounceTask = nil
         stream?.stopCapture { _ in }
         stream = nil
         runningDisplay = nil
@@ -394,7 +436,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard isCapturing, type == .screen, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastFrameTime = Date()
         if let isReady, !isReady() { return }
 

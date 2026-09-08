@@ -48,12 +48,30 @@ enum InputInjector {
         moveAbs(base.x + dx, base.y + dy)
     }
 
+    private static var lastUserActivityTickle: TimeInterval = 0
+
+    /// Throttled user activity declaration to inform macOS powerd of ongoing local interaction.
+    static func tickleUserActivity() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastUserActivityTickle > 4.0 else { return }
+        lastUserActivityTickle = now
+
+        var id: IOPMAssertionID = 0
+        let ret = IOPMAssertionDeclareUserActivity("Local Desktop User Activity" as CFString, kIOPMUserActiveLocal, &id)
+        if ret == kIOReturnSuccess && id != 0 {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
+                IOPMAssertionRelease(id)
+            }
+        }
+    }
+
     /// Awakens the display from dark wake / power saving state using a multi-vector wake sequence:
     /// 1. IOKit local user active power assertion
     /// 2. Asynchronous caffeinate -u invocation
     /// 3. Non-zero hardware cursor delta nudge
     /// 4. Non-destructive modifier key pulse (Shift key tap)
     static func wakeDisplay() {
+        lastUserActivityTickle = ProcessInfo.processInfo.systemUptime
         // 1. Declare User Activity to IOKit Power Management
         var assertionID: IOPMAssertionID = 0
         let ret = IOPMAssertionDeclareUserActivity("Local Desktop Wake Display" as CFString, kIOPMUserActiveLocal, &assertionID)
