@@ -185,6 +185,7 @@ struct MenuBarView: View {
                         .foregroundStyle(.red)
                 }
                 Button("Quit Local Desktop") {
+                    CrashRecoveryManager.shared.markCleanExit()
                     NSApplication.shared.terminate(nil)
                 }
                 .frame(maxWidth: .infinity, alignment: .center)

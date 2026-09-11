@@ -37,6 +37,7 @@ final class HardwareVideoEncoder {
         lock.unlock()
 
         if let oldSession {
+            VTCompressionSessionCompleteFrames(oldSession, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(oldSession)
         }
 
@@ -236,29 +237,145 @@ final class HardwareVideoEncoder {
         lock.unlock()
 
         if let oldSession {
+            VTCompressionSessionCompleteFrames(oldSession, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(oldSession)
         }
     }
 }
 
-// MARK: - ScreenStreamer
-
-final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
-    static let shared = ScreenStreamer()
+final class CaptureState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _frameSize: CGSize = .zero
+    private var _lastKeyframe: (data: Data, width: Int, height: Int, codec: RDCodec)?
+    private var _framesEmitted: Int = 0
+    private var _lastFrameTime: Date = .distantPast
+    private var _forceNextKeyframe: Bool = false
+    private var _isCapturing: Bool = false
 
     var onVideoPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)?
     var onError: ((String) -> Void)?
     var isReady: (() -> Bool)?
+    let encoder = HardwareVideoEncoder()
 
-    private(set) var currentDisplay: CGDirectDisplayID = CGMainDisplayID()
-    private(set) var frameSize: CGSize = .zero
-    private(set) var lastKeyframe: (data: Data, width: Int, height: Int, codec: RDCodec)?
-    private(set) var framesEmitted = 0
-    private(set) var lastFrameTime: Date = .distantPast
+    init() {
+        encoder.onPacket = { [weak self] data, isKeyframe, width, height, codec in
+            guard let self else { return }
+            self.lock.lock()
+            self._frameSize = CGSize(width: width, height: height)
+            if isKeyframe {
+                self._lastKeyframe = (data, width, height, codec)
+            }
+            self._framesEmitted += 1
+            let callback = self.onVideoPacket
+            self.lock.unlock()
+
+            callback?(data, isKeyframe, width, height, codec)
+        }
+    }
+
+    var frameSize: CGSize {
+        lock.lock()
+        defer { lock.unlock() }
+        return _frameSize
+    }
+
+    var lastKeyframe: (data: Data, width: Int, height: Int, codec: RDCodec)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lastKeyframe
+    }
+
+    var framesEmitted: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _framesEmitted
+    }
+
+    var lastFrameTime: Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lastFrameTime
+    }
 
     var timeSinceLastFrame: TimeInterval {
-        Date().timeIntervalSince(lastFrameTime)
+        lock.lock()
+        defer { lock.unlock() }
+        return Date().timeIntervalSince(_lastFrameTime)
     }
+
+    func requestKeyframe() {
+        lock.lock()
+        _forceNextKeyframe = true
+        lock.unlock()
+    }
+
+    func setCapturing(_ capturing: Bool) {
+        lock.lock()
+        _isCapturing = capturing
+        if capturing {
+            _forceNextKeyframe = true
+        }
+        lock.unlock()
+    }
+
+    func resetStats() {
+        lock.lock()
+        _frameSize = .zero
+        _framesEmitted = 0
+        _lastKeyframe = nil
+        lock.unlock()
+    }
+
+    func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        lock.lock()
+        guard _isCapturing, type == .screen, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            lock.unlock()
+            return
+        }
+        _lastFrameTime = Date()
+        let force = _forceNextKeyframe
+        if force {
+            _forceNextKeyframe = false
+        }
+        let readyCheck = isReady
+        lock.unlock()
+
+        if let readyCheck, !readyCheck() { return }
+
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        encoder.encode(pixelBuffer: pixelBuffer, pts: pts, forceKeyframe: force)
+    }
+}
+
+// MARK: - ScreenStreamer
+
+@MainActor
+final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
+    static let shared = ScreenStreamer()
+
+    nonisolated let state = CaptureState()
+
+    var onVideoPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)? {
+        get { state.onVideoPacket }
+        set { state.onVideoPacket = newValue }
+    }
+
+    var onError: ((String) -> Void)? {
+        get { state.onError }
+        set { state.onError = newValue }
+    }
+
+    var isReady: (() -> Bool)? {
+        get { state.isReady }
+        set { state.isReady = newValue }
+    }
+
+    private(set) var currentDisplay: CGDirectDisplayID = CGMainDisplayID()
+    var frameSize: CGSize { state.frameSize }
+    var lastKeyframe: (data: Data, width: Int, height: Int, codec: RDCodec)? { state.lastKeyframe }
+    var framesEmitted: Int { state.framesEmitted }
+    var lastFrameTime: Date { state.lastFrameTime }
+    var timeSinceLastFrame: TimeInterval { state.timeSinceLastFrame }
 
     private var stream: SCStream?
     private var preset: RDQualityPreset = .high
@@ -266,28 +383,16 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     var showRemoteCursor: Bool = false
     private var runningDisplay: CGDirectDisplayID?
     private let captureQueue = DispatchQueue(label: "rd.capture", qos: .userInteractive)
-    private let encoder = HardwareVideoEncoder()
-    private var forceNextKeyframe = false
-    private var isCapturing = false
     private var restartDebounceTask: Task<Void, Error>?
 
     private override init() {
         super.init()
-        encoder.onPacket = { [weak self] data, isKeyframe, width, height, codec in
-            guard let self else { return }
-            self.frameSize = CGSize(width: width, height: height)
-            if isKeyframe {
-                self.lastKeyframe = (data, width, height, codec)
-            }
-            self.framesEmitted += 1
-            self.onVideoPacket?(data, isKeyframe, width, height, codec)
-        }
     }
 
     var isRunning: Bool { stream != nil }
 
     func requestKeyframe() {
-        forceNextKeyframe = true
+        state.requestKeyframe()
     }
 
     func loadDisplays() async -> [DisplayInfo] {
@@ -324,7 +429,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let config = makeConfiguration(for: display)
         
-        encoder.setup(
+        state.encoder.setup(
             width: Int32(config.width),
             height: Int32(config.height),
             fps: preset.fps,
@@ -338,20 +443,20 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = newStream
         runningDisplay = display.displayID
         currentDisplay = display.displayID
-        forceNextKeyframe = true
-        isCapturing = true
+        state.setCapturing(true)
     }
 
     func restart(displayID: CGDirectDisplayID? = nil, preset newPreset: RDQualityPreset? = nil, codec: RDCodec? = nil) async throws {
         restartDebounceTask?.cancel()
-        let task = Task {
+        let targetID = displayID ?? runningDisplay ?? CGMainDisplayID()
+        let targetPreset = newPreset ?? preset
+        let targetCodec = codec ?? currentCodec
+
+        let task = Task { @MainActor in
             try await Task.sleep(nanoseconds: 150_000_000)
             try Task.checkCancellation()
-            let targetID = displayID ?? runningDisplay ?? CGMainDisplayID()
-            let targetPreset = newPreset ?? preset
-            let targetCodec = codec ?? currentCodec
-            try await start(displayID: targetID, preset: targetPreset, codec: targetCodec, forceRestart: true)
-            requestKeyframe()
+            try await self.start(displayID: targetID, preset: targetPreset, codec: targetCodec, forceRestart: true)
+            self.requestKeyframe()
         }
         restartDebounceTask = task
         try await task.value
@@ -368,7 +473,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         let content = try? await SCShareableContent.current
         if let display = content?.displays.first(where: { $0.displayID == runningDisplay }) ?? content?.displays.first {
             let config = makeConfiguration(for: display)
-            encoder.setup(
+            state.encoder.setup(
                 width: Int32(config.width),
                 height: Int32(config.height),
                 fps: preset.fps,
@@ -381,20 +486,25 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func setDynamicBitrate(_ newBitrate: Int) {
-        encoder.setDynamicBitrate(newBitrate)
+        state.encoder.setDynamicBitrate(newBitrate)
     }
 
     func stop() {
-        isCapturing = false
+        state.setCapturing(false)
         restartDebounceTask?.cancel()
         restartDebounceTask = nil
-        stream?.stopCapture { _ in }
-        stream = nil
+
+        if let activeStream = stream {
+            activeStream.stopCapture { _ in }
+            stream = nil
+        }
         runningDisplay = nil
-        frameSize = .zero
-        framesEmitted = 0
-        lastKeyframe = nil
-        encoder.teardown()
+        state.resetStats()
+
+        // Wait for any in-flight sample buffer callback to drain from captureQueue
+        captureQueue.sync { }
+
+        state.encoder.teardown()
     }
 
     private func makeConfiguration(for display: SCDisplay) -> SCStreamConfiguration {
@@ -435,24 +545,16 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: SCStreamOutput
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard isCapturing, type == .screen, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        lastFrameTime = Date()
-        if let isReady, !isReady() { return }
-
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let force = forceNextKeyframe
-        if force {
-            forceNextKeyframe = false
-        }
-        encoder.encode(pixelBuffer: pixelBuffer, pts: pts, forceKeyframe: force)
+    nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        state.processSampleBuffer(sampleBuffer, of: type)
     }
 
     // MARK: SCStreamDelegate
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        DispatchQueue.main.async { [weak self] in
-            self?.onError?("Screen capture stopped: \(error.localizedDescription)")
+    nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
+        let errDesc = error.localizedDescription
+        Task { @MainActor in
+            self.onError?("Screen capture stopped: \(errDesc)")
         }
     }
 }

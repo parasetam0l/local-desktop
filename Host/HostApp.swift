@@ -6,25 +6,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Live processes with our bundle ID other than ourselves. A freshly
     /// killed twin can linger in this list briefly, so callers double-check.
     private func otherInstances() -> [NSRunningApplication] {
-        let bundleID = Bundle.main.bundleIdentifier ?? "localdesktop.LocalDesktopHost"
+        let bundleID = Bundle.main.bundleIdentifier ?? "localdesktop.host"
         let myPID = ProcessInfo.processInfo.processIdentifier
         return NSRunningApplication
             .runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != myPID && !$0.isTerminated }
+            .filter { $0.processIdentifier != myPID && !$0.isTerminated && kill($0.processIdentifier, 0) == 0 }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard !otherInstances().isEmpty else { return }
+        guard !otherInstances().isEmpty else {
+            CrashRecoveryManager.shared.start()
+            return
+        }
         // Trust only a twin that is still present after the launch dust settles.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            guard let existing = self.otherInstances().first else { return }
+            guard let existing = self.otherInstances().first else {
+                CrashRecoveryManager.shared.start()
+                return
+            }
+            CrashRecoveryManager.shared.markCleanExit()
             existing.activate()
             NSApp.terminate(nil)
         }
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        CrashRecoveryManager.shared.markCleanExit()
+    }
 }
 
-@main
 struct LocalDesktopHostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var server = HostServer.shared
