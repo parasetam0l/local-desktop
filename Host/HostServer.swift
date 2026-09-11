@@ -461,13 +461,13 @@ final class HostServer: ObservableObject {
         InputInjector.wakeDisplay()
         isDisplaySleeping = false
         broadcastHostState()
-        Task {
+        Task { @MainActor in
             try? await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
         }
     }
 
     func handleRefreshVideoRequest() {
-        Task {
+        Task { @MainActor in
             try? await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
         }
     }
