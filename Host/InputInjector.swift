@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import IOKit.pwr_mgt
+import Carbon
 
 /// Posts mouse, scroll, and keyboard events into the system event stream.
 enum InputInjector {
@@ -161,19 +162,209 @@ enum InputInjector {
         }
     }
 
-    /// Types text as unicode key events, one code point per down/up pair.
-    static func text(_ string: String) {
-        for scalar in string.unicodeScalars {
-            var buffer = Array(String(scalar).utf16)
-            guard !buffer.isEmpty else { continue }
-            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
-            down?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
-            down?.post(tap: .cghidEventTap)
-            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
-            up?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
-            up?.post(tap: .cghidEventTap)
+    private struct KeyMapping {
+        let keyCode: CGKeyCode
+        let flags: CGEventFlags
+    }
+
+    private static let keyMapLock = NSLock()
+    private static var cachedLayoutID: String = ""
+    private static var charToKeyMap: [String: KeyMapping] = [:]
+
+    private static func keyMapping(for character: String) -> KeyMapping? {
+        keyMapLock.lock()
+        defer { keyMapLock.unlock() }
+
+        updateKeyMapIfNeeded()
+        return charToKeyMap[character]
+            ?? charToKeyMap[character.precomposedStringWithCanonicalMapping]
+            ?? charToKeyMap[character.decomposedStringWithCanonicalMapping]
+    }
+
+    private static func updateKeyMapIfNeeded() {
+        guard let (layoutData, layoutID) = getLayoutData() else {
+            if charToKeyMap.isEmpty {
+                buildFallbackKeyMap()
+            }
+            return
+        }
+
+        if layoutID == cachedLayoutID && !charToKeyMap.isEmpty {
+            return
+        }
+
+        cachedLayoutID = layoutID
+        charToKeyMap.removeAll(keepingCapacity: true)
+
+        let keyLayoutPtr = CFDataGetBytePtr(layoutData)
+        guard let rawBase = keyLayoutPtr else {
+            buildFallbackKeyMap()
+            return
+        }
+        let keyLayout = UnsafeRawPointer(rawBase).bindMemory(to: UCKeyboardLayout.self, capacity: 1)
+
+        let modifierCombos: [(UInt32, CGEventFlags)] = [
+            (0, []),
+            (UInt32(shiftKey >> 8), [.maskShift]),
+            (UInt32(optionKey >> 8), [.maskAlternate]),
+            (UInt32((shiftKey | optionKey) >> 8), [.maskShift, .maskAlternate])
+        ]
+
+        for (modState, flags) in modifierCombos {
+            for code: UInt16 in 0..<128 {
+                var deadKeyState: UInt32 = 0
+                var chars = [UniChar](repeating: 0, count: 4)
+                var length: Int = 0
+                let err = UCKeyTranslate(
+                    keyLayout,
+                    code,
+                    UInt16(kUCKeyActionDown),
+                    modState,
+                    UInt32(LMGetKbdType()),
+                    OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                    &deadKeyState,
+                    4,
+                    &length,
+                    &chars
+                )
+                if err == noErr && length > 0 {
+                    let str = String(utf16CodeUnits: chars, count: length)
+                    let mapping = KeyMapping(keyCode: CGKeyCode(code), flags: flags)
+                    if charToKeyMap[str] == nil {
+                        charToKeyMap[str] = mapping
+                        charToKeyMap[str.precomposedStringWithCanonicalMapping] = mapping
+                        charToKeyMap[str.decomposedStringWithCanonicalMapping] = mapping
+                    }
+                }
+            }
+        }
+
+        if charToKeyMap["\n"] == nil { charToKeyMap["\n"] = KeyMapping(keyCode: 36, flags: []) }
+        if charToKeyMap["\r"] == nil { charToKeyMap["\r"] = KeyMapping(keyCode: 36, flags: []) }
+        if charToKeyMap["\t"] == nil { charToKeyMap["\t"] = KeyMapping(keyCode: 48, flags: []) }
+        if charToKeyMap[" "] == nil { charToKeyMap[" "] = KeyMapping(keyCode: 49, flags: []) }
+    }
+
+    private static func getLayoutData() -> (CFData, String)? {
+        if let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() {
+            let id = (TISGetInputSourceProperty(source, kTISPropertyInputSourceID)
+                .map { unsafeBitCast($0, to: CFString.self) as String }) ?? "current"
+            if let layoutDataRef = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) {
+                let data = unsafeBitCast(layoutDataRef, to: CFData.self)
+                return (data, id)
+            }
+        }
+        if let asciiSource = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue() {
+            let id = (TISGetInputSourceProperty(asciiSource, kTISPropertyInputSourceID)
+                .map { unsafeBitCast($0, to: CFString.self) as String }) ?? "ascii"
+            if let layoutDataRef = TISGetInputSourceProperty(asciiSource, kTISPropertyUnicodeKeyLayoutData) {
+                let data = unsafeBitCast(layoutDataRef, to: CFData.self)
+                return (data, id)
+            }
+        }
+        return nil
+    }
+
+    private static func buildFallbackKeyMap() {
+        let ansiBase: [(Character, CGKeyCode)] = [
+            ("a", 0), ("b", 11), ("c", 8), ("d", 2), ("e", 14), ("f", 3), ("g", 5),
+            ("h", 4), ("i", 34), ("j", 38), ("k", 40), ("l", 37), ("m", 46), ("n", 45),
+            ("o", 31), ("p", 35), ("q", 12), ("r", 15), ("s", 1), ("t", 17), ("u", 32),
+            ("v", 9), ("w", 13), ("x", 7), ("y", 16), ("z", 6),
+            ("1", 18), ("2", 19), ("3", 20), ("4", 21), ("5", 23),
+            ("6", 22), ("7", 26), ("8", 28), ("9", 25), ("0", 29),
+            (" ", 49), ("\t", 48), ("\n", 36), ("\r", 36),
+            ("-", 27), ("=", 24), ("[", 33), ("]", 30), ("\\", 42),
+            (";", 41), ("'", 39), (",", 43), (".", 47), ("/", 44), ("`", 50)
+        ]
+        for (char, code) in ansiBase {
+            charToKeyMap[String(char)] = KeyMapping(keyCode: code, flags: [])
+            let upper = String(char).uppercased()
+            if upper != String(char) && charToKeyMap[upper] == nil {
+                charToKeyMap[upper] = KeyMapping(keyCode: code, flags: [.maskShift])
+            }
+        }
+        let shiftedSymbols: [(Character, CGKeyCode)] = [
+            ("!", 18), ("@", 19), ("#", 20), ("$", 21), ("%", 23),
+            ("^", 22), ("&", 26), ("*", 28), ("(", 25), (")", 29),
+            ("_", 27), ("+", 24), ("{", 33), ("}", 30), ("|", 42),
+            (":", 41), ("\"", 39), ("<", 43), (">", 47), ("?", 44), ("~", 50)
+        ]
+        for (char, code) in shiftedSymbols {
+            charToKeyMap[String(char)] = KeyMapping(keyCode: code, flags: [.maskShift])
         }
     }
+
+    /// Types text by mapping characters to actual virtual key codes and modifiers,
+    /// ensuring hypervisors (like Parallels Desktop), remote sessions, and native macOS apps
+    /// receive both physical keycodes and Unicode payloads.
+    static func text(_ string: String) {
+        for character in string {
+            let charStr = String(character)
+            var buffer = Array(charStr.utf16)
+            guard !buffer.isEmpty else { continue }
+
+            if let mapping = keyMapping(for: charStr) {
+                let needsShift = mapping.flags.contains(.maskShift)
+                let needsAlt = mapping.flags.contains(.maskAlternate)
+
+                // 1. Press modifier keys if required so hypervisors (Parallels/VMware) see the modifier state
+                if needsShift {
+                    if let shiftDown = CGEvent(keyboardEventSource: source, virtualKey: 56, keyDown: true) {
+                        shiftDown.type = .flagsChanged
+                        shiftDown.flags = [.maskShift]
+                        shiftDown.post(tap: .cghidEventTap)
+                    }
+                }
+                if needsAlt {
+                    if let altDown = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: true) {
+                        altDown.type = .flagsChanged
+                        var f: CGEventFlags = [.maskAlternate]
+                        if needsShift { f.insert(.maskShift) }
+                        altDown.flags = f
+                        altDown.post(tap: .cghidEventTap)
+                    }
+                }
+
+                // 2. Dispatch mapped keycode with Unicode payload attached
+                if let down = CGEvent(keyboardEventSource: source, virtualKey: mapping.keyCode, keyDown: true) {
+                    down.flags = mapping.flags
+                    down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
+                    down.post(tap: .cghidEventTap)
+                }
+                if let up = CGEvent(keyboardEventSource: source, virtualKey: mapping.keyCode, keyDown: false) {
+                    up.flags = mapping.flags
+                    up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
+                    up.post(tap: .cghidEventTap)
+                }
+
+                // 3. Release modifier keys
+                if needsAlt {
+                    if let altUp = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: false) {
+                        altUp.type = .flagsChanged
+                        altUp.flags = needsShift ? [.maskShift] : []
+                        altUp.post(tap: .cghidEventTap)
+                    }
+                }
+                if needsShift {
+                    if let shiftUp = CGEvent(keyboardEventSource: source, virtualKey: 56, keyDown: false) {
+                        shiftUp.type = .flagsChanged
+                        shiftUp.flags = []
+                        shiftUp.post(tap: .cghidEventTap)
+                    }
+                }
+            } else {
+                // Fallback for unmapped characters (emojis, complex scripts)
+                let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+                down?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
+                down?.post(tap: .cghidEventTap)
+                let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+                up?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
+                up?.post(tap: .cghidEventTap)
+            }
+        }
+    }
+
 
     static func key(code: CGKeyCode, down: Bool, flags: CGEventFlags) {
         let isModifier = (code == 56 || code == 60 || code == 55 || code == 54 || code == 58 || code == 61 || code == 59 || code == 62)
