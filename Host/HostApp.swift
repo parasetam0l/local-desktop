@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Quits immediately when another live copy of the host is already running,
 /// surfacing the existing instance instead.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Live processes with our bundle ID other than ourselves. A freshly
     /// killed twin can linger in this list briefly, so callers double-check.
@@ -15,18 +16,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !otherInstances().isEmpty else {
-            CrashRecoveryManager.shared.start()
+            becomePrimaryInstance()
             return
         }
         // Trust only a twin that is still present after the launch dust settles.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            guard let existing = self.otherInstances().first else {
-                CrashRecoveryManager.shared.start()
-                return
+            MainActor.assumeIsolated {
+                guard let existing = self.otherInstances().first else {
+                    self.becomePrimaryInstance()
+                    return
+                }
+                // This copy never started crash recovery or sharing, so quitting it
+                // leaves the primary's supervisor and listener untouched.
+                existing.activate()
+                NSApp.terminate(nil)
             }
-            CrashRecoveryManager.shared.markCleanExit()
-            existing.activate()
-            NSApp.terminate(nil)
+        }
+    }
+
+    private func becomePrimaryInstance() {
+        CrashRecoveryManager.shared.start()
+        let afterCrash = CommandLine.arguments.contains(CrashRecoveryManager.recoveredArgument)
+        HostServer.shared.autoStartIfNeeded(afterCrash: afterCrash)
+        // First launch, or a permission went missing (e.g. after an update): walk through setup.
+        if !HostServer.shared.missingSetup.isEmpty {
+            SetupWindowController.shared.show()
         }
     }
 

@@ -22,36 +22,24 @@ struct SettingsView: View {
                             Text(preset.label).tag(preset.rawValue)
                         }
                     }
-                    .onChange(of: app.settings.qualityRaw) { qualityRaw in
-                        if let session = app.session {
-                            let preset = RDQualityPreset.from(qualityRaw)
-                            let codec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
-                            session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
-                        }
+                    .onChange(of: app.settings.qualityRaw) {
+                        app.applyQualitySettings()
                     }
 
                     Picker("Video Codec", selection: $app.settings.codecRaw) {
                         Text("HEVC / H.265 (Recommended)").tag(RDCodec.hevc.rawValue)
                         Text("H.264").tag(RDCodec.h264.rawValue)
                     }
-                    .onChange(of: app.settings.codecRaw) { codecRaw in
-                        if let session = app.session {
-                            let preset = RDQualityPreset.from(app.settings.qualityRaw)
-                            let codec = RDCodec(rawValue: codecRaw) ?? .hevc
-                            session.setQuality(preset, showRemoteCursor: app.settings.showRemoteCursor, codec: codec)
-                        }
+                    .onChange(of: app.settings.codecRaw) {
+                        app.applyQualitySettings()
                     }
                 }
 
                 Section("Input") {
                     Toggle("Start sessions in touchpad mode", isOn: $app.settings.defaultTouchpad)
                     Toggle("Show remote Mac cursor", isOn: $app.settings.showRemoteCursor)
-                        .onChange(of: app.settings.showRemoteCursor) { showCursor in
-                            if let session = app.session {
-                                let preset = RDQualityPreset.from(app.settings.qualityRaw)
-                                let codec = RDCodec(rawValue: app.settings.codecRaw) ?? .hevc
-                                session.setQuality(preset, showRemoteCursor: showCursor, codec: codec)
-                            }
+                        .onChange(of: app.settings.showRemoteCursor) {
+                            app.applyQualitySettings()
                         }
                     Picker("Pointer Speed", selection: $app.settings.pointerSpeedMultiplier) {
                         Text("Slow").tag(1.0)
@@ -69,7 +57,7 @@ struct SettingsView: View {
                             HStack {
                                 Text(recent.name)
                                 Spacer()
-                                if TrustStore.token(serverId: recent.serverId) != nil {
+                                if app.isPaired(recent.serverId) {
                                     Image(systemName: "checkmark.seal.fill")
                                         .foregroundStyle(.green)
                                 }
@@ -77,16 +65,12 @@ struct SettingsView: View {
                         }
                     }
                     Button("Forget all trusted Macs", role: .destructive) {
-                        for recent in app.recents {
-                            TrustStore.removeToken(serverId: recent.serverId)
-                        }
-                        app.recents = []
-                        app.persistRecents()
+                        app.forgetAllHosts()
                     }
                 } header: {
                     Text("Trusted Macs")
                 } footer: {
-                    Text("Forgetting a Mac here only removes the token from this device. Revoke access on the Mac itself to block it.")
+                    Text("Forgetting a Mac here only removes its pairing from this device. Revoke access on the Mac itself to block this device.")
                 }
             }
             .navigationTitle("Settings")

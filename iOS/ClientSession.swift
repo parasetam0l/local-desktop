@@ -1,11 +1,13 @@
 import Foundation
 import Network
 import CryptoKit
-import CoreMedia
+import AVFoundation
 import UIKit
 
-/// Client side of one local-desktop session: connect, handshake, PIN/token
-/// auth, frame decoding, and input event sending.
+/// Client side of one local-desktop session: connection lifecycle, the
+/// authentication decisions, reconnects, and the input API used by the UI.
+/// Socket I/O and crypto live in `ClientConnection`, decoding in `VideoPipeline`;
+/// this class only ever runs on the main actor.
 @MainActor
 final class ClientSession: ObservableObject {
     enum Phase: Equatable {
@@ -14,22 +16,24 @@ final class ClientSession: ObservableObject {
         case negotiating
         case needPin
         case connected
+        /// Message, and seconds until the automatic reconnect (nil = none scheduled).
         case failed(String, Int?)
         case closed
     }
 
     @Published private(set) var phase: Phase = .idle
-    @Published private(set) var image: UIImage?
     @Published private(set) var hasVideoFrame = false
     @Published private(set) var remoteSize: CGSize = .zero
     @Published private(set) var targetName = ""
     @Published private(set) var serverName = ""
-    private(set) var serverMacAddress: String?
     @Published private(set) var serverId = ""
+    /// Fingerprint of the Mac's identity key, shown while pairing.
+    @Published private(set) var hostFingerprint = ""
     @Published private(set) var hostDescription = ""
     @Published private(set) var pinError: String?
     @Published private(set) var pinAttemptCounter = 0
-    @Published private(set) var videoStatus: String?
+    /// The Mac presented a different identity than the one this device paired with.
+    @Published private(set) var identityMismatchServerId: String?
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
     @Published private(set) var runningApps: [RDRunningApp] = []
@@ -38,9 +42,8 @@ final class ClientSession: ObservableObject {
     @Published private(set) var liveFPS: Double = 0.0
     @Published private(set) var liveBitrateMbps: Double = 0.0
     @Published private(set) var liveDecodeMs: Double = 0.0
-    private(set) var framesReceived = 0
-    private var bytesReceivedInLastSec = 0
-    private var framesReceivedInLastSec = 0
+    @Published private(set) var currentRTT: Double = 0.0
+    private(set) var serverMacAddress: String?
 
     var displayName: String {
         if !serverName.isEmpty {
@@ -49,40 +52,52 @@ final class ClientSession: ObservableObject {
         if !targetName.isEmpty {
             return targetName
         }
-        if !hostDescription.isEmpty && !hostDescription.contains(":") {
-            return hostDescription
-        }
         return hostDescription.isEmpty ? "Mac" : hostDescription
     }
 
     let deviceName: String
     var onConnected: ((ClientSession) -> Void)?
-    var onEnded: ((ClientSession) -> Void)?
-    var onCursorMoved: ((CGPoint) -> Void)?
-    var onSampleBuffer: ((CMSampleBuffer, Int, Int) -> Void)?
+    /// Called with the server id after this device pairs with a Mac.
+    var onPaired: ((String) -> Void)?
 
-    private let videoDecoder = VideoDecoder()
-    private var lastKeyframeRequestAt = Date.distantPast
+    private static let reconnectDelays = [1, 2, 4, 8, 15, 30]
+    /// Stop retrying on our own after this long without a successful connection.
+    private static let maxReconnectWindow: TimeInterval = 5 * 60
+    private static let handshakeTimeout: UInt64 = 10_000_000_000
 
+    private lazy var video = VideoPipeline(
+        onSize: { [weak self] size in self?.videoSizeChanged(size) },
+        onNeedsKeyframe: { [weak self] in self?.requestKeyframe(reason: "missing_headers_or_corrupted") }
+    )
+    var videoOutput: VideoOutput { video.output }
+
+    private let networkQueue = DispatchQueue(label: "rd.client.network", qos: .userInteractive)
     private(set) var endpoint: NWEndpoint?
     private var actualEndpoint: NWEndpoint?
-    private var connection: NWConnection?
-    private var privateKey: Curve25519.KeyAgreement.PrivateKey?
-    private var key: SymmetricKey?
-    private let keyLock = NSLock()
-    private var _sessionKey: SymmetricKey?
-    private let networkQueue = DispatchQueue(label: "rd.client.network", qos: .userInteractive)
-    private let decodeQueue = DispatchQueue(label: "rd.client.decode", qos: .userInteractive)
-    private var receiveBuffer = Data()
-    @Published private(set) var currentRTT: Double = 0.0
-    private var lastDecodeTime: Double = 0.0
-    private var lastStatsReport = Date()
+    /// The Mac the user meant to reach (from Bonjour or recents), if known.
+    private var expectedServerId: String?
+    private var connection: ClientConnection?
+    /// Bumped per connection so events from a replaced connection are ignored.
+    private var connectionGeneration = 0
+    private var identity: ServerIdentity?
+    /// How this connection asked to be let in; authOK is only valid after one of these.
+    private enum AuthAttempt {
+        case pin(trust: Bool)
+        case device
+    }
+    private var authAttempt: AuthAttempt?
+    private var handshakeTimeoutTask: Task<Void, Never>?
     private var pingTimer: Timer?
-    private var connectionTimeoutTask: Task<Void, Never>?
+    private var countdownTimer: Timer?
     private var lastPongAt = Date()
+    private var lastStatsReport = Date()
+    private var lastKeyframeRequestAt = Date.distantPast
     private(set) var hasConnectedOnce = false
-    private(set) var userInitiatedDisconnect = false
-    private var consecutiveFailures = 0
+    private var userInitiatedDisconnect = false
+    private var reconnectAttempt = 0
+    private var failingSince: Date?
+    /// After a Wake-on-LAN, keep retrying even before the first successful connection.
+    private var wakeRetryDeadline: Date?
     var autoReconnect = true
 
     init(deviceName: String) {
@@ -90,175 +105,187 @@ final class ClientSession: ObservableObject {
     }
 
     var currentEndpoint: NWEndpoint? { actualEndpoint ?? endpoint }
-    var canReconnect: Bool { currentEndpoint != nil && hasConnectedOnce }
-
-    static func makeParameters() -> NWParameters {
-        let tcpOptions = NWProtocolTCP.Options()
-        tcpOptions.noDelay = true
-        tcpOptions.connectionTimeout = 6
-        tcpOptions.enableFastOpen = true
-        let params = NWParameters(tls: nil, tcp: tcpOptions)
-        params.allowLocalEndpointReuse = true
-        params.includePeerToPeer = false
-        if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            ipOptions.version = .v4
-        }
-        return params
+    var canReconnect: Bool {
+        guard currentEndpoint != nil else { return false }
+        return hasConnectedOnce || (wakeRetryDeadline.map { $0 > Date() } ?? false)
     }
 
     // MARK: Connection lifecycle
 
-    func connect(to target: NWEndpoint, fallbackName: String? = nil, preserveImage: Bool = false) {
+    func connect(to target: NWEndpoint, fallbackName: String? = nil, expectedServerId: String? = nil,
+                 retryWhileWaking: Bool = false) {
         userInitiatedDisconnect = false
-        connectionTimeoutTask?.cancel()
+        tearDownConnection()
         stopPing()
-        if !preserveImage {
-            image = nil
-            remoteSize = .zero
-            consecutiveFailures = 0
-        }
-        videoStatus = nil
+        countdownTimer?.invalidate()
+        countdownTimer = nil
         if let fallbackName, !fallbackName.isEmpty {
             targetName = fallbackName
         }
+        if let expectedServerId, !expectedServerId.isEmpty {
+            self.expectedServerId = expectedServerId
+        }
+        if retryWhileWaking {
+            wakeRetryDeadline = Date().addingTimeInterval(60)
+        }
         serverName = ""
         serverId = ""
-        key = nil
-        keyLock.lock()
-        _sessionKey = nil
-        keyLock.unlock()
-        privateKey = nil
+        hostFingerprint = ""
+        identity = nil
+        authAttempt = nil
         pinError = nil
+        identityMismatchServerId = nil
         endpoint = target
         actualEndpoint = nil
         hostDescription = describe(target)
         phase = .connecting
-        networkQueue.async { [weak self] in
-            self?.receiveBuffer.removeAll()
-        }
+        video.reset()
+        armHandshakeTimeout()
 
-        // Safety timeout so the UI never hangs indefinitely while connecting/negotiating
-        connectionTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
-            guard !Task.isCancelled else { return }
-            guard let self, self.phase == .connecting || self.phase == .negotiating else { return }
-            self.fail("Connection timed out. Check that the Mac and iPhone are on the same Wi-Fi network.")
-        }
-
-        let conn = NWConnection(to: target, using: Self.makeParameters())
-        connection = conn
-        conn.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                self?.stateChanged(state)
+        connectionGeneration += 1
+        let generation = connectionGeneration
+        let video = self.video
+        let conn = ClientConnection(
+            to: target,
+            deviceId: TrustStore.deviceId,
+            deviceName: deviceName,
+            queue: networkQueue,
+            onEvent: { [weak self] event in
+                guard let session = self else { return }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard session.connectionGeneration == generation else { return }
+                        session.handle(event)
+                    }
+                }
+            },
+            onVideoFrame: { payload in
+                video.submit(payload)
             }
-        }
-        conn.start(queue: networkQueue)
+        )
+        connection = conn
+        conn.start()
     }
 
     func reconnect() {
         guard let target = currentEndpoint else { return }
-        connect(to: target, fallbackName: targetName, preserveImage: true)
+        connect(to: target, fallbackName: targetName, expectedServerId: serverId.isEmpty ? nil : serverId)
+    }
+
+    /// "Reconnect Now": starts a fresh backoff sequence.
+    func retryNow() {
+        reconnectAttempt = 0
+        failingSince = nil
+        reconnect()
     }
 
     func disconnect() {
         userInitiatedDisconnect = true
-        connectionTimeoutTask?.cancel()
-        connectionTimeoutTask = nil
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
         stopPing()
-        keyLock.lock()
-        _sessionKey = nil
-        keyLock.unlock()
-        networkQueue.async { [weak self] in
-            self?.receiveBuffer.removeAll()
-        }
-        send(.bye, RDJSON.encode(ByeMsg(reason: "user disconnect")), encrypted: phase == .connected)
-        connection?.cancel()
-        phase = .closed
-        onEnded?(self)
-    }
-
-    private func stateChanged(_ state: NWConnection.State) {
-        switch state {
-        case .ready:
-            connectionTimeoutTask?.cancel()
-            connectionTimeoutTask = nil
-            actualEndpoint = connection?.currentPath?.remoteEndpoint ?? endpoint
-            phase = .negotiating
-            sendHello()
-            startReceiveLoop()
-        case .failed(let error):
-            connectionTimeoutTask?.cancel()
-            connectionTimeoutTask = nil
-            fail(error.localizedDescription)
-        case .cancelled:
-            connectionTimeoutTask?.cancel()
-            connectionTimeoutTask = nil
-            guard !isDead else { return }
-            if !userInitiatedDisconnect && autoReconnect {
-                fail("Connection closed by host")
-            } else if hasConnectedOnce, !userInitiatedDisconnect {
-                phase = .closed
-                onEnded?(self)
-            } else if !userInitiatedDisconnect, !hasConnectedOnce {
-                fail("Connection closed")
-            }
-        case .waiting(let error):
-            if case .posix(let code) = error, code == .ECONNREFUSED || code == .EHOSTUNREACH || code == .ENETUNREACH {
-                connectionTimeoutTask?.cancel()
-                connectionTimeoutTask = nil
-                fail(error.localizedDescription)
-            }
-        default:
-            break
-        }
-    }
-
-    @Published private(set) var reconnectCountdown: Int?
-    private var countdownTimer: Timer?
-
-    private func fail(_ reason: String) {
-        guard !isDead else { return }
-        
-        connectionTimeoutTask?.cancel()
-        connectionTimeoutTask = nil
-        stopPing()
-        
         countdownTimer?.invalidate()
         countdownTimer = nil
-        reconnectCountdown = nil
-        
-        keyLock.lock()
-        _sessionKey = nil
-        keyLock.unlock()
-        
-        networkQueue.async { [weak self] in
-            self?.receiveBuffer.removeAll()
+        if phase == .connected {
+            connection?.sendAndClose(.bye, RDJSON.encode(ByeMsg(reason: RDByeReason.userDisconnect)))
+        } else {
+            connection?.cancel()
         }
-        
+        connection = nil
+        connectionGeneration += 1
+        phase = .closed
+    }
+
+    private func tearDownConnection() {
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
         connection?.cancel()
+        connection = nil
+        connectionGeneration += 1
+    }
 
-        consecutiveFailures += 1
-        let waitTime = consecutiveFailures <= 1 ? 1 : 5
+    /// Covers TCP connect plus each handshake step; paused while the user types the PIN.
+    private func armHandshakeTimeout() {
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.handshakeTimeout)
+            guard !Task.isCancelled, let self,
+                  self.phase == .connecting || self.phase == .negotiating else { return }
+            self.fail("Connection timed out. Check that the Mac and iPhone are on the same Wi-Fi network.")
+        }
+    }
 
-        if canReconnect && autoReconnect && !userInitiatedDisconnect {
-            phase = .failed(reason, waitTime)
+    private func handle(_ event: ClientConnection.Event) {
+        guard !isDead else { return }
+        switch event {
+        case .ready(let remote):
+            actualEndpoint = remote ?? endpoint
+            phase = .negotiating
+        case .serverHello(let identity):
+            handleServerHello(identity)
+        case .message(let wire, let payload):
+            handleMessage(wire, payload: payload)
+        case .closed:
+            if phase == .connected {
+                fail("Connection closed by host")
+            } else if identity == nil {
+                fail("The Mac closed the connection during setup. Make sure Local Desktop is up to date on both devices.")
+            } else {
+                fail("Connection closed")
+            }
+        case .failed(let reason):
+            fail(reason)
+        case .rejected(let reason):
+            fail(reason, allowReconnect: false)
+        }
+    }
+
+    private func fail(_ reason: String, allowReconnect: Bool = true) {
+        guard !isDead else { return }
+        tearDownConnection()
+        stopPing()
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+
+        if allowReconnect, autoReconnect, !userInitiatedDisconnect, canReconnect, let delay = nextReconnectDelay() {
+            phase = .failed(reason, delay)
             countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-                Task { @MainActor in
-                    guard let self else { return }
-                    if case .failed(let msg, let current) = self.phase, let current = current, current > 1 {
-                        self.phase = .failed(msg, current - 1)
-                    } else {
-                        timer.invalidate()
-                        self.countdownTimer = nil
-                        if case .failed = self.phase {
-                            self.reconnect()
-                        }
-                    }
+                guard let session = self else {
+                    timer.invalidate()
+                    return
+                }
+                MainActor.assumeIsolated {
+                    session.countdownTick()
                 }
             }
         } else {
             phase = .failed(reason, nil)
         }
+    }
+
+    private func countdownTick() {
+        guard case .failed(let message, let remaining?) = phase else {
+            countdownTimer?.invalidate()
+            countdownTimer = nil
+            return
+        }
+        if remaining > 1 {
+            phase = .failed(message, remaining - 1)
+        } else {
+            countdownTimer?.invalidate()
+            countdownTimer = nil
+            reconnect()
+        }
+    }
+
+    private func nextReconnectDelay() -> Int? {
+        let now = Date()
+        let since = failingSince ?? now
+        failingSince = since
+        guard now.timeIntervalSince(since) < Self.maxReconnectWindow else { return nil }
+        let delay = Self.reconnectDelays[min(reconnectAttempt, Self.reconnectDelays.count - 1)]
+        reconnectAttempt += 1
+        return delay
     }
 
     private var isDead: Bool {
@@ -267,245 +294,213 @@ final class ClientSession: ObservableObject {
         return false
     }
 
-    // MARK: Handshake
+    // MARK: Authentication
 
-    private func sendHello() {
-        let priv = RDCrypto.makePrivateKey()
-        privateKey = priv
-        let hello = HelloMsg(deviceId: TrustStore.deviceId,
-                             deviceName: deviceName,
-                             pubKey: priv.publicKey.rawRepresentation)
-        send(.hello, RDJSON.encode(hello), encrypted: false)
+    private func handleServerHello(_ identity: ServerIdentity) {
+        self.identity = identity
+        serverName = identity.serverName
+        targetName = identity.serverName
+        serverId = identity.serverId
+        hostFingerprint = RDHandshake.fingerprint(of: identity.identityKey)
+
+        // Reaching a different Mac than the paired one we asked for means someone
+        // else is answering for it (or the Mac was reset). Don't offer it the PIN.
+        if let expected = expectedServerId, expected != identity.serverId,
+           TrustStore.pinnedHostKey(serverId: expected) != nil {
+            if TrustStore.pinnedHostKey(serverId: identity.serverId) == identity.identityKey {
+                // Another Mac this device paired with now answers at that address (e.g. the
+                // addresses swapped). It's legitimate, just not the one that was selected.
+                fail("\(identity.serverName) answered instead of the Mac you selected; its address may have changed. "
+                     + "Pull to refresh Nearby Macs and try again.", allowReconnect: false)
+            } else {
+                reportIdentityMismatch(serverId: expected)
+            }
+            return
+        }
+
+        guard let pinned = TrustStore.pinnedHostKey(serverId: identity.serverId) else {
+            // First pairing: trust on first use, after the user enters the PIN.
+            handshakeTimeoutTask?.cancel()
+            phase = .needPin
+            return
+        }
+        guard pinned == identity.identityKey else {
+            reportIdentityMismatch(serverId: identity.serverId)
+            return
+        }
+        guard let deviceKey = TrustStore.deviceSigningKey(),
+              let signature = try? deviceKey.signature(for: RDHandshake.deviceProof(transcript: identity.transcript)) else {
+            handshakeTimeoutTask?.cancel()
+            phase = .needPin
+            return
+        }
+        authAttempt = .device
+        send(.authDevice, RDJSON.encode(AuthDeviceMsg(signature: signature)))
     }
 
-    /// PIN entry from the UI. Requests a trust token so future connections skip the PIN.
+    /// After the user forgot a Mac whose identity changed: connect again and pair from scratch.
+    func pairAgain() {
+        expectedServerId = nil
+        identityMismatchServerId = nil
+        retryNow()
+    }
+
+    private func reportIdentityMismatch(serverId: String) {
+        identityMismatchServerId = serverId
+        fail("This Mac's identity doesn't match the one you paired with, so the connection was stopped. "
+             + "If you reinstalled or reset Local Desktop Host on it, forget it and pair again.",
+             allowReconnect: false)
+    }
+
+    /// PIN entry from the UI. With `trust`, this device's public key is registered
+    /// so future connections skip the PIN.
     func submitPIN(_ pin: String, trust: Bool) {
-        guard phase == .needPin else { return }
+        // Only ever to a Mac that has proven its identity in this handshake.
+        guard phase == .needPin, identity != nil else { return }
         pinError = nil
         pinAttemptCounter += 1
         phase = .negotiating
-        send(.authPin, RDJSON.encode(AuthPinMsg(pin: pin, trust: trust)), encrypted: true)
+        armHandshakeTimeout()
+        let deviceKey = trust ? TrustStore.deviceSigningKey()?.publicKey.rawRepresentation : nil
+        authAttempt = .pin(trust: deviceKey != nil)
+        send(.authPin, RDJSON.encode(AuthPinMsg(pin: pin, trust: deviceKey != nil, deviceKey: deviceKey)))
     }
 
-    // MARK: Receiving
+    // MARK: Messages
 
-    private func startReceiveLoop() {
-        networkQueue.async { [weak self] in
-            self?.readNextChunk()
-        }
-    }
-
-    private func readNextChunk() {
-        guard let conn = connection else { return }
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] chunk, _, isComplete, error in
-            guard let self else { return }
-            if let error {
-                Task { @MainActor in
-                    self.fail(error.localizedDescription)
-                }
-                return
-            }
-            if let chunk, !chunk.isEmpty {
-                self.receiveBuffer.append(chunk)
-                self.processReceiveBuffer()
-            }
-            if isComplete {
-                Task { @MainActor in
-                    self.fail("Connection closed by host")
-                }
-                return
-            }
-            self.readNextChunk()
-        }
-    }
-
-    private func processReceiveBuffer() {
-        while receiveBuffer.count >= RDFrame.headerLength {
-            guard let (wire, length) = RDFrame.unpackHeader(receiveBuffer) else {
-                Task { @MainActor in
-                    self.fail("Protocol error: corrupted header")
-                }
-                return
-            }
-            let totalLength = RDFrame.headerLength + length
-            guard receiveBuffer.count >= totalLength else { break }
-            let payload = receiveBuffer.subdata(in: RDFrame.headerLength..<totalLength)
-            receiveBuffer.removeSubrange(0..<totalLength)
-            dispatchPayload(wire, payload: payload)
-        }
-    }
-
-    private func dispatchPayload(_ wire: RDWire, payload: Data) {
-        bytesReceivedInLastSec += payload.count
-        if wire == .frame {
-            framesReceivedInLastSec += 1
-            keyLock.lock()
-            let sessionKey = _sessionKey
-            keyLock.unlock()
-            guard let sessionKey else { return }
-            decodeQueue.async { [weak self] in
-                guard let self else { return }
-                guard let plain = RDCrypto.open(payload, key: sessionKey) else { return }
-                guard let (width, height, codec, frameData) = RDFrameCodec.unpack(plain) else { return }
-
-                let decodeStart = CACurrentMediaTime()
-                switch codec {
-                case .h264, .hevc:
-                    self.videoDecoder.decode(annexB: frameData, codec: codec) { [weak self] sampleBuffer in
-                        guard let self else { return }
-                        let decodeDuration = (CACurrentMediaTime() - decodeStart) * 1000.0
-                        self.lastDecodeTime = decodeDuration
-                        self.framesReceived += 1
-                        self.onSampleBuffer?(sampleBuffer, width, height)
-                        
-                        let sizeChanged = self.remoteSize.width != CGFloat(width) || self.remoteSize.height != CGFloat(height)
-                        if !self.hasVideoFrame || sizeChanged || self.videoStatus != nil {
-                            Task { @MainActor in
-                                guard self.phase == .connected else { return }
-                                self.videoStatus = nil
-                                if sizeChanged {
-                                    self.remoteSize = CGSize(width: width, height: height)
-                                }
-                                if !self.hasVideoFrame {
-                                    self.hasVideoFrame = true
-                                }
-                            }
-                        }
-                    } onError: { [weak self] in
-                        Task { @MainActor in
-                            self?.requestKeyframe(reason: "missing_headers_or_corrupted")
-                        }
-                    }
-                case .jpeg:
-                    guard let decoded = UIImage(data: frameData) else { return }
-                    self.framesReceived += 1
-                    Task { @MainActor in
-                        guard self.phase == .connected else { return }
-                        self.videoStatus = nil
-                        self.remoteSize = CGSize(width: width, height: height)
-                        self.hasVideoFrame = true
-                        self.image = decoded
-                    }
-                }
-            }
-        } else {
-            Task { @MainActor in
-                self.handleControlMessage(wire, payload: payload)
-            }
-        }
-    }
-
-    private func handleControlMessage(_ wire: RDWire, payload: Data) {
-        guard !isDead else { return }
+    private func handleMessage(_ wire: RDWire, payload: Data) {
+        // Before authentication only the answer to our own auth request is meaningful.
+        guard phase == .connected || wire == .authOK || wire == .authFailed || wire == .bye else { return }
 
         switch wire {
-        case .serverHello:
-            guard let msg = RDJSON.decode(ServerHelloMsg.self, from: payload),
-                  let priv = privateKey,
-                  let sessionKey = RDCrypto.sessionKey(privateKey: priv, peerPublicKey: msg.pubKey) else {
-                fail("Handshake failed")
+        case .authOK:
+            guard phase != .connected, let attempt = authAttempt,
+                  let msg = RDJSON.decode(AuthOKMsg.self, from: payload) else {
+                fail("Protocol error: unexpected authentication response")
                 return
             }
-            key = sessionKey
-            keyLock.lock()
-            _sessionKey = sessionKey
-            keyLock.unlock()
-            serverName = msg.serverName
-            targetName = msg.serverName
-            serverId = msg.serverId
-            serverMacAddress = msg.macAddress
+            handleAuthOK(msg, attempt: attempt)
 
-            if let token = TrustStore.token(serverId: msg.serverId) {
-                phase = .negotiating
-                send(.authToken, RDJSON.encode(AuthTokenMsg(token: token)), encrypted: true)
-            } else {
+        case .authFailed:
+            guard phase != .connected, identity != nil, authAttempt != nil else { return }
+            authAttempt = nil
+            let msg = RDJSON.decode(AuthFailedMsg.self, from: payload)
+            switch msg?.kind {
+            case .unsupportedVersion?, .tooManyAttempts?:
+                fail(msg?.reason ?? "Authentication failed", allowReconnect: false)
+            default:
+                handshakeTimeoutTask?.cancel()
+                pinError = msg?.reason ?? "Incorrect PIN"
+                pinAttemptCounter += 1
                 phase = .needPin
             }
 
-        case .authOK:
-            guard let key, let plain = RDCrypto.open(payload, key: key),
-                  let msg = RDJSON.decode(AuthOKMsg.self, from: plain) else {
-                fail("Bad auth response")
-                return
-            }
-            phase = .connected
-            hasConnectedOnce = true
-            consecutiveFailures = 0
-            stopPing()
-            lastPongAt = Date()
-            pingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.phase == .connected else { return }
-                    if Date().timeIntervalSince(self.lastPongAt) > 8.0 {
-                        self.fail("Connection lost (no heartbeat)")
-                        return
-                    }
-                    self.send(.ping, RDJSON.encode(PingMsg(t: Date().timeIntervalSince1970)), encrypted: true)
-                }
-            }
-            if let token = msg.token, !serverId.isEmpty {
-                TrustStore.setToken(token, serverId: serverId)
-            }
-            wakeHostDisplay()
-            onConnected?(self)
-
-        case .authFailed:
-            let plain = key.flatMap { RDCrypto.open(payload, key: $0) } ?? payload
-            if let msg = RDJSON.decode(AuthFailedMsg.self, from: plain) {
-                pinError = msg.reason
-            } else {
-                pinError = "Incorrect PIN"
-            }
-            pinAttemptCounter += 1
-            phase = .needPin
-
         case .pong:
             lastPongAt = Date()
-            let plain = key.flatMap { RDCrypto.open(payload, key: $0) } ?? payload
-            if let msg = RDJSON.decode(PingMsg.self, from: plain) {
-                let rtt = max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)
-                currentRTT = rtt
+            if let msg = RDJSON.decode(PingMsg.self, from: payload) {
+                currentRTT = max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)
                 reportNetworkStatsIfNeeded()
             }
 
         case .hostState:
-            guard let key, let plain = RDCrypto.open(payload, key: key),
-                  let msg = RDJSON.decode(HostStateMsg.self, from: plain) else { break }
+            guard let msg = RDJSON.decode(HostStateMsg.self, from: payload) else { break }
             isHostLocked = msg.isLocked
             isDisplaySleeping = msg.isDisplaySleeping
 
         case .runningApps:
-            guard let key, let plain = RDCrypto.open(payload, key: key),
-                  let msg = RDJSON.decode(RDRunningAppsMsg.self, from: plain) else { break }
-            self.runningApps = msg.apps
+            guard let msg = RDJSON.decode(RDRunningAppsMsg.self, from: payload) else { break }
+            runningApps = msg.apps
 
         case .hardwareControlsState:
-            guard let key, let plain = RDCrypto.open(payload, key: key),
-                  let msg = RDJSON.decode(RDHardwareControls.self, from: plain) else { break }
-            self.hardwareControls = msg
+            guard let msg = RDJSON.decode(RDHardwareControls.self, from: payload) else { break }
+            hardwareControls = msg
 
         case .bye:
-            fail("The Mac ended the session")
+            let msg = RDJSON.decode(ByeMsg.self, from: payload)
+            // The host said goodbye on purpose; reconnecting on our own would just loop.
+            let reason = msg?.reason == RDByeReason.hostStopped
+                ? "Sharing was stopped on the Mac."
+                : "The Mac ended the session."
+            fail(reason, allowReconnect: false)
 
         default:
             break
         }
     }
 
+    private func handleAuthOK(_ msg: AuthOKMsg, attempt: AuthAttempt) {
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        phase = .connected
+        hasConnectedOnce = true
+        reconnectAttempt = 0
+        failingSince = nil
+        wakeRetryDeadline = nil
+        serverMacAddress = msg.macAddress
+        // Pin only when this device asked to be trusted (or already was); the host's
+        // word alone never makes a Mac "paired".
+        let shouldPin: Bool
+        switch attempt {
+        case .pin(let trust): shouldPin = trust && msg.trusted
+        case .device: shouldPin = true
+        }
+        if shouldPin, let identity {
+            TrustStore.pinHostKey(identity.identityKey, serverId: identity.serverId)
+            expectedServerId = identity.serverId
+            onPaired?(identity.serverId)
+        }
+        startPing()
+        wakeHostDisplay()
+        onConnected?(self)
+    }
+
+    private func videoSizeChanged(_ size: CGSize) {
+        remoteSize = size
+        hasVideoFrame = true
+    }
+
+    /// Called by the canvas when its display layer appears; it needs an IDR to start.
+    func attachVideoLayer(_ layer: AVSampleBufferDisplayLayer) {
+        videoOutput.attach(layer)
+        requestKeyframe(reason: "new_layer")
+    }
+
+    func detachVideoLayer(_ layer: AVSampleBufferDisplayLayer) {
+        videoOutput.detach(layer)
+    }
+
     // MARK: Keepalive & Telemetry
 
     private func startPing() {
+        stopPing()
         lastPongAt = Date()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.phase == .connected else { return }
-                if Date().timeIntervalSince(self.lastPongAt) > 10.0 {
-                    self.fail("Lost connection to the Mac")
-                    return
-                }
-                self.send(.ping, RDJSON.encode(PingMsg(t: Date().timeIntervalSince1970)), encrypted: true)
+        lastStatsReport = Date()
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let session = self else {
+                timer.invalidate()
+                return
+            }
+            MainActor.assumeIsolated {
+                session.pingTick()
             }
         }
+    }
+
+    private func pingTick() {
+        guard phase == .connected else {
+            stopPing()
+            return
+        }
+        if Date().timeIntervalSince(lastPongAt) > 8.0 {
+            fail("Connection lost (no heartbeat)")
+            return
+        }
+        sendJSON(.ping, PingMsg(t: Date().timeIntervalSince1970))
+    }
+
+    private func stopPing() {
+        pingTimer?.invalidate()
+        pingTimer = nil
     }
 
     private func reportNetworkStatsIfNeeded() {
@@ -515,48 +510,27 @@ final class ClientSession: ObservableObject {
         guard elapsed >= 1.0 else { return }
         lastStatsReport = now
 
-        let fps = Double(framesReceivedInLastSec) / elapsed
-        let bitrate = (Double(bytesReceivedInLastSec) * 8.0) / (elapsed * 1_000_000.0)
-        framesReceivedInLastSec = 0
-        bytesReceivedInLastSec = 0
+        let network = connection?.drainStats() ?? ClientConnection.Stats()
+        let decoded = video.drainStats()
+        liveFPS = Double(decoded.frames) / elapsed
+        liveBitrateMbps = (Double(network.bytes) * 8.0) / (elapsed * 1_000_000.0)
+        liveDecodeMs = decoded.decodeMs
 
-        self.liveFPS = fps
-        self.liveBitrateMbps = bitrate
-        self.liveDecodeMs = lastDecodeTime
-
-        let stats = NetworkStatsMsg(
-            rttMs: currentRTT,
-            decodeMs: lastDecodeTime,
-            fps: fps > 0 ? fps : 60.0,
-            droppedFrames: 0
-        )
-        send(.networkStats, RDJSON.encode(stats), encrypted: true)
-    }
-
-    private func stopPing() {
-        pingTimer?.invalidate()
-        pingTimer = nil
+        sendJSON(.networkStats, NetworkStatsMsg(rttMs: currentRTT,
+                                                decodeMs: decoded.decodeMs,
+                                                fps: liveFPS,
+                                                droppedFrames: 0))
     }
 
     // MARK: Input
 
-    private func send(_ wire: RDWire, _ payload: Data, encrypted: Bool) {
-        guard let connection else { return }
-        var data = payload
-        if encrypted {
-            guard let key, let sealed = RDCrypto.seal(data, key: key) else { return }
-            data = sealed
-        }
-        let isFinal = wire == .bye
-        connection.send(content: RDFrame.pack(wire, payload: data),
-                        contentContext: isFinal ? .finalMessage : .defaultMessage,
-                        isComplete: isFinal,
-                        completion: .contentProcessed { _ in })
+    private func send(_ wire: RDWire, _ payload: Data) {
+        connection?.send(wire, payload)
     }
 
     private func sendJSON<T: Encodable>(_ wire: RDWire, _ message: T) {
         guard phase == .connected else { return }
-        send(wire, RDJSON.encode(message), encrypted: true)
+        send(wire, RDJSON.encode(message))
     }
 
     func moveAbs(_ x: Double, _ y: Double) {
@@ -584,8 +558,9 @@ final class ClientSession: ObservableObject {
         buttonUp(button)
     }
 
-    func scroll(dx: Double, dy: Double) {
-        sendJSON(.scroll, ScrollMsg(dx: dx, dy: dy))
+    /// Lines (mouse-wheel steps), or points when `precise`. dy > 0 scrolls up.
+    func scroll(dx: Double, dy: Double, precise: Bool = false) {
+        sendJSON(.scroll, ScrollMsg(dx: dx, dy: dy, precise: precise ? true : nil))
     }
 
     private func sendModifier(_ modifier: RDModifiers, down: Bool, currentFlags: UInt8) {
@@ -636,7 +611,7 @@ final class ClientSession: ObservableObject {
         sendJSON(.textEvent, TextMsg(s: text))
     }
 
-    /// Text typed on the iOS keyboard, honoring sticky modifiers from the key bar.
+    /// Text typed on the iOS keyboard, honoring modifiers from the key bar.
     /// Plain text is sent as unicode; with non-shift modifiers held, characters are
     /// mapped to Mac virtual key codes so shortcuts like ⌘C reach the host correctly.
     func typeText(_ text: String, modifiers: RDModifiers) {
@@ -650,7 +625,7 @@ final class ClientSession: ObservableObject {
         }
         sendModifiersDown(modifiers)
         for character in text.lowercased() {
-            if let code = virtualKey(for: character) {
+            if let code = Self.virtualKey(for: character) {
                 sendJSON(.keyEvent, KeyEventMsg(code: code, down: true, flags: modifiers.rawValue))
                 sendJSON(.keyEvent, KeyEventMsg(code: code, down: false, flags: modifiers.rawValue))
             } else {
@@ -660,7 +635,7 @@ final class ClientSession: ObservableObject {
         sendModifiersUp(modifiers)
     }
 
-    private func virtualKey(for character: Character) -> UInt16? {
+    private static func virtualKey(for character: Character) -> UInt16? {
         switch character {
         case "a": return 0
         case "b": return 11
@@ -717,34 +692,32 @@ final class ClientSession: ObservableObject {
 
     func wakeHostDisplay() {
         guard phase == .connected else { return }
-        send(.wakeDisplay, Data(), encrypted: true)
+        send(.wakeDisplay, Data())
         moveRel(dx: 1, dy: 1)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.moveRel(dx: -1, dy: -1)
+            MainActor.assumeIsolated {
+                self?.moveRel(dx: -1, dy: -1)
+            }
         }
         requestKeyframe(reason: "wake_display")
     }
 
     func requestRunningApps() {
         guard phase == .connected else { return }
-        send(.requestApps, Data(), encrypted: true)
+        send(.requestApps, Data())
     }
 
     func activateApp(bundleId: String) {
-        guard phase == .connected else { return }
-        let msg = RDActivateAppMsg(bundleId: bundleId)
-        send(.activateApp, RDJSON.encode(msg), encrypted: true)
+        sendJSON(.activateApp, RDActivateAppMsg(bundleId: bundleId))
     }
 
     func triggerSystemAction(_ action: RDSystemActionType) {
-        guard phase == .connected else { return }
-        let msg = RDSystemActionMsg(action: action)
-        send(.systemAction, RDJSON.encode(msg), encrypted: true)
+        sendJSON(.systemAction, RDSystemActionMsg(action: action))
     }
 
     func requestHardwareControls() {
         guard phase == .connected else { return }
-        send(.getHardwareControls, Data(), encrypted: true)
+        send(.getHardwareControls, Data())
     }
 
     func setBrightness(_ value: Float) {
@@ -766,12 +739,10 @@ final class ClientSession: ObservableObject {
     }
 
     func sleepHostDisplay() {
-        guard phase == .connected else { return }
         sendJSON(.setHardwareControls, RDSetHardwareControlsMsg(sleepDisplay: true))
     }
 
     func lockHostScreen() {
-        guard phase == .connected else { return }
         sendJSON(.setHardwareControls, RDSetHardwareControlsMsg(lockScreen: true))
     }
 
@@ -788,5 +759,5 @@ final class ClientSession: ObservableObject {
 }
 
 extension ClientSession: Identifiable {
-    var id: ObjectIdentifier { ObjectIdentifier(self) }
+    nonisolated var id: ObjectIdentifier { ObjectIdentifier(self) }
 }

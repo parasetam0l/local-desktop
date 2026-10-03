@@ -3,12 +3,17 @@ import CoreMedia
 import VideoToolbox
 import AVFoundation
 
+/// Repackages Annex-B access units into length-prefixed CMSampleBuffers for
+/// AVSampleBufferDisplayLayer (which does the actual hardware decode).
+/// Not thread-safe: `VideoPipeline` only uses it on its decode queue.
 final class VideoDecoder {
     private var formatDescription: CMVideoFormatDescription?
     private var currentCodec: RDCodec?
     private var vpsData: Data?
     private var spsData: Data?
     private var ppsData: Data?
+    /// Parameter sets the current format description was built from.
+    private var formatParameterSets: [Data] = []
 
     func decode(annexB: Data, codec: RDCodec = .hevc, completion: (CMSampleBuffer) -> Void, onError: (() -> Void)? = nil) {
         if currentCodec != codec {
@@ -55,56 +60,14 @@ final class VideoDecoder {
             }
         }
 
-        if codec == .hevc {
-            if let vps = vpsData, let sps = spsData, let pps = ppsData {
-                vps.withUnsafeBytes { vpsBytes in
-                    sps.withUnsafeBytes { spsBytes in
-                        pps.withUnsafeBytes { ppsBytes in
-                            guard let vpsPtr = vpsBytes.bindMemory(to: UInt8.self).baseAddress,
-                                  let spsPtr = spsBytes.bindMemory(to: UInt8.self).baseAddress,
-                                  let ppsPtr = ppsBytes.bindMemory(to: UInt8.self).baseAddress else { return }
-                            let pointers = [vpsPtr, spsPtr, ppsPtr]
-                            let sizes = [vps.count, sps.count, pps.count]
-                            var newFormat: CMVideoFormatDescription?
-                            let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-                                allocator: kCFAllocatorDefault,
-                                parameterSetCount: 3,
-                                parameterSetPointers: pointers,
-                                parameterSetSizes: sizes,
-                                nalUnitHeaderLength: 4,
-                                extensions: nil,
-                                formatDescriptionOut: &newFormat
-                            )
-                            if status == noErr, let format = newFormat {
-                                self.formatDescription = format
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            if let sps = spsData, let pps = ppsData {
-                sps.withUnsafeBytes { spsBytes in
-                    pps.withUnsafeBytes { ppsBytes in
-                        guard let spsPtr = spsBytes.bindMemory(to: UInt8.self).baseAddress,
-                              let ppsPtr = ppsBytes.bindMemory(to: UInt8.self).baseAddress else { return }
-                        let pointers = [spsPtr, ppsPtr]
-                        let sizes = [sps.count, pps.count]
-                        var newFormat: CMVideoFormatDescription?
-                        let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                            allocator: kCFAllocatorDefault,
-                            parameterSetCount: 2,
-                            parameterSetPointers: pointers,
-                            parameterSetSizes: sizes,
-                            nalUnitHeaderLength: 4,
-                            formatDescriptionOut: &newFormat
-                        )
-                        if status == noErr, let format = newFormat {
-                            self.formatDescription = format
-                        }
-                    }
-                }
-            }
+        // Rebuild the format description only when the parameter sets actually change.
+        let parameterSets: [Data]? = codec == .hevc
+            ? vpsData.flatMap { vps in spsData.flatMap { sps in ppsData.map { [vps, sps, $0] } } }
+            : spsData.flatMap { sps in ppsData.map { [sps, $0] } }
+        if let parameterSets, formatDescription == nil || parameterSets != formatParameterSets,
+           let format = Self.makeFormatDescription(codec: codec, parameterSets: parameterSets) {
+            formatDescription = format
+            formatParameterSets = parameterSets
         }
 
         guard let format = formatDescription, !packetData.isEmpty else {
@@ -190,6 +153,42 @@ final class VideoDecoder {
         completion(outSample)
     }
 
+    private static func makeFormatDescription(codec: RDCodec, parameterSets: [Data]) -> CMVideoFormatDescription? {
+        // Copy into stable buffers so every pointer stays valid for the call.
+        let buffers = parameterSets.map { data -> UnsafeMutablePointer<UInt8> in
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: max(1, data.count))
+            data.copyBytes(to: buffer, count: data.count)
+            return buffer
+        }
+        defer { buffers.forEach { $0.deallocate() } }
+        let pointers = buffers.map { UnsafePointer($0) }
+        let sizes = parameterSets.map(\.count)
+
+        var format: CMVideoFormatDescription?
+        let status: OSStatus
+        if codec == .hevc {
+            status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                allocator: kCFAllocatorDefault,
+                parameterSetCount: pointers.count,
+                parameterSetPointers: pointers,
+                parameterSetSizes: sizes,
+                nalUnitHeaderLength: 4,
+                extensions: nil,
+                formatDescriptionOut: &format
+            )
+        } else {
+            status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                allocator: kCFAllocatorDefault,
+                parameterSetCount: pointers.count,
+                parameterSetPointers: pointers,
+                parameterSetSizes: sizes,
+                nalUnitHeaderLength: 4,
+                formatDescriptionOut: &format
+            )
+        }
+        return status == noErr ? format : nil
+    }
+
     private func extractNALURanges(from data: Data) -> [Range<Int>] {
         var ranges: [Range<Int>] = []
         let count = data.count
@@ -229,10 +228,9 @@ final class VideoDecoder {
 
     func reset() {
         formatDescription = nil
+        formatParameterSets = []
         vpsData = nil
         spsData = nil
         ppsData = nil
     }
 }
-
-typealias H264Decoder = VideoDecoder

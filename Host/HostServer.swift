@@ -3,12 +3,9 @@ import Network
 import AppKit
 import CoreGraphics
 import Combine
-import IOKit.pwr_mgt
-import CoreAudio
-import AudioToolbox
 
-/// Menu-bar host: listens for client connections, brokers the PIN/trust
-/// handshake, streams screen frames, and injects client input events.
+/// Menu-bar host: listens for client connections, tracks sessions, and
+/// coordinates screen streaming and power state for them.
 @MainActor
 final class HostServer: ObservableObject {
     static let shared = HostServer()
@@ -19,7 +16,6 @@ final class HostServer: ObservableObject {
     @Published private(set) var displays: [DisplayInfo] = []
     @Published var selectedDisplayID: CGDirectDisplayID?
     @Published var preset: RDQualityPreset = .high
-    @Published private(set) var captureStats = ""
     @Published var lastError: String?
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var screenGranted = false
@@ -28,9 +24,14 @@ final class HostServer: ObservableObject {
 
     static let computerName: String = Host.current().localizedName ?? "Mac"
 
-    private var displaySleepAssertion: IOPMAssertionID = 0
-    private var systemSleepAssertion: IOPMAssertionID = 0
-    private var caffeinateProcess: Process?
+    /// Unauthenticated connections allowed at once (in total and per remote address); more are refused.
+    private static let maxPendingSessions = 16
+    private static let maxPendingSessionsPerAddress = 2
+    /// Remembers whether the user wants sharing on, so a crash relaunch restores it.
+    private static let sharingWantedKey = "rd.sharingWanted"
+
+    let appSwitcher = AppSwitcher()
+    private let power = PowerAssertions()
 
     /// First IPv4 address on a physical interface (en0…), for display in the menu.
     static func primaryLANAddress() -> String? {
@@ -49,7 +50,7 @@ final class HostServer: ObservableObject {
             var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
             var inAddr = addr.sin_addr
             guard inet_ntop(AF_INET, &inAddr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { continue }
-            let ip = String(cString: buf)
+            let ip = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
             if !ip.hasPrefix("127.") { result = ip }
         }
         return result
@@ -67,119 +68,109 @@ final class HostServer: ObservableObject {
 
     private init() {
         ScreenStreamer.shared.onVideoPacket = { [weak self] data, isKeyframe, width, height, codec in
-            Task { @MainActor in
-                guard let self, !self.activeSessions.isEmpty else { return }
-                for session in self.activeSessions {
-                    session.sendVideoFrame(data, isKeyframe: isKeyframe, width: width, height: height, codec: codec)
+            // Hop to main in order; ClientSession (and its cipher) lives there.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    for session in self.activeSessions {
+                        session.sendVideoFrame(data, isKeyframe: isKeyframe, width: width, height: height, codec: codec)
+                    }
                 }
             }
-        }
-        ScreenStreamer.shared.isReady = { [weak self] in
-            guard let self else { return false }
-            return self.activeSessions.contains(where: { $0.canSendFrame })
         }
         ScreenStreamer.shared.onError = { [weak self] message in
-            Task { @MainActor in
-                self?.lastError = message
-            }
+            self?.lastError = message
         }
 
-        DistributedNotificationCenter.default().addObserver(
-            forName: NSNotification.Name("com.apple.screenIsLocked"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.isHostLocked = true
-                self?.broadcastHostState()
+        observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked")) { server, _ in
+            server.isHostLocked = true
+            server.broadcastHostState()
+        }
+        observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsUnlocked")) { server, _ in
+            server.isHostLocked = false
+            server.broadcastHostState()
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        observe(workspace, NSWorkspace.screensDidSleepNotification) { server, _ in
+            server.isDisplaySleeping = true
+            server.broadcastHostState()
+        }
+        observe(workspace, NSWorkspace.screensDidWakeNotification) { server, _ in
+            server.isDisplaySleeping = false
+            server.broadcastHostState()
+            if !server.activeSessions.isEmpty {
+                server.restartCapture()
             }
         }
-        DistributedNotificationCenter.default().addObserver(
-            forName: NSNotification.Name("com.apple.screenIsUnlocked"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.isHostLocked = false
-                self?.broadcastHostState()
-            }
-        }
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.screensDidSleepNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.isDisplaySleeping = true
-                self?.broadcastHostState()
-            }
-        }
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.screensDidWakeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.isDisplaySleeping = false
-                self.broadcastHostState()
-                if !self.activeSessions.isEmpty {
-                    try? await ScreenStreamer.shared.restart(displayID: self.selectedDisplayID, preset: self.preset, codec: ScreenStreamer.shared.currentCodec)
-                }
-            }
-        }
-
-        let wsNotifications = [
+        let appNotifications = [
             NSWorkspace.didActivateApplicationNotification,
             NSWorkspace.didLaunchApplicationNotification,
             NSWorkspace.didTerminateApplicationNotification,
             NSWorkspace.didHideApplicationNotification,
             NSWorkspace.didUnhideApplicationNotification
         ]
-        for notif in wsNotifications {
-            NSWorkspace.shared.notificationCenter.addObserver(
-                forName: notif,
-                object: nil,
-                queue: .main
-            ) { [weak self] notif in
-                if notif.name == NSWorkspace.didActivateApplicationNotification,
+        for name in appNotifications {
+            observe(workspace, name) { server, name in
+                if name == NSWorkspace.didActivateApplicationNotification,
                    let activeApp = NSWorkspace.shared.frontmostApplication,
                    activeApp.activationPolicy == .regular,
                    let bid = activeApp.bundleIdentifier {
-                    self?.trackAppActivation(bid)
+                    server.appSwitcher.trackActivation(bid)
                 }
-                self?.broadcastRunningApps()
-            }
-        }
-
-        Task { @MainActor in
-            if AuthStore.shared.hasPIN && CGPreflightScreenCaptureAccess() && InputInjector.checkAccessibility(prompt: false) {
-                self.start()
+                server.broadcastRunningApps()
             }
         }
     }
 
-    func toggle() {
-        running ? stop() : start()
+    private func observe(_ center: NotificationCenter, _ name: Notification.Name,
+                         _ handler: @escaping @MainActor @Sendable (HostServer, Notification.Name) -> Void) {
+        center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+            let name = notification.name
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                handler(self, name)
+            }
+        }
+    }
+
+    /// Starts sharing at launch when everything it needs is in place. After a crash
+    /// relaunch, sharing is only restored if the user hadn't stopped it.
+    func autoStartIfNeeded(afterCrash: Bool) {
+        refreshPermissions()
+        let wanted = UserDefaults.standard.object(forKey: Self.sharingWantedKey) as? Bool ?? true
+        guard !afterCrash || wanted else { return }
+        if missingSetup.isEmpty {
+            start()
+        }
+    }
+
+    /// The menu bar sharing switch.
+    func setSharing(_ on: Bool) {
+        if on {
+            start()
+        } else if running {
+            UserDefaults.standard.set(false, forKey: Self.sharingWantedKey)
+            stop()
+        }
+    }
+
+    /// What still has to be done before sharing can start.
+    var missingSetup: [SetupItem] {
+        var items: [SetupItem] = []
+        if !screenGranted { items.append(.permission(.screenRecording)) }
+        if !accessibilityGranted { items.append(.permission(.accessibility)) }
+        if !AuthStore.shared.hasPIN { items.append(.pin) }
+        return items
     }
 
     func start() {
         guard !running else { return }
-        guard AuthStore.shared.hasPIN else {
-            lastError = "Set a 4-digit PIN before sharing."
-            return
-        }
         // Refuse to advertise a session we cannot actually deliver.
-        guard InputInjector.checkAccessibility(prompt: false) else {
-            lastError = "Grant Accessibility (Input Monitoring) before sharing."
+        refreshPermissions()
+        guard missingSetup.isEmpty else {
+            SetupWindowController.shared.show()
             return
         }
-        guard CGPreflightScreenCaptureAccess() else {
-            lastError = "Grant Screen Recording before sharing."
-            return
-        }
-        accessibilityGranted = true
-        screenGranted = true
         do {
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.noDelay = true
@@ -190,35 +181,31 @@ final class HostServer: ObservableObject {
             if let ipOptions = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
                 ipOptions.version = .v4
             }
-            let preferredPort = NWEndpoint.Port(rawValue: 52341) ?? .any
+            let preferredPort = NWEndpoint.Port(rawValue: RDService.defaultPort) ?? .any
             let newListener: NWListener
             if let specific = try? NWListener(using: parameters, on: preferredPort) {
                 newListener = specific
             } else {
                 newListener = try NWListener(using: parameters, on: .any)
             }
-            var initialTxt = NWTXTRecord()
-            if let ip = HostServer.primaryLANAddress() {
-                initialTxt["ip"] = ip
-            }
-            initialTxt["sid"] = AuthStore.shared.serverId
-            initialTxt["name"] = HostServer.computerName
+            var txt = NWTXTRecord()
+            txt["sid"] = AuthStore.shared.serverId
+            txt["name"] = HostServer.computerName
             newListener.service = NWListener.Service(name: bonjourName,
                                                      type: RDService.type,
                                                      domain: nil,
-                                                     txtRecord: initialTxt.data)
+                                                     txtRecord: txt.data)
             newListener.newConnectionHandler = { [weak self] connection in
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     self?.accept(connection)
                 }
             }
             newListener.stateUpdateHandler = { [weak self] state in
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     guard let self else { return }
                     switch state {
                     case .ready:
-                        let portRaw = newListener.port?.rawValue ?? 0
-                        self.port = portRaw
+                        self.port = newListener.port?.rawValue ?? 0
                     case .failed(let error):
                         self.lastError = "Server error: \(error.localizedDescription)"
                     default:
@@ -229,6 +216,8 @@ final class HostServer: ObservableObject {
             listener = newListener
             newListener.start(queue: .main)
             running = true
+            lastError = nil
+            UserDefaults.standard.set(true, forKey: Self.sharingWantedKey)
             refreshDisplays()
         } catch {
             lastError = "Could not start server: \(error.localizedDescription)"
@@ -236,24 +225,27 @@ final class HostServer: ObservableObject {
     }
 
     func stop() {
-        for s in pendingSessions { s.close() }
-        for s in activeSessions { s.close() }
+        let sessions = pendingSessions + activeSessions
         pendingSessions.removeAll()
         activeSessions.removeAll()
-        releasePowerAssertions()
+        // Tell clients not to reconnect on their own.
+        for session in sessions {
+            session.close(sendingBye: RDByeReason.hostStopped)
+        }
+        power.release()
         listener?.cancel()
         listener = nil
         ScreenStreamer.shared.stop()
+        updateFrameGate()
         running = false
         port = 0
         clientName = nil
-        captureStats = ""
     }
 
     /// Re-checks both privacy permissions without prompting.
     func refreshPermissions() {
-        accessibilityGranted = InputInjector.checkAccessibility(prompt: false)
-        screenGranted = CGPreflightScreenCaptureAccess()
+        accessibilityGranted = Permissions.isGranted(.accessibility)
+        screenGranted = Permissions.isGranted(.screenRecording)
     }
 
     func refreshDisplays() {
@@ -272,9 +264,29 @@ final class HostServer: ObservableObject {
     func setDisplay(_ id: CGDirectDisplayID) {
         guard selectedDisplayID != id else { return }
         selectedDisplayID = id
-        guard running else { return }
+        guard running, !activeSessions.isEmpty else { return }
+        restartCapture()
+    }
+
+    func setCodec(_ codec: RDCodec) {
+        Task { await ScreenStreamer.shared.updateConfiguration(preset: preset, codec: codec) }
+    }
+
+    /// Debounced capture restart; superseded restarts are expected and not errors.
+    private func restartCapture(codec: RDCodec? = nil) {
         Task {
-            try await ScreenStreamer.shared.start(displayID: id, preset: preset, codec: ScreenStreamer.shared.currentCodec)
+            // The last client may have left between scheduling this and running it.
+            guard !activeSessions.isEmpty else { return }
+            do {
+                try await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset,
+                                                        codec: codec ?? ScreenStreamer.shared.currentCodec)
+            } catch is CancellationError {
+            } catch {
+                lastError = "Screen capture: \(error.localizedDescription)"
+            }
+            if activeSessions.isEmpty {
+                ScreenStreamer.shared.stop()
+            }
         }
     }
 
@@ -283,9 +295,28 @@ final class HostServer: ObservableObject {
             connection.cancel()
             return
         }
-        let session = ClientSession(connection: connection, server: self)
+        // One address can't occupy every pre-authentication slot (each may wait up to
+        // two minutes for a PIN). At its cap, its own oldest attempt makes room, so a
+        // device whose earlier attempts went stale can still get in.
+        let address = Self.remoteAddress(of: connection)
+        let fromAddress = pendingSessions.filter { $0.remoteAddress == address }
+        if fromAddress.count >= Self.maxPendingSessionsPerAddress, let oldest = fromAddress.first {
+            oldest.close()
+        }
+        guard pendingSessions.count < Self.maxPendingSessions else {
+            connection.cancel()
+            return
+        }
+        let session = ClientSession(connection: connection, server: self, remoteAddress: address)
         pendingSessions.append(session)
         session.start()
+    }
+
+    private static func remoteAddress(of connection: NWConnection) -> String {
+        if case .hostPort(let host, _) = connection.endpoint {
+            return "\(host)"
+        }
+        return "\(connection.endpoint)"
     }
 
     // MARK: Called by ClientSession
@@ -297,237 +328,80 @@ final class HostServer: ObservableObject {
         }
 
         // Force wake the display from Dark Wake when a client connects.
-        acquirePowerAssertions()
-        InputInjector.wakeDisplay()
+        power.acquire()
+        InputInjector.wakeDisplay(within: streamedDisplayBounds)
         isDisplaySleeping = false
 
-        // Inform client of current screen lock & display sleep state
         session.sendHostState(HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping))
-
-        // Send running applications list to newly connected client
-        session.sendRunningApps(getRunningApps())
-
-        // Send current Mac hardware controls (brightness, volume, mute)
+        session.sendRunningApps(appSwitcher.runningApps())
         session.sendHardwareControls(HardwareController.getState())
 
-        if activeSessions.count == 1 {
-            clientName = name
-        } else {
-            clientName = "\(activeSessions.count) devices connected"
-        }
+        updateClientName()
+        updateFrameGate()
         if let keyframe = ScreenStreamer.shared.lastKeyframe {
             session.sendVideoFrame(keyframe.data, isKeyframe: true, width: keyframe.width, height: keyframe.height, codec: keyframe.codec)
         }
-        Task {
-            do {
-                try await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
-            } catch {
-                lastError = "Screen capture: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private var iconCache: [String: String] = [:]
-
-    private func getAppIconPNG(for app: NSRunningApplication) -> String? {
-        guard let bundleId = app.bundleIdentifier else { return nil }
-        if let cached = iconCache[bundleId] {
-            return cached
-        }
-        guard let icon = app.icon else { return nil }
-        let size = NSSize(width: 64, height: 64)
-        let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: 64,
-            pixelsHigh: 64,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        )
-        guard let rep else { return nil }
-        rep.size = size
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        icon.draw(in: NSRect(origin: .zero, size: size))
-        NSGraphicsContext.restoreGraphicsState()
-        guard let pngData = rep.representation(using: .png, properties: [:]) else { return nil }
-        let base64 = pngData.base64EncodedString()
-        iconCache[bundleId] = base64
-        return base64
-    }
-
-    private var appMRUOrder: [String] = []
-
-    func trackAppActivation(_ bundleId: String) {
-        if let idx = appMRUOrder.firstIndex(of: bundleId) {
-            appMRUOrder.remove(at: idx)
-        }
-        appMRUOrder.insert(bundleId, at: 0)
-    }
-
-    func getRunningApps() -> [RDRunningApp] {
-        if let frontmost = NSWorkspace.shared.frontmostApplication,
-           frontmost.activationPolicy == .regular,
-           let bid = frontmost.bundleIdentifier {
-            trackAppActivation(bid)
-        }
-
-        let running = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
-        let apps: [RDRunningApp] = running.compactMap { (app: NSRunningApplication) -> RDRunningApp? in
-            guard let bundleId = app.bundleIdentifier, !bundleId.isEmpty else { return nil }
-            let name = app.localizedName ?? bundleId
-            let icon = self.getAppIconPNG(for: app)
-            return RDRunningApp(
-                bundleId: bundleId,
-                name: name,
-                isActive: app.isActive,
-                isHidden: app.isHidden,
-                iconPNG: icon
-            )
-        }
-
-        return apps.sorted { app1, app2 in
-            if app1.isActive != app2.isActive {
-                return app1.isActive
-            }
-            let idx1 = appMRUOrder.firstIndex(of: app1.bundleId) ?? Int.max
-            let idx2 = appMRUOrder.firstIndex(of: app2.bundleId) ?? Int.max
-            if idx1 != idx2 {
-                return idx1 < idx2
-            }
-            return app1.name.localizedCaseInsensitiveCompare(app2.name) == .orderedAscending
-        }
-    }
-
-    func broadcastRunningApps() {
-        guard !activeSessions.isEmpty else { return }
-        let apps = getRunningApps()
-        for session in activeSessions {
-            session.sendRunningApps(apps)
-        }
-    }
-
-    private var appsHiddenForDesktop: [String] = []
-
-    func toggleShowDesktop() {
-        if !appsHiddenForDesktop.isEmpty {
-            // Restore previously hidden apps
-            for bundleId in appsHiddenForDesktop {
-                if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first {
-                    app.unhide()
-                }
-            }
-            if let lastFocused = appsHiddenForDesktop.first,
-               let app = NSRunningApplication.runningApplications(withBundleIdentifier: lastFocused).first {
-                app.activate(options: [.activateIgnoringOtherApps])
-            }
-            appsHiddenForDesktop.removeAll()
-        } else {
-            // Hide all visible apps to reveal desktop
-            var toHide: [String] = []
-            if let activeApp = NSWorkspace.shared.frontmostApplication,
-               let bid = activeApp.bundleIdentifier, bid != "com.apple.finder" {
-                toHide.append(bid)
-            }
-            for app in NSWorkspace.shared.runningApplications {
-                guard app.activationPolicy == .regular,
-                      !app.isHidden,
-                      let bid = app.bundleIdentifier,
-                      bid != "com.apple.finder" else { continue }
-                if !toHide.contains(bid) {
-                    toHide.append(bid)
-                }
-                app.hide()
-            }
-            appsHiddenForDesktop = toHide
-            NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first?.activate(options: [.activateIgnoringOtherApps])
-        }
-        broadcastRunningApps()
-    }
-
-    func didActivateApp(bundleId: String) {
-        if let idx = appsHiddenForDesktop.firstIndex(of: bundleId) {
-            appsHiddenForDesktop.remove(at: idx)
-        }
-    }
-
-    func handleWakeDisplayRequest() {
-        acquirePowerAssertions()
-        InputInjector.wakeDisplay()
-        isDisplaySleeping = false
-        broadcastHostState()
-        Task { @MainActor in
-            try? await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
-        }
-    }
-
-    func handleRefreshVideoRequest() {
-        Task { @MainActor in
-            try? await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset, codec: ScreenStreamer.shared.currentCodec)
-        }
+        restartCapture()
     }
 
     func sessionDidEnd(_ session: ClientSession) {
         pendingSessions.removeAll { $0 === session }
         activeSessions.removeAll { $0 === session }
+        updateFrameGate()
         if activeSessions.isEmpty {
             clientName = nil
-            captureStats = ""
-            releasePowerAssertions()
+            power.release()
             ScreenStreamer.shared.stop()
-        } else if activeSessions.count == 1 {
-            clientName = activeSessions.first?.peerDisplayName
         } else {
+            updateClientName()
+            updateBitrate()
+        }
+    }
+
+    /// A session's send backlog changed; capture only encodes while someone can take a frame.
+    func updateFrameGate() {
+        ScreenStreamer.shared.setClientsReady(activeSessions.contains { $0.canSendFrame })
+    }
+
+    /// One encoder serves every client, so it runs at the rate the slowest one can take.
+    func updateBitrate() {
+        let factor = activeSessions.map(\.bitrateFactor).min() ?? 1.0
+        ScreenStreamer.shared.setDynamicBitrate(Int(Double(preset.targetBitrate) * factor))
+    }
+
+    private func updateClientName() {
+        if activeSessions.count == 1 {
+            clientName = activeSessions.first?.peerDisplayName
+        } else if activeSessions.count > 1 {
             clientName = "\(activeSessions.count) devices connected"
+        } else {
+            clientName = nil
         }
     }
 
-    private func acquirePowerAssertions() {
-        if displaySleepAssertion == 0 {
-            IOPMAssertionCreateWithName(
-                kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
-                IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                "Local Desktop Active Remote Session" as CFString,
-                &displaySleepAssertion
-            )
-        }
-        if systemSleepAssertion == 0 {
-            IOPMAssertionCreateWithName(
-                kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
-                IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                "Local Desktop Active Remote Session" as CFString,
-                &systemSleepAssertion
-            )
-        }
-        if caffeinateProcess == nil || caffeinateProcess?.isRunning == false {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-            proc.arguments = ["-disu", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
-            try? proc.run()
-            caffeinateProcess = proc
+    func handleWakeDisplayRequest() {
+        power.acquire()
+        InputInjector.wakeDisplay(within: streamedDisplayBounds)
+        isDisplaySleeping = false
+        broadcastHostState()
+        restartCapture()
+    }
+
+    func handleRefreshVideoRequest() {
+        restartCapture()
+    }
+
+    func broadcastRunningApps() {
+        guard !activeSessions.isEmpty else { return }
+        let apps = appSwitcher.runningApps()
+        for session in activeSessions {
+            session.sendRunningApps(apps)
         }
     }
 
-    private func releasePowerAssertions() {
-        if displaySleepAssertion != 0 {
-            IOPMAssertionRelease(displaySleepAssertion)
-            displaySleepAssertion = 0
-        }
-        if systemSleepAssertion != 0 {
-            IOPMAssertionRelease(systemSleepAssertion)
-            systemSleepAssertion = 0
-        }
-        if let proc = caffeinateProcess {
-            if proc.isRunning {
-                proc.terminate()
-            }
-            caffeinateProcess = nil
-        }
+    func toggleShowDesktop() {
+        appSwitcher.toggleShowDesktop()
+        broadcastRunningApps()
     }
 
     func broadcastHostState() {
@@ -537,9 +411,9 @@ final class HostServer: ObservableObject {
         }
     }
 
-    func applyPresetFromClient(_ raw: Int, showRemoteCursor: Bool? = nil, codec rawCodec: Int? = nil) {
+    func applyPresetFromClient(_ raw: Int, showRemoteCursor: Bool? = nil, codec requestedCodec: RDCodec? = nil) {
         let newPreset = RDQualityPreset.from(raw)
-        let newCodec = rawCodec.flatMap { RDCodec(rawValue: UInt8($0)) } ?? ScreenStreamer.shared.currentCodec
+        let newCodec = requestedCodec ?? ScreenStreamer.shared.currentCodec
         var needsRestart = false
 
         if let showCursor = showRemoteCursor, ScreenStreamer.shared.showRemoteCursor != showCursor {
@@ -549,32 +423,32 @@ final class HostServer: ObservableObject {
 
         if newPreset != preset || newCodec != ScreenStreamer.shared.currentCodec {
             preset = newPreset
-            UserDefaults.standard.set(preset.rawValue, forKey: "QualityPreset")
             needsRestart = true
         }
 
         if needsRestart {
-            Task {
-                let currentDisplay = ScreenStreamer.shared.currentDisplay
-                ScreenStreamer.shared.stop()
-                try? await ScreenStreamer.shared.start(displayID: currentDisplay, preset: preset, codec: newCodec)
-            }
+            restartCapture(codec: newCodec)
         }
+    }
+
+    /// Global bounds (top-left origin) of the display being streamed.
+    var streamedDisplayBounds: CGRect {
+        CGDisplayBounds(ScreenStreamer.shared.currentDisplay)
     }
 
     /// Maps a point in streamed-frame pixel space to global CG coordinates
     /// (top-left origin), which is what CGEvent expects.
     func globalPoint(x: Double, y: Double) -> CGPoint? {
-        let bounds = CGDisplayBounds(ScreenStreamer.shared.currentDisplay)
+        let bounds = streamedDisplayBounds
         let size = ScreenStreamer.shared.frameSize
-        guard size.width > 1, size.height > 1 else { return nil }
+        guard size.width > 1, size.height > 1, x.isFinite, y.isFinite else { return nil }
         return CGPoint(x: bounds.minX + x / Double(size.width) * bounds.width,
                        y: bounds.minY + y / Double(size.height) * bounds.height)
     }
 
     /// Returns the current hardware mouse position in streamed-frame pixel space.
     func currentCursorInFrame() -> (x: Double, y: Double)? {
-        let bounds = CGDisplayBounds(ScreenStreamer.shared.currentDisplay)
+        let bounds = streamedDisplayBounds
         let size = ScreenStreamer.shared.frameSize
         guard bounds.width > 0, bounds.height > 0, size.width > 0, size.height > 0 else { return nil }
         let mousePos = InputInjector.currentPositionTopLeft
@@ -582,171 +456,5 @@ final class HostServer: ObservableObject {
         let y = (mousePos.y - bounds.minY) / bounds.height * Double(size.height)
         return (x: min(max(x, 0), Double(size.width)),
                 y: min(max(y, 0), Double(size.height)))
-    }
-
-    deinit {
-        if displaySleepAssertion != 0 {
-            IOPMAssertionRelease(displaySleepAssertion)
-        }
-        if systemSleepAssertion != 0 {
-            IOPMAssertionRelease(systemSleepAssertion)
-        }
-        if let proc = caffeinateProcess, proc.isRunning {
-            proc.terminate()
-        }
-    }
-}
-
-// MARK: - Native Mac Hardware Controller
-
-enum HardwareController {
-    private typealias GetBrightness = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
-    private typealias SetBrightness = @convention(c) (CGDirectDisplayID, Float) -> Int32
-
-    private static let displayServicesHandle: UnsafeMutableRawPointer? = {
-        dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY)
-    }()
-
-    static func getBrightness() -> Float {
-        guard let handle = displayServicesHandle,
-              let sym = dlsym(handle, "DisplayServicesGetBrightness") else { return 0.5 }
-        let fn = unsafeBitCast(sym, to: GetBrightness.self)
-        var brightness: Float = 0.5
-        let _ = fn(CGMainDisplayID(), &brightness)
-        return max(0.0, min(1.0, brightness))
-    }
-
-    static func setBrightness(_ value: Float) {
-        guard let handle = displayServicesHandle,
-              let sym = dlsym(handle, "DisplayServicesSetBrightness") else { return }
-        let fn = unsafeBitCast(sym, to: SetBrightness.self)
-        let clamped = max(0.0, min(1.0, value))
-        let _ = fn(CGMainDisplayID(), clamped)
-    }
-
-    private static func getDefaultAudioOutputDeviceID() -> AudioObjectID? {
-        var defaultOutputDeviceID = AudioObjectID(kAudioObjectUnknown)
-        var propertySize = UInt32(MemoryLayout<AudioObjectID>.size)
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        let status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &propertySize,
-            &defaultOutputDeviceID
-        )
-
-        guard status == noErr, defaultOutputDeviceID != kAudioObjectUnknown else { return nil }
-        return defaultOutputDeviceID
-    }
-
-    static func getVolumeSettings() -> (volume: Int, isMuted: Bool) {
-        guard let deviceID = getDefaultAudioOutputDeviceID() else {
-            return (50, false)
-        }
-
-        var vol: Float32 = 0.5
-        var volAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var volSize = UInt32(MemoryLayout<Float32>.size)
-        let volStatus = AudioObjectGetPropertyData(deviceID, &volAddress, 0, nil, &volSize, &vol)
-
-        var isMuted: UInt32 = 0
-        var muteAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var muteSize = UInt32(MemoryLayout<UInt32>.size)
-        let muteStatus = AudioObjectGetPropertyData(deviceID, &muteAddress, 0, nil, &muteSize, &isMuted)
-
-        let volumeInt = volStatus == noErr ? Int(round(vol * 100.0)) : 50
-        let mutedBool = muteStatus == noErr ? (isMuted != 0) : false
-
-        return (max(0, min(100, volumeInt)), mutedBool)
-    }
-
-    static func setVolume(_ volume: Int) {
-        let clamped = max(0, min(100, volume))
-        if let deviceID = getDefaultAudioOutputDeviceID() {
-            var vol = Float32(clamped) / 100.0
-            var volAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-                mScope: kAudioDevicePropertyScopeOutput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            AudioHardwareServiceSetPropertyData(
-                deviceID,
-                &volAddress,
-                0,
-                nil,
-                UInt32(MemoryLayout<Float32>.size),
-                &vol
-            )
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            if let script = NSAppleScript(source: "set volume output volume \(clamped)") {
-                var error: NSDictionary?
-                script.executeAndReturnError(&error)
-            }
-        }
-    }
-
-    static func setMuted(_ muted: Bool) {
-        if let deviceID = getDefaultAudioOutputDeviceID() {
-            var isMuted: UInt32 = muted ? 1 : 0
-            var muteAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyMute,
-                mScope: kAudioDevicePropertyScopeOutput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            AudioObjectSetPropertyData(
-                deviceID,
-                &muteAddress,
-                0,
-                nil,
-                UInt32(MemoryLayout<UInt32>.size),
-                &isMuted
-            )
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            if let script = NSAppleScript(source: "set volume output muted \(muted ? "true" : "false")") {
-                var error: NSDictionary?
-                script.executeAndReturnError(&error)
-            }
-        }
-    }
-
-    static func sleepDisplay() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/pmset"), arguments: ["displaysleepnow"])
-        }
-    }
-
-    static func lockScreen() {
-        if let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/login", RTLD_LAZY),
-           let sym = dlsym(handle, "SACLockScreenImmediate") {
-            typealias SACLockScreenImmediateType = @convention(c) () -> Void
-            let fn = unsafeBitCast(sym, to: SACLockScreenImmediateType.self)
-            fn()
-        } else {
-            InputInjector.key(code: 12, down: true, flags: [.maskControl, .maskCommand])
-            InputInjector.key(code: 12, down: false, flags: [.maskControl, .maskCommand])
-        }
-    }
-
-    static func getState() -> RDHardwareControls {
-        let (vol, muted) = getVolumeSettings()
-        let brightness = getBrightness()
-        return RDHardwareControls(brightness: brightness, volume: vol, isMuted: muted)
     }
 }

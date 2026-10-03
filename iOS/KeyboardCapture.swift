@@ -9,6 +9,8 @@ final class TrackpadTextView: UITextView, UITextViewDelegate {
     var onDeleteBackward: (() -> Void)?
     var onReturn: (() -> Void)?
     var onArrowKey: ((RDKey) -> Void)?
+    /// The keyboard went away on its own (e.g. the iPad's dismiss-keyboard key).
+    var onDismissed: (() -> Void)?
 
     private static let lineLength = 60
     private static let numLines = 60
@@ -67,6 +69,10 @@ final class TrackpadTextView: UITextView, UITextViewDelegate {
     }
 
     // MARK: - UITextViewDelegate
+
+    func textViewDidEndEditing(_ textView: UITextView) {
+        onDismissed?()
+    }
 
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
         if text.isEmpty {
@@ -136,6 +142,15 @@ struct KeyboardCapture: UIViewRepresentable {
     var onDelete: () -> Void
     var onReturnKey: () -> Void
     var onArrowKey: (RDKey) -> Void
+    var onDismissed: () -> Void
+
+    final class Coordinator {
+        var appliedIsActive = false
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeUIView(context: Context) -> TrackpadTextView {
         let view = TrackpadTextView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
@@ -147,7 +162,13 @@ struct KeyboardCapture: UIViewRepresentable {
         view.onDeleteBackward = onDelete
         view.onReturn = onReturnKey
         view.onArrowKey = onArrowKey
+        view.onDismissed = onDismissed
 
+        // Only act when the requested state changes; re-asserting it on every update
+        // would bring back a keyboard the user just dismissed.
+        guard context.coordinator.appliedIsActive != isActive else { return }
+        context.coordinator.appliedIsActive = isActive
+        let isActive = self.isActive
         DispatchQueue.main.async {
             if isActive && !view.isFirstResponder {
                 view.becomeFirstResponder()

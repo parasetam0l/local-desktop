@@ -24,10 +24,9 @@ final class HostBrowser: ObservableObject {
         isSearching = true
         #if targetEnvironment(simulator)
         let simEndpoint = NWEndpoint.hostPort(host: NWEndpoint.Host("127.0.0.1"),
-                                              port: NWEndpoint.Port(rawValue: 52341)!)
+                                              port: NWEndpoint.Port(rawValue: RDService.defaultPort)!)
         let simHost = DiscoveredHost(id: "local_mac_sim",
                                      name: "Mac (Local Simulator)",
-                                     serverId: "local_mac_sim",
                                      endpoint: simEndpoint)
         hosts = [simHost]
         #endif
@@ -37,27 +36,20 @@ final class HostBrowser: ObservableObject {
         b.browseResultsChangedHandler = { [weak self] results, _ in
             let items = results.compactMap { result -> DiscoveredHost? in
                 guard case let .service(name, _, _, _) = result.endpoint else { return nil }
-                var activeEndpoint = result.endpoint
                 var serverId: String?
                 if case let .bonjour(record) = result.metadata {
                     serverId = record["sid"]
-                    if let ip = record["ip"], !ip.isEmpty,
-                       let portStr = record["port"], let port = UInt16(portStr),
-                       let portEndpoint = NWEndpoint.Port(rawValue: port) {
-                        activeEndpoint = .hostPort(host: NWEndpoint.Host(ip), port: portEndpoint)
-                    }
                 }
-                return DiscoveredHost(id: name, name: name, serverId: serverId, endpoint: activeEndpoint)
+                return DiscoveredHost(id: name, name: name, serverId: serverId, endpoint: result.endpoint)
             }
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let self else { return }
                 var allItems = items
                 #if targetEnvironment(simulator)
                 let simEndpoint = NWEndpoint.hostPort(host: NWEndpoint.Host("127.0.0.1"),
-                                                      port: NWEndpoint.Port(rawValue: 52341)!)
+                                                      port: NWEndpoint.Port(rawValue: RDService.defaultPort)!)
                 let simHost = DiscoveredHost(id: "local_mac_sim",
                                              name: "Mac (Local Simulator)",
-                                             serverId: "local_mac_sim",
                                              endpoint: simEndpoint)
                 if !allItems.contains(where: { $0.id == simHost.id }) {
                     allItems.insert(simHost, at: 0)
@@ -69,12 +61,16 @@ final class HostBrowser: ObservableObject {
             }
         }
         b.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let self else { return }
                 switch state {
                 case .ready:
                     self.isSearching = true
                 case .failed:
+                    // Drop the dead browser so the next start() (pull to refresh,
+                    // foregrounding) creates a fresh one.
+                    self.browser?.cancel()
+                    self.browser = nil
                     self.hosts = []
                     self.isSearching = false
                 case .cancelled:
@@ -89,7 +85,7 @@ final class HostBrowser: ObservableObject {
 
         searchTimeoutTimer?.invalidate()
         searchTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isSearching = false
             }
         }

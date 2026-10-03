@@ -7,16 +7,21 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    SWIFT_VERSION: "5.10"
+    SWIFT_VERSION: "6.0"
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
-    DEVELOPMENT_TEAM: "WJALEYZCDF"
+    DEVELOPMENT_TEAM: "P7V7795SS9"
 targets:
   LocalDesktopHost:
     type: application
     platform: macOS
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: localdesktop.host
-      CODE_SIGN_IDENTITY: "Apple Development"
+      # Developer ID Application certificate for team P7V7795SS9, valid until 2031-09-17.
+      # Pinned by SHA-1 because an older certificate (expiring 2027) has the same name.
+      CODE_SIGN_STYLE: Manual
+      CODE_SIGN_IDENTITY: "1CA8C64FCD11507B4C1B0F1FC76CF11C8A53A77F"
+      PROVISIONING_PROFILE_SPECIFIER: ""
+      ENABLE_HARDENED_RUNTIME: YES
     sources:
       - Host
       - Shared
@@ -55,6 +60,22 @@ targets:
           - audio
         NSLocalNetworkUsageDescription: "Local Desktop scans your local network for Macs to connect to."
         NSBonjourServices: ["_rd-desktop._tcp"]
+  LocalDesktopTests:
+    type: bundle.unit-test
+    platform: macOS
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: localdesktop.tests
+      GENERATE_INFOPLIST_FILE: YES
+      CODE_SIGN_IDENTITY: "-"
+      CODE_SIGN_STYLE: Manual
+      DEVELOPMENT_TEAM: ""
+    sources:
+      - Tests
+      - Shared/RDProtocol.swift
+      - Shared/RDCrypto.swift
+      - Shared/RDSecureChannel.swift
+      - Host/PINSecurity.swift
+      - iOS/ClientConnection.swift
 schemes:
   LocalDesktopHost:
     build:
@@ -68,3 +89,10 @@ schemes:
         LocalDesktopClient: all
     run:
       config: Debug
+  LocalDesktopTests:
+    build:
+      targets:
+        LocalDesktopTests: all
+    test:
+      targets:
+        - LocalDesktopTests

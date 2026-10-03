@@ -5,6 +5,8 @@ import SwiftUI
 /// failed attempt.
 struct PinSheet: View {
     let serverName: String
+    /// The Mac's identity fingerprint; the Mac shows the same value in its menu.
+    var fingerprint: String = ""
     var errorText: String?
     var refreshToken: Int
     var onCancel: (() -> Void)?
@@ -33,6 +35,12 @@ struct PinSheet: View {
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.7))
                     .multilineTextAlignment(.center)
+                if !fingerprint.isEmpty {
+                    Text("Fingerprint \(fingerprint)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.white.opacity(0.6))
+                        .accessibilityHint("Should match the fingerprint in the Mac's Local Desktop menu")
+                }
             }
 
             HStack(spacing: 16) {
@@ -60,7 +68,7 @@ struct PinSheet: View {
                 .frame(width: 2, height: 2)
                 .opacity(0.01)
                 .onChange(of: pin) { _, newValue in
-                    let filtered = String(newValue.filter(\.isNumber).prefix(4))
+                    let filtered = String(newValue.filter { $0.isASCII && $0.isNumber }.prefix(4))
                     if filtered != newValue {
                         pin = filtered
                         return

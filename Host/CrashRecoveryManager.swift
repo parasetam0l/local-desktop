@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Darwin
 
 /// Manages crash recovery and supervisor watchdog monitoring for LocalDesktopHost.
@@ -7,28 +8,39 @@ import Darwin
 /// 1. When the host app launches, it registers POSIX signal handlers and spawns a detached
 ///    lightweight supervisor process (`--supervisor <pid> <bundlePath>`).
 /// 2. The supervisor monitors the host's PID using a kernel event filter (`kqueue` / `NOTE_EXIT`).
-/// 3. If the host terminates cleanly (user clicks "Quit" or `applicationWillTerminate` fires),
-///    a clean-exit sentinel file is written, and the supervisor exits without restarting.
-/// 4. If the host terminates abnormally (SIGSEGV, SIGBUS, etc.), the supervisor detects the
-///    absence of the clean-exit sentinel, verifies the rate-limit circuit-breaker (max 5 restarts in 60s),
-///    and relaunches the app via `/usr/bin/open -n <bundlePath>`.
+/// 3. If the host terminates cleanly (Quit, `applicationWillTerminate`, or SIGTERM),
+///    a clean-exit sentinel named after its PID is written, and the supervisor exits without restarting.
+/// 4. If the host terminates abnormally (SIGSEGV, SIGBUS, a Swift trap, Force Quit, etc.), the
+///    supervisor finds no sentinel, checks the rate-limit circuit-breaker (max 5 restarts in 60s),
+///    and relaunches the app via `/usr/bin/open -n <bundlePath> --args --recovered`.
+@MainActor
 final class CrashRecoveryManager {
     static let shared = CrashRecoveryManager()
 
+    /// Passed to an instance relaunched by the supervisor.
+    nonisolated static let recoveredArgument = "--recovered"
+
     private let appSupportDir: URL
-    private let cleanExitFileURL: URL
-    private let crashHistoryFileURL: URL
     private let crashLogFileURL: URL
     private var isStarted = false
+    private var terminationSource: DispatchSourceSignal?
 
     private init() {
+        appSupportDir = Self.appSupportDirectory()
+        crashLogFileURL = appSupportDir.appendingPathComponent("crash_recovery.log")
+        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+    }
+
+    nonisolated private static func appSupportDirectory() -> URL {
         let baseDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        self.appSupportDir = baseDir.appendingPathComponent("localdesktop.host", isDirectory: true)
-        self.cleanExitFileURL = appSupportDir.appendingPathComponent("clean_exit")
-        self.crashHistoryFileURL = appSupportDir.appendingPathComponent("crash_history.json")
-        self.crashLogFileURL = appSupportDir.appendingPathComponent("crash_recovery.log")
-        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+        return baseDir.appendingPathComponent("localdesktop.host", isDirectory: true)
+    }
+
+    /// One sentinel per process, so a second copy of the app quitting can't mark
+    /// the primary instance as cleanly exited.
+    nonisolated private static func cleanExitURL(in dir: URL, pid: Int32) -> URL {
+        dir.appendingPathComponent("clean_exit.\(pid)")
     }
 
     // MARK: - Main Application Lifecycle
@@ -38,24 +50,38 @@ final class CrashRecoveryManager {
         guard !isStarted else { return }
         isStarted = true
 
-        // Remove any stale clean-exit marker from previous runs
-        try? FileManager.default.removeItem(at: cleanExitFileURL)
+        // A stale sentinel from an earlier process with a recycled PID would hide a crash.
+        try? FileManager.default.removeItem(at: Self.cleanExitURL(in: appSupportDir, pid: getpid()))
 
-        // Install crash signal handlers
-        Self.installSignalHandlers(cleanExitPath: cleanExitFileURL.path, logPath: crashLogFileURL.path)
+        Self.installSignalHandlers(logPath: crashLogFileURL.path)
+        installTerminationHandler()
 
-        // Do not spawn supervisor if explicitly disabled via flag or already running under supervisor
-        if CommandLine.arguments.contains("--no-supervisor") || CommandLine.arguments.contains("--supervisor") {
+        if CommandLine.arguments.contains("--no-supervisor") {
             return
         }
-
         spawnSupervisor()
     }
 
     /// Marks that the process is shutting down cleanly so the supervisor will not relaunch it.
+    /// A no-op in an instance that never started recovery (e.g. a duplicate that is quitting).
     func markCleanExit() {
+        guard isStarted else { return }
         let timestamp = ISO8601DateFormatter().string(from: Date())
-        try? timestamp.write(to: cleanExitFileURL, atomically: true, encoding: .utf8)
+        try? timestamp.write(to: Self.cleanExitURL(in: appSupportDir, pid: getpid()), atomically: true, encoding: .utf8)
+    }
+
+    /// `kill`, `pkill`, and system shutdown send SIGTERM; treat it like Quit.
+    private func installTerminationHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
+                CrashRecoveryManager.shared.markCleanExit()
+                NSApplication.shared.terminate(nil)
+            }
+        }
+        source.resume()
+        terminationSource = source
     }
 
     private func spawnSupervisor() {
@@ -73,14 +99,14 @@ final class CrashRecoveryManager {
         do {
             try proc.run()
         } catch {
-            logMessage("Failed to spawn crash supervisor: \(error.localizedDescription)")
+            Self.appendLog("Failed to spawn crash supervisor: \(error.localizedDescription)", to: crashLogFileURL)
         }
     }
 
     // MARK: - Supervisor Mode
 
     /// Entry point when launched with `--supervisor <parentPID> <bundlePath>`
-    static func runSupervisorMode() {
+    nonisolated static func runSupervisorMode() {
         let args = CommandLine.arguments
         guard args.count >= 4,
               let parentPID = Int32(args[2]) else {
@@ -88,28 +114,14 @@ final class CrashRecoveryManager {
         }
         let bundlePath = args[3]
 
-        let baseDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        let appSupport = baseDir.appendingPathComponent("localdesktop.host", isDirectory: true)
-        let cleanExitURL = appSupport.appendingPathComponent("clean_exit")
+        let appSupport = appSupportDirectory()
+        let cleanExitURL = cleanExitURL(in: appSupport, pid: parentPID)
         let historyURL = appSupport.appendingPathComponent("crash_history.json")
         let logURL = appSupport.appendingPathComponent("crash_recovery.log")
         try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
 
         func logSupervisor(_ msg: String) {
-            let line = "[\(ISO8601DateFormatter().string(from: Date()))] [Supervisor] \(msg)\n"
-            fputs(line, stderr)
-            if let data = line.data(using: .utf8) {
-                if FileManager.default.fileExists(atPath: logURL.path) {
-                    if let handle = try? FileHandle(forWritingTo: logURL) {
-                        handle.seekToEndOfFile()
-                        handle.write(data)
-                        try? handle.close()
-                    }
-                } else {
-                    try? data.write(to: logURL)
-                }
-            }
+            appendLog("[Supervisor] \(msg)", to: logURL)
         }
 
         // Wait for the parent process to exit using kqueue
@@ -134,7 +146,6 @@ final class CrashRecoveryManager {
 
         // Check whether a clean exit occurred
         if FileManager.default.fileExists(atPath: cleanExitURL.path) {
-            // Clean exit by user or intentional shutdown
             try? FileManager.default.removeItem(at: cleanExitURL)
             logSupervisor("Parent process \(parentPID) exited cleanly. Supervisor stopping.")
             return
@@ -163,39 +174,51 @@ final class CrashRecoveryManager {
             return
         }
 
-        // Relaunch the application via /usr/bin/open -n <bundlePath>
         logSupervisor("Circuit breaker OK (crash \(timestamps.count)/5 in 60s). Relaunching \(bundlePath)...")
         usleep(250_000)
         let openProc = Process()
         openProc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        openProc.arguments = ["-n", bundlePath]
+        openProc.arguments = ["-n", bundlePath, "--args", recoveredArgument]
         try? openProc.run()
     }
 
     // MARK: - POSIX Signal Handlers
 
-    private static var signalCleanExitPath: UnsafeMutablePointer<CChar>?
-    private static var signalLogPath: UnsafeMutablePointer<CChar>?
+    // Everything the handler touches is allocated up front: a signal handler may only
+    // call async-signal-safe functions, and that rules out allocating memory.
+    // They are written once, before the handlers are installed, and only read afterwards.
+    private static let signalMessageCapacity = 128
+    nonisolated(unsafe) private static var signalLogPath: UnsafeMutablePointer<CChar>?
+    nonisolated(unsafe) private static var signalMessage: UnsafeMutablePointer<UInt8>?
+    nonisolated(unsafe) private static var signalPrefixLength = 0
 
-    private static func installSignalHandlers(cleanExitPath: String, logPath: String) {
-        signalCleanExitPath = strdup(cleanExitPath)
+    private static func installSignalHandlers(logPath: String) {
         signalLogPath = strdup(logPath)
+        let prefix = Array("Fatal signal caught by CrashRecoveryManager: ".utf8)
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: signalMessageCapacity)
+        buffer.initialize(repeating: 0, count: signalMessageCapacity)
+        buffer.update(from: prefix, count: prefix.count)
+        signalMessage = buffer
+        signalPrefixLength = prefix.count
 
         var sa = sigaction()
         sa.__sigaction_u.__sa_handler = { sig in
-            // Async-signal-safe crash handler
-            if let path = CrashRecoveryManager.signalCleanExitPath {
-                unlink(path)
-            }
-            if let logPath = CrashRecoveryManager.signalLogPath {
+            if let logPath = CrashRecoveryManager.signalLogPath,
+               let message = CrashRecoveryManager.signalMessage {
+                // Format "<prefix><signal number>\n" in place (signal numbers are < 100).
+                var length = CrashRecoveryManager.signalPrefixLength
+                let number = Int(sig)
+                if number >= 10 {
+                    message[length] = UInt8(48 + number / 10)
+                    length += 1
+                }
+                message[length] = UInt8(48 + number % 10)
+                message[length + 1] = 10
+                length += 2
+
                 let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
                 if fd >= 0 {
-                    let msg = "Fatal signal caught by CrashRecoveryManager: "
-                    write(fd, msg, msg.utf8.count)
-                    var sigNumStr = String(sig) + "\n"
-                    sigNumStr.withCString { ptr in
-                        write(fd, ptr, strlen(ptr))
-                    }
+                    _ = write(fd, message, length)
                     close(fd)
                 }
             }
@@ -206,24 +229,20 @@ final class CrashRecoveryManager {
         sigemptyset(&sa.sa_mask)
         sa.sa_flags = SA_RESETHAND
 
-        sigaction(SIGSEGV, &sa, nil)
-        sigaction(SIGBUS, &sa, nil)
-        sigaction(SIGABRT, &sa, nil)
-        sigaction(SIGILL, &sa, nil)
+        for sig in [SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGTRAP, SIGFPE] {
+            sigaction(sig, &sa, nil)
+        }
     }
 
-    private func logMessage(_ msg: String) {
+    nonisolated private static func appendLog(_ msg: String, to url: URL) {
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: crashLogFileURL.path) {
-                if let handle = try? FileHandle(forWritingTo: crashLogFileURL) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    try? handle.close()
-                }
-            } else {
-                try? data.write(to: crashLogFileURL)
-            }
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
         }
     }
 }

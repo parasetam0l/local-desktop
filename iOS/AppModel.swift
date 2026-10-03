@@ -21,12 +21,14 @@ struct AppSettings: Codable {
     var autoConnect = false
     var autoReconnect = true
     var defaultTouchpad = true
-    var centerOnMouse = true
     var qualityRaw = RDQualityPreset.sharp.rawValue
     var codecRaw = RDCodec.hevc.rawValue
     var showRemoteCursor = false
     var showScrollHelpers = true
     var pointerSpeedMultiplier: Double = 1.5
+
+    var preset: RDQualityPreset { RDQualityPreset.from(qualityRaw) }
+    var codec: RDCodec { RDCodec(rawValue: codecRaw) ?? .hevc }
 }
 
 @MainActor
@@ -39,10 +41,10 @@ final class AppModel: ObservableObject {
     @Published var settings: AppSettings {
         didSet { persistSettings() }
     }
+    /// Server ids of Macs this device has paired with (cached from the Keychain).
+    @Published private(set) var pairedServerIds: Set<String> = []
 
     private var didAutoConnect = false
-    private var reconnectTask: Task<Void, Never>?
-    private var reconnectAttempts = 0
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -57,6 +59,8 @@ final class AppModel: ObservableObject {
             settings = AppSettings()
         }
         persistRecents()
+        TrustStore.removeLegacyTokens()
+        pairedServerIds = TrustStore.pairedServerIds()
 
         browser.objectWillChange
             .sink { [weak self] _ in
@@ -76,71 +80,88 @@ final class AppModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let self, self.session == nil else { return }
                 self.browser.restart()
             }
         }
 
-        // Auto-connection: on launch, dial the last trusted Mac directly.
-        if settings.autoConnect, !didAutoConnect, session == nil,
-           let last = recents.first,
-           TrustStore.token(serverId: last.serverId) != nil, !last.host.isEmpty {
-            didAutoConnect = true
-            connectRecent(last)
+        // Auto-connection: prefer finding the Mac over Bonjour (see hostsChanged);
+        // if it hasn't shown up shortly after launch, dial its last known address.
+        if settings.autoConnect {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.settings.autoConnect, !self.didAutoConnect, self.session == nil,
+                          let last = self.recents.first, self.isPaired(last.serverId), !last.host.isEmpty else { return }
+                    self.didAutoConnect = true
+                    self.connectRecent(last)
+                }
+            }
         }
 
         #if targetEnvironment(simulator)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self, self.session == nil, let sim = self.browser.hosts.first else { return }
-            self.connect(endpoint: sim.endpoint, fallbackName: sim.name)
+            MainActor.assumeIsolated {
+                guard let self, self.session == nil, let sim = self.browser.hosts.first else { return }
+                self.connect(endpoint: sim.endpoint, fallbackName: sim.name)
+            }
         }
         #endif
     }
 
+    func isPaired(_ serverId: String?) -> Bool {
+        guard let serverId, !serverId.isEmpty else { return false }
+        return pairedServerIds.contains(serverId)
+    }
+
     // MARK: Connecting
 
-    func connect(endpoint: NWEndpoint, fallbackName: String? = nil) {
-        reconnectTask?.cancel()
+    func connect(endpoint: NWEndpoint, fallbackName: String? = nil, expectedServerId: String? = nil,
+                 retryWhileWaking: Bool = false) {
         manualError = nil
+        // Never leave a previous session running (and reconnecting) in the background.
+        session?.disconnect()
         let newSession = ClientSession(deviceName: UIDevice.current.name)
         newSession.autoReconnect = settings.autoReconnect
         session = newSession
 
         newSession.onConnected = { [weak self] connected in
             guard let self, self.session === connected else { return }
-            self.reconnectAttempts = 0
-            self.recordRecent(connected, fallbackName: fallbackName)
-            let preset = RDQualityPreset.from(self.settings.qualityRaw)
-            let codec = RDCodec(rawValue: self.settings.codecRaw) ?? .hevc
-            connected.setQuality(preset, showRemoteCursor: self.settings.showRemoteCursor, codec: codec)
+            self.recordRecent(connected)
+            connected.setQuality(self.settings.preset, showRemoteCursor: self.settings.showRemoteCursor,
+                                 codec: self.settings.codec)
         }
-        newSession.onEnded = { [weak self] ended in
-            // Reconnection is now fully handled inside ClientSession's fail() state machine!
-            // We only need to clear the session if the user explicitly ended it, or if it gave up.
+        newSession.onPaired = { [weak self] serverId in
+            self?.pairedServerIds.insert(serverId)
         }
-        newSession.connect(to: endpoint, fallbackName: fallbackName)
+        newSession.connect(to: endpoint, fallbackName: fallbackName, expectedServerId: expectedServerId,
+                           retryWhileWaking: retryWhileWaking)
+    }
+
+    func connect(to host: DiscoveredHost) {
+        connect(endpoint: host.endpoint, fallbackName: host.name, expectedServerId: host.serverId)
     }
 
     func connectRecent(_ recent: RecentHost) {
+        var sentWake = false
         if let mac = recent.macAddress {
-            WakeOnLAN.wake(macAddress: mac)
+            WakeOnLAN.wake(macAddress: mac, lastKnownHost: recent.host.isEmpty ? nil : recent.host)
+            sentWake = true
         }
-        if let live = browser.hosts.first(where: {
-            (!recent.serverId.isEmpty && $0.serverId == recent.serverId) ||
-            (!recent.serverId.isEmpty && $0.name.contains(String(recent.serverId.prefix(4)))) ||
-            $0.name.hasPrefix(recent.name) || recent.name.hasPrefix($0.name)
-        }) {
-            connect(endpoint: live.endpoint, fallbackName: live.name)
+        if !recent.serverId.isEmpty, let live = browser.hosts.first(where: { $0.serverId == recent.serverId }) {
+            connect(to: live)
             return
         }
-        let portToUse = recent.port > 0 ? recent.port : 52341
+        let portToUse = recent.port > 0 ? recent.port : RDService.defaultPort
         guard let port = NWEndpoint.Port(rawValue: portToUse), !recent.host.isEmpty else {
-            manualError = "Could not find \(recent.name). Tap Refresh above or connect from Nearby Macs."
+            manualError = "Could not find \(recent.name). Pull to refresh or connect from Nearby Macs."
             return
         }
+        // A Mac we just tried to wake may need a few seconds before it answers.
         connect(endpoint: .hostPort(host: NWEndpoint.Host(recent.host), port: port),
-                fallbackName: recent.name)
+                fallbackName: recent.name,
+                expectedServerId: recent.serverId,
+                retryWhileWaking: sentWake)
     }
 
     func deleteRecent(at offsets: IndexSet) {
@@ -152,54 +173,58 @@ final class AppModel: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         var hostPart = trimmed
-        var portPart: UInt16?
+        var portPart: UInt16? = RDService.defaultPort
         if let colon = trimmed.lastIndex(of: ":") {
             hostPart = String(trimmed[..<colon])
             portPart = UInt16(trimmed[trimmed.index(after: colon)...])
         }
-        guard !hostPart.isEmpty, let port = portPart else {
+        guard !hostPart.isEmpty, let rawPort = portPart, let port = NWEndpoint.Port(rawValue: rawPort) else {
             manualError = "Use the format ip:port (the port is shown in the Mac's Local Desktop menu)."
             return
         }
-        connect(endpoint: .hostPort(host: NWEndpoint.Host(hostPart), port: NWEndpoint.Port(rawValue: port)!),
-                fallbackName: hostPart)
+        connect(endpoint: .hostPort(host: NWEndpoint.Host(hostPart), port: port), fallbackName: hostPart)
     }
 
     func endSession() {
         didAutoConnect = true
-        reconnectTask?.cancel()
-        reconnectTask = nil
         let current = session
         session = nil
         current?.disconnect()
     }
 
-    // MARK: Auto-connect / auto-reconnect
+    /// Removes a Mac's pinned identity so the next connection pairs from scratch.
+    func forgetHost(serverId: String) {
+        TrustStore.forgetHost(serverId: serverId)
+        pairedServerIds.remove(serverId)
+    }
+
+    func forgetAllHosts() {
+        TrustStore.forgetAllHosts()
+        pairedServerIds.removeAll()
+        recents = []
+        persistRecents()
+    }
+
+    // MARK: Auto-connect
 
     private func hostsChanged(_ hosts: [DiscoveredHost]) {
         guard settings.autoConnect, !didAutoConnect, session == nil,
-              let target = recents.first, !target.name.isEmpty else { return }
-        if let match = hosts.first(where: {
-            (!target.serverId.isEmpty && $0.serverId == target.serverId) ||
-            (!target.serverId.isEmpty && $0.name.contains(String(target.serverId.prefix(4)))) ||
-            $0.name.hasPrefix(target.name) || target.name.hasPrefix($0.name)
-        }) {
-            didAutoConnect = true
-            connect(endpoint: match.endpoint, fallbackName: target.name)
-        }
+              let target = recents.first, isPaired(target.serverId),
+              let match = hosts.first(where: { $0.serverId == target.serverId }) else { return }
+        didAutoConnect = true
+        connect(to: match)
     }
 
     // MARK: Recents
 
-    private func recordRecent(_ connected: ClientSession, fallbackName: String?) {
+    private func recordRecent(_ connected: ClientSession) {
         var host = ""
         var port: UInt16 = 0
         if case .hostPort(let h, let p)? = connected.currentEndpoint {
             host = "\(h)"
             port = p.rawValue
         }
-        let name = connected.displayName
-        let recent = RecentHost(name: name,
+        let recent = RecentHost(name: connected.displayName,
                                 serverId: connected.serverId,
                                 host: host,
                                 port: port,
@@ -246,5 +271,10 @@ final class AppModel: ObservableObject {
 
     private func persistSettings() {
         UserDefaults.standard.set((try? JSONEncoder().encode(settings)) ?? Data(), forKey: "rd.settings")
+    }
+
+    /// Pushes the current quality settings to the live session, if any.
+    func applyQualitySettings() {
+        session?.setQuality(settings.preset, showRemoteCursor: settings.showRemoteCursor, codec: settings.codec)
     }
 }

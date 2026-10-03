@@ -26,9 +26,9 @@ struct ConnectView: View {
                     } else {
                         ForEach(app.browser.hosts) { host in
                             Button {
-                                app.connect(endpoint: host.endpoint, fallbackName: host.name)
+                                app.connect(to: host)
                             } label: {
-                                row(name: host.name, trusted: isTrusted(host))
+                                row(name: host.name, trusted: app.isPaired(host.serverId))
                             }
                         }
                     }
@@ -49,8 +49,7 @@ struct ConnectView: View {
                             Button {
                                 app.connectRecent(recent)
                             } label: {
-                                row(name: recent.name,
-                                    trusted: TrustStore.token(serverId: recent.serverId) != nil)
+                                row(name: recent.name, trusted: app.isPaired(recent.serverId))
                             }
                         }
                         .onDelete { indexSet in
@@ -118,12 +117,6 @@ struct ConnectView: View {
                 Image(systemName: "checkmark.seal.fill")
                     .foregroundStyle(.green)
             }
-        }
-    }
-
-    private func isTrusted(_ host: DiscoveredHost) -> Bool {
-        app.recents.contains { recent in
-            host.name.hasPrefix(recent.name) && TrustStore.token(serverId: recent.serverId) != nil
         }
     }
 }

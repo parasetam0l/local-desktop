@@ -4,8 +4,12 @@ import Foundation
 
 enum RDService {
     static let type = "_rd-desktop._tcp"
-    static let protocolVersion = 1
+    static let protocolVersion = 2
+    static let defaultPort: UInt16 = 52341
     static let maxPayload = 32 * 1024 * 1024
+    /// Everything exchanged before authentication is a small JSON body; larger
+    /// frames are rejected so unauthenticated peers can't make us buffer megabytes.
+    static let maxHandshakePayload = 16 * 1024
 }
 
 // MARK: - Wire message types
@@ -15,7 +19,7 @@ enum RDWire: UInt8 {
     case hello = 0x01
     case serverHello = 0x02
     case authPin = 0x03
-    case authToken = 0x04
+    case authDevice = 0x04
     case authOK = 0x05
     case authFailed = 0x06
 
@@ -62,26 +66,33 @@ enum RDWire: UInt8 {
 enum RDFrame {
     static let headerLength = 5
 
+    static func header(_ wire: RDWire, length: Int) -> Data {
+        var out = Data(capacity: headerLength)
+        out.appendBE32(UInt32(length))
+        out.append(wire.rawValue)
+        return out
+    }
+
+    /// Plaintext frame; only used for `hello`, `serverHello`, and a pre-handshake `authFailed`.
     static func pack(_ wire: RDWire, payload: Data) -> Data {
-        var out = Data(capacity: RDFrame.headerLength + payload.count)
-        out.appendBE32(UInt32(payload.count))
-        out.append(UInt8(wire.rawValue))
+        var out = header(wire, length: payload.count)
         out.append(payload)
         return out
     }
 
-    static func unpackHeader(_ data: Data) -> (wire: RDWire, length: Int)? {
-        guard data.count >= RDFrame.headerLength else { return nil }
+    /// Parses a frame header. `wire` is nil for message types this build doesn't know;
+    /// callers still consume (and decrypt) such frames so the stream stays in sync.
+    static func unpackHeader(_ data: Data) -> (wire: RDWire?, length: Int)? {
+        guard data.count >= headerLength else { return nil }
         let length = Int(data.be32(at: 0))
-        guard let wire = RDWire(rawValue: data[data.startIndex + 4]), length <= RDService.maxPayload else { return nil }
-        return (wire, length)
+        guard length <= RDService.maxPayload else { return nil }
+        return (RDWire(rawValue: data[data.startIndex + 4]), length)
     }
 }
 
-// MARK: - Video frame payload: [u16 w BE][u16 h BE][u8 codec][pixels]
+// MARK: - Video frame payload: [u16 w BE][u16 h BE][u8 codec][Annex-B data]
 
 enum RDCodec: UInt8, CaseIterable, Identifiable {
-    case jpeg = 0
     case h264 = 1
     case hevc = 2
 
@@ -89,16 +100,22 @@ enum RDCodec: UInt8, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .jpeg: return "JPEG"
         case .h264: return "H.264"
         case .hevc: return "HEVC (H.265)"
         }
     }
+
+    /// Decodes the optional `codec` field of `setQuality`, rejecting out-of-range values.
+    static func from(_ raw: Int?) -> RDCodec? {
+        raw.flatMap { UInt8(exactly: $0) }.flatMap(RDCodec.init(rawValue:))
+    }
 }
 
 enum RDFrameCodec {
+    static let headerLength = 5
+
     static func pack(width: Int, height: Int, codec: RDCodec, data: Data) -> Data {
-        var out = Data(capacity: 5 + data.count)
+        var out = Data(capacity: headerLength + data.count)
         out.appendBE16(UInt16(clamping: width))
         out.appendBE16(UInt16(clamping: height))
         out.append(codec.rawValue)
@@ -107,11 +124,11 @@ enum RDFrameCodec {
     }
 
     static func unpack(_ payload: Data) -> (width: Int, height: Int, codec: RDCodec, data: Data)? {
-        guard payload.count > 5 else { return nil }
+        guard payload.count > headerLength else { return nil }
         let width = Int(payload.be16(at: 0))
         let height = Int(payload.be16(at: 2))
-        guard let codec = RDCodec(rawValue: payload[4]) else { return nil }
-        return (width, height, codec, payload.subdata(in: 5..<payload.count))
+        guard let codec = RDCodec(rawValue: payload[payload.startIndex + 4]) else { return nil }
+        return (width, height, codec, payload.subdata(in: payload.startIndex + headerLength..<payload.endIndex))
     }
 }
 
@@ -128,6 +145,11 @@ extension Data {
         append(UInt8((value >> 16) & 0xFF))
         append(UInt8((value >> 8) & 0xFF))
         append(UInt8(value & 0xFF))
+    }
+
+    mutating func appendBE64(_ value: UInt64) {
+        appendBE32(UInt32(truncatingIfNeeded: value >> 32))
+        appendBE32(UInt32(truncatingIfNeeded: value))
     }
 
     func be16(at offset: Int) -> UInt16 {
@@ -160,35 +182,56 @@ struct HelloMsg: Codable {
     var version = RDService.protocolVersion
     var deviceId: String
     var deviceName: String
+    /// Ephemeral X25519 public key for this connection.
     var pubKey: Data
 }
 
 struct ServerHelloMsg: Codable {
     var version = RDService.protocolVersion
+    /// Derived from `identityKey` (see `RDHandshake.serverId(for:)`).
     var serverId: String
     var serverName: String
+    /// Ephemeral X25519 public key for this connection.
     var pubKey: Data
-    var requiresPin: Bool
-    var macAddress: String?
+    /// The host's long-term Ed25519 public key, pinned by clients when they pair.
+    var identityKey: Data
+    /// Ed25519 signature over `RDHandshake.serverProof(transcript:)`.
+    var signature: Data
 }
 
 struct AuthPinMsg: Codable {
     var pin: String
     var trust: Bool
+    /// The device's long-term Ed25519 public key, registered on the host when `trust` is set.
+    var deviceKey: Data?
 }
 
-struct AuthTokenMsg: Codable {
-    var token: Data
+struct AuthDeviceMsg: Codable {
+    /// Ed25519 signature over `RDHandshake.deviceProof(transcript:)` with the paired device key.
+    var signature: Data
 }
 
 struct AuthOKMsg: Codable {
     var serverName: String
     var trusted: Bool
-    var token: Data?
+    /// Primary MAC address, shared only after authentication (used for Wake-on-LAN).
+    var macAddress: String?
+}
+
+enum RDAuthFailure: String, Codable {
+    case incorrectPin
+    case lockedOut
+    case busy
+    case untrusted
+    case tooManyAttempts
+    case unsupportedVersion
 }
 
 struct AuthFailedMsg: Codable {
     var reason: String
+    var kind: RDAuthFailure?
+    /// Seconds until another PIN attempt is accepted (for `lockedOut`).
+    var retryAfter: Double?
 }
 
 struct MouseMoveAbsMsg: Codable {
@@ -206,8 +249,11 @@ struct MouseButtonMsg: Codable {
 }
 
 struct ScrollMsg: Codable {
+    /// Lines, or points when `precise` is true. dy > 0 scrolls up (toward the
+    /// start of the document), like rolling a mouse wheel away from you.
     var dx: Double
     var dy: Double
+    var precise: Bool?
 }
 
 struct KeyEventMsg: Codable {
@@ -243,7 +289,13 @@ struct HostStateMsg: Codable {
 struct SetQualityMsg: Codable {
     var preset: Int
     var cursor: Bool?   // true = show real Mac cursor in stream, false/nil = hide it
-    var codec: Int?     // RDCodec rawValue (0 = jpeg, 1 = h264, 2 = hevc)
+    var codec: Int?     // RDCodec rawValue (1 = h264, 2 = hevc)
+}
+
+enum RDByeReason {
+    static let userDisconnect = "user_disconnect"
+    /// The host stopped sharing; clients should not reconnect on their own.
+    static let hostStopped = "host_stopped"
 }
 
 struct ByeMsg: Codable {
@@ -282,7 +334,7 @@ enum RDKey: UInt16 {
     case f12 = 111
 }
 
-struct RDModifiers: OptionSet {
+struct RDModifiers: OptionSet, Hashable {
     let rawValue: UInt8
     static let shift = RDModifiers(rawValue: 1 << 0)
     static let control = RDModifiers(rawValue: 1 << 1)
@@ -325,15 +377,6 @@ enum RDQualityPreset: Int, CaseIterable, Identifiable {
         case .balanced: return 1920
         case .high: return 2560
         case .sharp: return 0
-        }
-    }
-
-    var jpegQuality: Double {
-        switch self {
-        case .low: return 0.4
-        case .balanced: return 0.6
-        case .high: return 0.8
-        case .sharp: return 0.95
         }
     }
 
