@@ -6,6 +6,7 @@ struct MenuBarView: View {
     @EnvironmentObject private var server: HostServer
     @EnvironmentObject private var auth: AuthStore
     @EnvironmentObject private var launchManager: LaunchManager
+    @ObservedObject private var updater = AppUpdater.shared
 
     var body: some View {
         MenuBarContent(state: state, actions: actions)
@@ -40,6 +41,11 @@ struct MenuBarView: View {
         state.launchAtLogin = launchManager.isEnabled
         state.launchNeedsApproval = launchManager.status == .requiresApproval
         state.launchError = launchManager.lastError
+        state.appVersion = AppUpdater.currentVersion
+        state.updaterAvailable = updater.isAvailable
+        state.canCheckForUpdates = updater.canCheckForUpdates
+        state.checksForUpdatesAutomatically = updater.automaticallyChecksForUpdates
+        state.pendingUpdateVersion = updater.pendingUpdateVersion
         return state
     }
 
@@ -56,6 +62,8 @@ struct MenuBarView: View {
             dismissError: { HostServer.shared.lastError = nil },
             setLaunchAtLogin: { LaunchManager.shared.setLaunchOnRestart($0) },
             openLoginItems: { LaunchManager.shared.openSystemSettings() },
+            checkForUpdates: { AppUpdater.shared.checkForUpdates() },
+            setChecksForUpdatesAutomatically: { AppUpdater.shared.automaticallyChecksForUpdates = $0 },
             quit: {
                 CrashRecoveryManager.shared.markCleanExit()
                 NSApplication.shared.terminate(nil)

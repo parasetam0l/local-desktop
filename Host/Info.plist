@@ -17,9 +17,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -30,5 +32,15 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Local Desktop advertises this Mac on your local network so your iPhone or iPad can find and control it.</string>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/parasetam0l/local-desktop/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>slq8+8n21bznWGgl6Jhi6eUB+ReeGQDfC9Bidhci8uE=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

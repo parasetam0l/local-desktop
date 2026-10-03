@@ -27,6 +27,8 @@ Both apps speak the same custom TCP protocol (see [`Protocol.md`](Protocol.md)) 
 - **Keyboard** — full system keyboard via a hidden capture field, plus a key bar with modifiers (⇧⌃⌥⌘: tap for the next key, double-tap to lock), Esc/Tab/arrows/Home/End/Page keys, so shortcuts like ⌘C work.
 - **Quality presets** — Low (30 FPS), Balanced (60 FPS), High (60 FPS), and Sharp (Native 60 FPS) presets, switchable live from the client.
 - **Crash recovery** — a small supervisor process relaunches the host if it crashes and restores the sharing state it had.
+- **Setup Assistant** — walks through the Screen Recording and Accessibility permissions and the PIN on first launch, and whenever one goes missing.
+- **Automatic updates** — the Mac app checks GitHub Releases once a day (Sparkle) and asks before installing a new version.
 
 ## Project layout
 
@@ -35,6 +37,8 @@ Shared/               Protocol, handshake & encryption, Bonjour browser (compile
 Host/                 macOS host app: server, capture & encoding, input injection, PIN/trust store, menu bar UI
 iOS/                  iOS client app: connection, decoding, discovery UI, zoom canvas, touchpad, keyboard, PIN pad
 Tests/                Unit tests for the protocol, crypto, and PIN lockout (macOS test bundle)
+Scripts/, Packaging/  Release helpers: notarization, DMG, Sparkle signing
+.github/workflows/    Release and Appcast workflows (see docs/RELEASING.md)
 project.yml           XcodeGen spec → generates LocalDesktop.xcodeproj
 build.sh              Build / install / test script
 Protocol.md           Wire protocol reference
@@ -124,6 +128,12 @@ from its identity key, so it shows up as a new entry in Recents.
 - A 4-digit PIN has only 10,000 values, so the real protection against guessing is the online lockout (5 free attempts, then 30 s doubling up to 1 h, shared across connections and restarts). The PIN is stored as a PBKDF2-HMAC-SHA256 hash (300k iterations, random salt), but anyone who can read the Mac's preferences can still brute-force a 4-digit PIN offline.
 - Revoking a device on the Mac immediately invalidates it.
 - The design is LAN-oriented; it intentionally does not traverse NAT or relay through the internet.
+
+## Releases and updates
+
+Signed, notarized releases of the Mac app are built by GitHub Actions when started by hand (the **Release**
+workflow), and installed copies update themselves from GitHub Releases. How to set it up and make a release:
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Regenerating the project after edits
 

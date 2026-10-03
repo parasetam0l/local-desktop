@@ -1,0 +1,204 @@
+# Builds Local Desktop Host (the Mac app) signed with Developer ID, notarizes
+# it, and creates a draft GitHub release with the DMG. It runs only when
+# started by hand: Actions → Release → Run workflow.
+#
+# One-time setup (certificate, secrets): docs/RELEASING.md.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 1.1.0 (tagged v1.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the version
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::The version must look like 1.2 or 1.2.3, not '$VERSION'."
+            exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release v$VERSION already exists."
+            exit 1
+          fi
+
+      - name: Check the secrets
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          missing=()
+          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD NOTARY_APPLE_ID NOTARY_PASSWORD; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing repository secrets: ${missing[*]} (see docs/RELEASING.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the release notes list the commits since the last release
+
+      - name: Install tools
+        run: brew install xcodegen
+
+      - name: Generate the project
+        run: xcodegen generate
+
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test -project LocalDesktop.xcodeproj -scheme LocalDesktopTests \
+            -destination "platform=macOS" 2>&1 \
+            | { grep -E "error:|Test Case .* failed|Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)" || true; }
+
+      - name: Import the certificate
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+          # project.yml pins the host's signing identity by certificate hash.
+          expected="$(awk '$1 == "CODE_SIGN_IDENTITY:" { gsub(/"/, "", $2); print $2; exit }' project.yml)"
+          security find-identity -v -p codesigning "$keychain"
+          security find-identity -v -p codesigning "$keychain" | grep -q "$expected" \
+            || { echo "::error::The certificate in DEVELOPER_ID_P12_BASE64 isn't the one project.yml signs with ($expected)."; exit 1; }
+
+      - name: Build
+        run: |
+          set -o pipefail
+          # A new, higher build number every time, so Sparkle sees each release as newer.
+          xcodebuild archive \
+            -project LocalDesktop.xcodeproj \
+            -scheme LocalDesktopHost \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/LocalDesktopHost.xcarchive" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$(date +%s)" 2>&1 \
+            | tee "$RUNNER_TEMP/xcodebuild.log" \
+            | { grep -E "error:|warning: .*(sign|profile|entitlement)|ARCHIVE (SUCCEEDED|FAILED)" || true; }
+          echo "APP=$RUNNER_TEMP/LocalDesktopHost.xcarchive/Products/Applications/LocalDesktopHost.app" >> "$GITHUB_ENV"
+
+      - name: Check the signatures
+        run: |
+          sparkle="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          for bundle in "$APP" "$sparkle/Autoupdate" "$sparkle/Updater.app" \
+                        "$sparkle/XPCServices/Installer.xpc" "$sparkle/XPCServices/Downloader.xpc"; do
+            details="$(codesign -dvv "$bundle" 2>&1)"
+            grep -q "Authority=Developer ID Application" <<< "$details" \
+              || { echo "::error::$bundle is not signed with Developer ID"; exit 1; }
+            grep -q "Timestamp=" <<< "$details" \
+              || { echo "::error::$bundle has no secure timestamp"; exit 1; }
+          done
+          codesign -dvv "$APP" 2>&1 | grep -q "flags=.*runtime" \
+            || { echo "::error::The app is not built with the hardened runtime"; exit 1; }
+          lipo -archs "$APP/Contents/MacOS/LocalDesktopHost"
+          # Updates are verified with this key; without it none can install.
+          key="$(plutil -extract SUPublicEDKey raw -o - "$APP/Contents/Info.plist")"
+          [[ "$(printf '%s' "$key" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')" == 32 ]] \
+            || { echo "::error::SUPublicEDKey in project.yml is not a Sparkle public key: $key"; exit 1; }
+
+      - name: Notarize the app
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/LocalDesktopHost-notarize.zip"
+          Scripts/notarize.sh "$RUNNER_TEMP/LocalDesktopHost-notarize.zip"
+          xcrun stapler staple "$APP"
+
+      - name: Build and notarize the DMG
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          dmg="$RUNNER_TEMP/LocalDesktopHost-$VERSION.dmg"
+          Scripts/make-dmg.sh "$APP" "$dmg" "Local Desktop Host $VERSION"
+          codesign --sign "Developer ID Application" --timestamp --keychain "$KEYCHAIN" "$dmg"
+          Scripts/notarize.sh "$dmg"
+          xcrun stapler staple "$dmg"
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
+
+      - name: Create the draft release
+        run: |
+          # GitHub's generated notes list merged pull requests, and this
+          # repository is committed to directly: list the commits instead.
+          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 1 --json tagName --jq '.[0].tagName // empty')"
+          {
+            cat <<EOF
+          ## Install
+
+          Open LocalDesktopHost-$VERSION.dmg and drag Local Desktop Host to Applications, then open it. The Setup Assistant asks for the Screen Recording and Accessibility permissions and a PIN.
+
+          **Updating:** Local Desktop Host offers new versions by itself (menu bar icon → gear → Check for Updates…). From a build without the updater, quit Local Desktop Host and replace it in Applications with the new one.
+
+          The iPhone and iPad app isn't part of this release; build it with \`./build.sh --client --install\`. Use matching versions of both apps.
+
+          Requires macOS 14 or later.
+
+          ## Changes
+
+          EOF
+            if [[ -n "$previous" ]]; then
+              git log --no-merges --reverse --format='- %s' "$previous..HEAD"
+              printf '\n**Full changelog:** https://github.com/%s/compare/%s...v%s\n' "$GITHUB_REPOSITORY" "$previous" "$VERSION"
+            else
+              echo "First release."
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "v$VERSION" "$DMG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Local Desktop Host $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --draft
+          echo "Draft release created: edit the notes and publish it under Releases." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the build log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          [[ -n "${KEYCHAIN:-}" ]] && security delete-keychain "$KEYCHAIN" || true

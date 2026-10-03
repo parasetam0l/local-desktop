@@ -1,0 +1,124 @@
+# Attaches appcast.xml, the feed Local Desktop Host's updater (Sparkle) reads, to a
+# release when it is published. The feed lists that release's DMG with its
+# EdDSA signature and the release notes as published. The app reads it from
+# the latest published release, so drafts are never offered.
+#
+# One-time setup (signing key): docs/RELEASING.md.
+name: Appcast
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  appcast:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      SPARKLE_VERSION: 2.10.0
+      SPARKLE_SHA256: c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
+    steps:
+      - name: Check the signing key
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "::error::Missing repository secret SPARKLE_PRIVATE_KEY (see docs/RELEASING.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - name: Get Sparkle's tools
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          echo "$SPARKLE_SHA256  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/sparkle"
+          tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+
+      - name: Download the DMG and read the app's version
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "LocalDesktopHost-*.dmg" --dir "$RUNNER_TEMP/release"
+          dmg="$(ls "$RUNNER_TEMP"/release/LocalDesktopHost-*.dmg)"
+          mount="$RUNNER_TEMP/mnt"
+          mkdir -p "$mount"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
+          info="$mount/LocalDesktopHost.app/Contents/Info.plist"
+          {
+            echo "DMG=$dmg"
+            echo "SHORT_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$info")"
+            echo "BUILD_VERSION=$(plutil -extract CFBundleVersion raw -o - "$info")"
+            echo "MINIMUM_SYSTEM=$(plutil -extract LSMinimumSystemVersion raw -o - "$info")"
+            echo "APP_PUBLIC_KEY=$(plutil -extract SUPublicEDKey raw -o - "$info")"
+          } >> "$GITHUB_ENV"
+          hdiutil detach "$mount" -quiet
+
+      - name: Sign the DMG
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          signature="$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - -p "$DMG")"
+          # The check an installed Local Desktop Host makes: a key mix-up fails here
+          # instead of on users' Macs.
+          swift Scripts/verify-update-signature.swift "$APP_PUBLIC_KEY" "$signature" "$DMG"
+          echo "SIGNATURE=$signature" >> "$GITHUB_ENV"
+
+      - name: Write and attach the appcast
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body,publishedAt,url > "$RUNNER_TEMP/release.json"
+          # The release notes as GitHub renders them.
+          python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["body"])' "$RUNNER_TEMP/release.json" \
+            | gh api markdown -F text=@- -f mode=gfm -f context="$GITHUB_REPOSITORY" > "$RUNNER_TEMP/notes.html"
+          python3 - "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/notes.html" > "$RUNNER_TEMP/appcast.xml" <<'PY'
+          import email.utils, json, os, sys
+          from datetime import datetime
+          from xml.sax.saxutils import escape, quoteattr
+
+          release = json.load(open(sys.argv[1]))
+          notes = open(sys.argv[2]).read().replace("]]>", "]]]]><![CDATA[>")
+          env = os.environ
+          repository = env["GITHUB_REPOSITORY"]
+          title = escape("Local Desktop Host " + env["SHORT_VERSION"])
+          published = datetime.fromisoformat(release["publishedAt"].replace("Z", "+00:00"))
+          date = email.utils.format_datetime(published)
+          build = escape(env["BUILD_VERSION"])
+          version = escape(env["SHORT_VERSION"])
+          minimum = escape(env["MINIMUM_SYSTEM"])
+          notes_link = escape(release["url"])
+          dmg_name = os.path.basename(env["DMG"])
+          url = quoteattr("https://github.com/" + repository + "/releases/download/" + env["TAG"] + "/" + dmg_name)
+          length = os.path.getsize(env["DMG"])
+          signature = quoteattr(env["SIGNATURE"])
+          print(f"""<?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>Local Desktop Host</title>
+              <link>https://github.com/{repository}/releases</link>
+              <item>
+                <title>{title}</title>
+                <pubDate>{date}</pubDate>
+                <sparkle:version>{build}</sparkle:version>
+                <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>{minimum}</sparkle:minimumSystemVersion>
+                <sparkle:fullReleaseNotesLink>{notes_link}</sparkle:fullReleaseNotesLink>
+                <description><![CDATA[{notes}]]></description>
+                <enclosure url={url} length="{length}" type="application/octet-stream" sparkle:edSignature={signature}/>
+              </item>
+            </channel>
+          </rss>""")
+          PY
+          xmllint --noout "$RUNNER_TEMP/appcast.xml"
+          gh release upload "$TAG" "$RUNNER_TEMP/appcast.xml" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "Attached appcast.xml to $TAG: Local Desktop Host $SHORT_VERSION ($BUILD_VERSION)." >> "$GITHUB_STEP_SUMMARY"

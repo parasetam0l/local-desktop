@@ -44,6 +44,13 @@ struct MenuBarState {
     var launchAtLogin = false
     var launchNeedsApproval = false
     var launchError: String?
+    var appVersion = ""
+    /// False in development builds, which don't check for updates.
+    var updaterAvailable = false
+    var canCheckForUpdates = false
+    var checksForUpdatesAutomatically = false
+    /// A version found by a scheduled check, waiting for the user.
+    var pendingUpdateVersion: String?
 
     var canStartSharing: Bool { missingSetup.isEmpty }
 }
@@ -64,6 +71,8 @@ struct MenuBarActions {
     var dismissError: Command = {}
     var setLaunchAtLogin: Action<Bool> = { _ in }
     var openLoginItems: Command = {}
+    var checkForUpdates: Command = {}
+    var setChecksForUpdatesAutomatically: Action<Bool> = { _ in }
     var quit: Command = {}
 }
 
@@ -84,6 +93,9 @@ struct MenuBarContent: View {
 
             if !state.missingSetup.isEmpty {
                 setupCallout
+            }
+            if let version = state.pendingUpdateVersion {
+                updateBanner(version)
             }
             if let error = state.lastError {
                 errorBanner(error)
@@ -166,6 +178,20 @@ struct MenuBarContent: View {
         .padding(10)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.orange.opacity(0.35)))
+    }
+
+    private func updateBanner(_ version: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle.fill")
+                .foregroundStyle(.blue)
+            Text("Version \(version) is available")
+                .font(.subheadline.weight(.medium))
+            Spacer()
+            Button("Update…", action: actions.checkForUpdates)
+                .controlSize(.small)
+        }
+        .padding(10)
+        .background(Color.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -380,13 +406,32 @@ struct MenuBarContent: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Toggle("Open at login", isOn: Binding(get: { state.launchAtLogin }, set: actions.setLaunchAtLogin))
-                    .toggleStyle(.checkbox)
+            HStack(spacing: 8) {
+                Text("Version \(state.appVersion)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .textSelection(.enabled)
                 Spacer()
-                if state.missingSetup.isEmpty {
+                Menu {
+                    Button(state.updaterAvailable ? "Check for Updates…" : "Check for Updates… (release builds only)",
+                           action: actions.checkForUpdates)
+                        .disabled(!state.canCheckForUpdates)
+                    Toggle("Check for Updates Automatically", isOn: Binding(
+                        get: { state.checksForUpdatesAutomatically },
+                        set: actions.setChecksForUpdatesAutomatically
+                    ))
+                    .disabled(!state.updaterAvailable)
+                    Divider()
+                    Toggle("Open at Login", isOn: Binding(get: { state.launchAtLogin }, set: actions.setLaunchAtLogin))
                     Button("Setup Assistant…", action: actions.openSetup)
+                } label: {
+                    Image(systemName: "gearshape")
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Updates and settings")
                 Button("Quit", action: actions.quit)
             }
             .controlSize(.small)

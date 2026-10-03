@@ -5,6 +5,10 @@ options:
     macOS: "14.0"
     iOS: "17.0"
   createIntermediateGroups: true
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -15,26 +19,51 @@ targets:
     type: application
     platform: macOS
     settings:
-      PRODUCT_BUNDLE_IDENTIFIER: localdesktop.host
-      # Developer ID Application certificate for team P7V7795SS9, valid until 2031-09-17.
-      # Pinned by SHA-1 because an older certificate (expiring 2027) has the same name.
-      CODE_SIGN_STYLE: Manual
-      CODE_SIGN_IDENTITY: "1CA8C64FCD11507B4C1B0F1FC76CF11C8A53A77F"
-      PROVISIONING_PROFILE_SPECIFIER: ""
-      ENABLE_HARDENED_RUNTIME: YES
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: localdesktop.host
+        # Developer ID Application certificate for team P7V7795SS9, valid until 2031-09-17.
+        # Pinned by SHA-1 because an older certificate (expiring 2027) has the same name.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "1CA8C64FCD11507B4C1B0F1FC76CF11C8A53A77F"
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks $(inherited)"
+        # The Release workflow overrides both (see docs/RELEASING.md).
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+      configs:
+        Release:
+          # Notarization requires secure timestamps.
+          OTHER_CODE_SIGN_FLAGS: --timestamp
     sources:
       - Host
       - Shared
+    dependencies:
+      - package: Sparkle
+    postBuildScripts:
+      - name: Sign Sparkle helpers
+        script: '"$SRCROOT/Scripts/sparkle-sign.sh"'
+        basedOnDependencyAnalysis: false
     info:
       path: Host/Info.plist
       properties:
         CFBundleDisplayName: Local Desktop Host
-        CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "14.0"
         LSUIElement: true
+        LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: "Local Desktop advertises this Mac on your local network so your iPhone or iPad can find and control it."
         NSBonjourServices: ["_rd-desktop._tcp"]
+        # Updates (Sparkle): the feed is attached to the latest published GitHub
+        # release, and updates must be signed with the key whose public half is
+        # SUPublicEDKey. See docs/RELEASING.md.
+        SUFeedURL: https://github.com/parasetam0l/local-desktop/releases/latest/download/appcast.xml
+        SUPublicEDKey: slq8+8n21bznWGgl6Jhi6eUB+ReeGQDfC9Bidhci8uE=
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        # Always ask before installing.
+        SUAllowsAutomaticUpdates: false
   LocalDesktopClient:
     type: application
     platform: iOS

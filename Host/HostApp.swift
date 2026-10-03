@@ -38,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CrashRecoveryManager.shared.start()
         let afterCrash = CommandLine.arguments.contains(CrashRecoveryManager.recoveredArgument)
         HostServer.shared.autoStartIfNeeded(afterCrash: afterCrash)
+        // Starts Sparkle's daily update check (release builds only).
+        AppUpdater.shared.start()
         // First launch, or a permission went missing (e.g. after an update): walk through setup.
         if !HostServer.shared.missingSetup.isEmpty {
             SetupWindowController.shared.show()
@@ -54,13 +56,20 @@ struct LocalDesktopHostApp: App {
     @StateObject private var server = HostServer.shared
     @StateObject private var auth = AuthStore.shared
     @StateObject private var launchManager = LaunchManager.shared
+    @StateObject private var updater = AppUpdater.shared
 
     var body: some Scene {
-        MenuBarExtra("Local Desktop Host", systemImage: "desktopcomputer") {
+        MenuBarExtra {
             MenuBarView()
                 .environmentObject(server)
                 .environmentObject(auth)
                 .environmentObject(launchManager)
+        } label: {
+            // An arrow badge while an update is waiting to be looked at.
+            Image(systemName: updater.pendingUpdateVersion == nil ? "desktopcomputer" : "desktopcomputer.and.arrow.down")
+                .accessibilityLabel(updater.pendingUpdateVersion == nil
+                                    ? "Local Desktop Host"
+                                    : "Local Desktop Host, update available")
         }
         .menuBarExtraStyle(.window)
     }
