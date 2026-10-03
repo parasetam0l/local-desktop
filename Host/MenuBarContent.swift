@@ -151,7 +151,7 @@ struct MenuBarContent: View {
                     .lineLimit(1)
             }
             Spacer()
-            Toggle("Sharing", isOn: Binding(get: { state.isSharing }, set: actions.setSharing))
+            Toggle("Sharing", isOn: Binding(get: { state.isSharing }, set: { [actions] in actions.setSharing($0) }))
                 .toggleStyle(.switch)
                 .labelsHidden()
                 .disabled(!state.isSharing && !state.canStartSharing)
@@ -338,7 +338,7 @@ struct MenuBarContent: View {
     private var streamCard: some View {
         Card(title: "Stream", controlSize: .small) {
             InfoRow("Quality") {
-                Picker("Quality", selection: Binding(get: { state.preset }, set: actions.setPreset)) {
+                Picker("Quality", selection: Binding(get: { state.preset }, set: { [actions] in actions.setPreset($0) })) {
                     ForEach(RDQualityPreset.allCases) { preset in
                         Text(preset.label).tag(preset)
                     }
@@ -347,7 +347,7 @@ struct MenuBarContent: View {
                 .fixedSize()
             }
             InfoRow("Codec") {
-                Picker("Codec", selection: Binding(get: { state.codec }, set: actions.setCodec)) {
+                Picker("Codec", selection: Binding(get: { state.codec }, set: { [actions] in actions.setCodec($0) })) {
                     ForEach(RDCodec.allCases) { codec in
                         Text(codec.label).tag(codec)
                     }
@@ -359,7 +359,7 @@ struct MenuBarContent: View {
                 InfoRow("Display") {
                     Picker("Display", selection: Binding(
                         get: { state.selectedDisplay ?? state.displays.first?.id ?? 0 },
-                        set: actions.setDisplay
+                        set: { [actions] in actions.setDisplay($0) }
                     )) {
                         ForEach(Array(state.displays.enumerated()), id: \.element.id) { index, display in
                             Text("Display \(index + 1) · \(display.label)").tag(display.id)
@@ -419,11 +419,11 @@ struct MenuBarContent: View {
                         .disabled(!state.canCheckForUpdates)
                     Toggle("Check for Updates Automatically", isOn: Binding(
                         get: { state.checksForUpdatesAutomatically },
-                        set: actions.setChecksForUpdatesAutomatically
+                        set: { [actions] in actions.setChecksForUpdatesAutomatically($0) }
                     ))
                     .disabled(!state.updaterAvailable)
                     Divider()
-                    Toggle("Open at Login", isOn: Binding(get: { state.launchAtLogin }, set: actions.setLaunchAtLogin))
+                    Toggle("Open at Login", isOn: Binding(get: { state.launchAtLogin }, set: { [actions] in actions.setLaunchAtLogin($0) }))
                     Button("Setup Assistant…", action: actions.openSetup)
                 } label: {
                     Image(systemName: "gearshape")
