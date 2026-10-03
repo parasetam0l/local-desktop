@@ -1,6 +1,6 @@
 // Checks that an update's EdDSA signature (from Sparkle's sign_update) is
 // valid for the public key in the app (SUPublicEDKey): the same check an
-// installed Local Desktop Host makes before it installs the update.
+// installed LocalDesktop makes before it installs the update.
 //
 // Usage: swift Scripts/verify-update-signature.swift <SUPublicEDKey> <signature> <file>
 

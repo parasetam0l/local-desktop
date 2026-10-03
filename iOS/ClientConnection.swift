@@ -249,7 +249,7 @@ final class ClientConnection: @unchecked Sendable {
         guard let msg = RDJSON.decode(ServerHelloMsg.self, from: payload),
               msg.version == RDService.protocolVersion,
               let key = ephemeralKey else {
-            finish(.failed("This Mac runs an incompatible version of Local Desktop Host. Update both apps."))
+            finish(.failed("This Mac runs an incompatible version of LocalDesktop. Update both apps."))
             return
         }
         // The id must be derived from the key, and the key must have signed this very handshake.

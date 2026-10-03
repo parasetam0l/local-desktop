@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 import Darwin
 
-/// Manages crash recovery and supervisor watchdog monitoring for LocalDesktopHost.
+/// Manages crash recovery and supervisor watchdog monitoring for LocalDesktop.
 ///
 /// Architecture:
 /// 1. When the host app launches, it registers POSIX signal handlers and spawns a detached

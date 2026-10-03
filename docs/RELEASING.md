@@ -1,10 +1,10 @@
-# Releasing Local Desktop Host
+# Releasing LocalDesktop (Mac)
 
 Releases are built by the **Release** GitHub Actions workflow
 (`.github/workflows/release.yml`). It runs only when started by hand, runs
-the unit tests, signs Local Desktop Host with a Developer ID certificate, has
+the unit tests, signs LocalDesktop with a Developer ID certificate, has
 Apple notarize it, and creates a **draft** GitHub release with
-`LocalDesktopHost-<version>.dmg` (macOS 14+, Apple silicon and Intel).
+`LocalDesktop-<version>.dmg` (macOS 14+, Apple silicon and Intel).
 Publishing the release starts the **Appcast** workflow
 (`.github/workflows/appcast.yml`), which signs the DMG with the update key and
 attaches `appcast.xml`, the feed installed copies check for updates.
@@ -39,7 +39,7 @@ Reuse SemiVPN's, or create one at [account.apple.com](https://account.apple.com)
 
 ### 3. Update signing key (Sparkle)
 
-Installed copies of Local Desktop Host check `appcast.xml` on the latest
+Installed copies of LocalDesktop check `appcast.xml` on the latest
 published release once a day and install an update only if its EdDSA
 signature matches the public key built into the app (`SUPublicEDKey` in
 `project.yml`).
@@ -103,7 +103,7 @@ as an artifact, and a notarization failure prints Apple's report.
 
 ## What users see
 
-- They open the DMG and drag Local Desktop Host to Applications. Gatekeeper
+- They open the DMG and drag LocalDesktop to Applications. Gatekeeper
   accepts it without warnings because it is notarized. On first launch the
   Setup Assistant asks for Screen Recording, Accessibility, and a PIN.
 - The app checks for updates once a day and shows the new version with its
@@ -130,7 +130,7 @@ updates for it would mean distributing it through TestFlight.
 - The DMG window's layout is in `Packaging/dmg` (dmgbuild settings and the
   background). After changing it, redraw the background with
   `swift Scripts/dmg-background.swift` and try it with
-  `Scripts/make-dmg.sh path/to/LocalDesktopHost.app test.dmg`.
+  `Scripts/make-dmg.sh path/to/LocalDesktop.app test.dmg`.
 - The Developer ID certificate is valid until 2031. When it is renewed,
   update `CODE_SIGN_IDENTITY` in `project.yml` and the
   `DEVELOPER_ID_P12_*` secrets.

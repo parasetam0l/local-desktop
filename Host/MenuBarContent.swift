@@ -143,7 +143,7 @@ struct MenuBarContent: View {
                 .frame(width: 34, height: 34)
                 .background(statusColor.opacity(0.15), in: Circle())
             VStack(alignment: .leading, spacing: 1) {
-                Text("Local Desktop")
+                Text("LocalDesktop")
                     .font(.headline)
                 Text(statusText)
                     .font(.subheadline)

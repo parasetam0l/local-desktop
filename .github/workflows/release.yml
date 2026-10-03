@@ -1,4 +1,4 @@
-# Builds Local Desktop Host (the Mac app) signed with Developer ID, notarizes
+# Builds LocalDesktop (the Mac app) signed with Developer ID, notarizes
 # it, and creates a draft GitHub release with the DMG. It runs only when
 # started by hand: Actions → Release → Run workflow.
 #
@@ -105,12 +105,12 @@ jobs:
             -scheme LocalDesktopHost \
             -configuration Release \
             -destination "generic/platform=macOS" \
-            -archivePath "$RUNNER_TEMP/LocalDesktopHost.xcarchive" \
+            -archivePath "$RUNNER_TEMP/LocalDesktop.xcarchive" \
             MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="$(date +%s)" 2>&1 \
             | tee "$RUNNER_TEMP/xcodebuild.log" \
             | { grep -E "error:|warning: .*(sign|profile|entitlement)|ARCHIVE (SUCCEEDED|FAILED)" || true; }
-          echo "APP=$RUNNER_TEMP/LocalDesktopHost.xcarchive/Products/Applications/LocalDesktopHost.app" >> "$GITHUB_ENV"
+          echo "APP=$RUNNER_TEMP/LocalDesktop.xcarchive/Products/Applications/LocalDesktop.app" >> "$GITHUB_ENV"
 
       - name: Check the signatures
         run: |
@@ -126,7 +126,7 @@ jobs:
           done
           codesign -dvv "$APP" 2>&1 | grep -q "flags=.*runtime" \
             || { echo "::error::The app is not built with the hardened runtime"; exit 1; }
-          lipo -archs "$APP/Contents/MacOS/LocalDesktopHost"
+          lipo -archs "$APP/Contents/MacOS/LocalDesktop"
           # Updates are verified with this key; without it none can install.
           key="$(plutil -extract SUPublicEDKey raw -o - "$APP/Contents/Info.plist")"
           [[ "$(printf '%s' "$key" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')" == 32 ]] \
@@ -137,8 +137,8 @@ jobs:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: |
-          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/LocalDesktopHost-notarize.zip"
-          Scripts/notarize.sh "$RUNNER_TEMP/LocalDesktopHost-notarize.zip"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/LocalDesktop-notarize.zip"
+          Scripts/notarize.sh "$RUNNER_TEMP/LocalDesktop-notarize.zip"
           xcrun stapler staple "$APP"
 
       - name: Build and notarize the DMG
@@ -146,8 +146,8 @@ jobs:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: |
-          dmg="$RUNNER_TEMP/LocalDesktopHost-$VERSION.dmg"
-          Scripts/make-dmg.sh "$APP" "$dmg" "Local Desktop Host $VERSION"
+          dmg="$RUNNER_TEMP/LocalDesktop-$VERSION.dmg"
+          Scripts/make-dmg.sh "$APP" "$dmg" "LocalDesktop $VERSION"
           codesign --sign "Developer ID Application" --timestamp --keychain "$KEYCHAIN" "$dmg"
           Scripts/notarize.sh "$dmg"
           xcrun stapler staple "$dmg"
@@ -163,9 +163,9 @@ jobs:
             cat <<EOF
           ## Install
 
-          Open LocalDesktopHost-$VERSION.dmg and drag Local Desktop Host to Applications, then open it. The Setup Assistant asks for the Screen Recording and Accessibility permissions and a PIN.
+          Open LocalDesktop-$VERSION.dmg and drag LocalDesktop to Applications, then open it. The Setup Assistant asks for the Screen Recording and Accessibility permissions and a PIN.
 
-          **Updating:** Local Desktop Host offers new versions by itself (menu bar icon → gear → Check for Updates…). From a build without the updater, quit Local Desktop Host and replace it in Applications with the new one.
+          **Updating:** LocalDesktop 1.1 and later offer new versions by themselves (menu bar icon → gear → Check for Updates…). From a build without the updater, quit it and replace it in Applications with the new one.
 
           The iPhone and iPad app isn't part of this release; build it with \`./build.sh --client --install\`. Use matching versions of both apps.
 
@@ -184,7 +184,7 @@ jobs:
           gh release create "v$VERSION" "$DMG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Local Desktop Host $VERSION" \
+            --title "LocalDesktop $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --draft
           echo "Draft release created: edit the notes and publish it under Releases." >> "$GITHUB_STEP_SUMMARY"

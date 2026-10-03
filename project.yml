@@ -20,6 +20,9 @@ targets:
     platform: macOS
     settings:
       base:
+        # The app is LocalDesktop.app; the bundle identifier stays localdesktop.host
+        # so the PIN, permissions, and updates carry over from older versions.
+        PRODUCT_NAME: LocalDesktop
         PRODUCT_BUNDLE_IDENTIFIER: localdesktop.host
         # Developer ID Application certificate for team P7V7795SS9, valid until 2031-09-17.
         # Pinned by SHA-1 because an older certificate (expiring 2027) has the same name.
@@ -47,13 +50,13 @@ targets:
     info:
       path: Host/Info.plist
       properties:
-        CFBundleDisplayName: Local Desktop Host
+        CFBundleDisplayName: LocalDesktop
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "14.0"
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.utilities
-        NSLocalNetworkUsageDescription: "Local Desktop advertises this Mac on your local network so your iPhone or iPad can find and control it."
+        NSLocalNetworkUsageDescription: "LocalDesktop advertises this Mac on your local network so your iPhone or iPad can find and control it."
         NSBonjourServices: ["_rd-desktop._tcp"]
         # Updates (Sparkle): the feed is attached to the latest published GitHub
         # release, and updates must be signed with the key whose public half is

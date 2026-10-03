@@ -51,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-struct LocalDesktopHostApp: App {
+struct LocalDesktopApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var server = HostServer.shared
     @StateObject private var auth = AuthStore.shared
@@ -68,8 +68,8 @@ struct LocalDesktopHostApp: App {
             // An arrow badge while an update is waiting to be looked at.
             Image(systemName: updater.pendingUpdateVersion == nil ? "desktopcomputer" : "desktopcomputer.and.arrow.down")
                 .accessibilityLabel(updater.pendingUpdateVersion == nil
-                                    ? "Local Desktop Host"
-                                    : "Local Desktop Host, update available")
+                                    ? "LocalDesktop"
+                                    : "LocalDesktop, update available")
         }
         .menuBarExtraStyle(.window)
     }

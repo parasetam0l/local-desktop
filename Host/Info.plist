@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Local Desktop Host</string>
+	<string>LocalDesktop</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -31,7 +31,7 @@
 		<string>_rd-desktop._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Local Desktop advertises this Mac on your local network so your iPhone or iPad can find and control it.</string>
+	<string>LocalDesktop advertises this Mac on your local network so your iPhone or iPad can find and control it.</string>
 	<key>SUAllowsAutomaticUpdates</key>
 	<false/>
 	<key>SUEnableAutomaticChecks</key>

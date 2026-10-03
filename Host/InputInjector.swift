@@ -79,7 +79,7 @@ enum InputInjector {
         lastUserActivityTickle = now
 
         var id: IOPMAssertionID = 0
-        let ret = IOPMAssertionDeclareUserActivity("Local Desktop User Activity" as CFString, kIOPMUserActiveLocal, &id)
+        let ret = IOPMAssertionDeclareUserActivity("LocalDesktop User Activity" as CFString, kIOPMUserActiveLocal, &id)
         if ret == kIOReturnSuccess && id != 0 {
             let assertion = id
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
@@ -97,7 +97,7 @@ enum InputInjector {
         lastUserActivityTickle = ProcessInfo.processInfo.systemUptime
         // 1. Declare User Activity to IOKit Power Management
         var assertionID: IOPMAssertionID = 0
-        let ret = IOPMAssertionDeclareUserActivity("Local Desktop Wake Display" as CFString, kIOPMUserActiveLocal, &assertionID)
+        let ret = IOPMAssertionDeclareUserActivity("LocalDesktop Wake Display" as CFString, kIOPMUserActiveLocal, &assertionID)
         if ret == kIOReturnSuccess && assertionID != 0 {
             let assertion = assertionID
             DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 1.5) {

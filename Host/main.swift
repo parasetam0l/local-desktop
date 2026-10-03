@@ -6,4 +6,4 @@ if CommandLine.arguments.contains("--supervisor") {
     exit(0)
 }
 
-LocalDesktopHostApp.main()
+LocalDesktopApp.main()

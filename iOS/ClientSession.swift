@@ -348,7 +348,7 @@ final class ClientSession: ObservableObject {
     private func reportIdentityMismatch(serverId: String) {
         identityMismatchServerId = serverId
         fail("This Mac's identity doesn't match the one you paired with, so the connection was stopped. "
-             + "If you reinstalled or reset Local Desktop Host on it, forget it and pair again.",
+             + "If you reinstalled or reset LocalDesktop on it, forget it and pair again.",
              allowReconnect: false)
     }
 

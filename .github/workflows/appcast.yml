@@ -1,4 +1,4 @@
-# Attaches appcast.xml, the feed Local Desktop Host's updater (Sparkle) reads, to a
+# Attaches appcast.xml, the feed LocalDesktop's updater (Sparkle) reads, to a
 # release when it is published. The feed lists that release's DMG with its
 # EdDSA signature and the release notes as published. The app reads it from
 # the latest published release, so drafts are never offered.
@@ -50,12 +50,14 @@ jobs:
 
       - name: Download the DMG and read the app's version
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "LocalDesktopHost-*.dmg" --dir "$RUNNER_TEMP/release"
-          dmg="$(ls "$RUNNER_TEMP"/release/LocalDesktopHost-*.dmg)"
+          # LocalDesktop-*.dmg (LocalDesktopHost-*.dmg before 1.1.1).
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "LocalDesktop*.dmg" --dir "$RUNNER_TEMP/release"
+          dmg="$(ls "$RUNNER_TEMP"/release/LocalDesktop*.dmg)"
           mount="$RUNNER_TEMP/mnt"
           mkdir -p "$mount"
           hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
-          info="$mount/LocalDesktopHost.app/Contents/Info.plist"
+          app="$(ls -d "$mount"/*.app | head -n 1)"
+          info="$app/Contents/Info.plist"
           {
             echo "DMG=$dmg"
             echo "SHORT_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$info")"
@@ -70,7 +72,7 @@ jobs:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           signature="$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - -p "$DMG")"
-          # The check an installed Local Desktop Host makes: a key mix-up fails here
+          # The check an installed LocalDesktop makes: a key mix-up fails here
           # instead of on users' Macs.
           swift Scripts/verify-update-signature.swift "$APP_PUBLIC_KEY" "$signature" "$DMG"
           echo "SIGNATURE=$signature" >> "$GITHUB_ENV"
@@ -90,7 +92,7 @@ jobs:
           notes = open(sys.argv[2]).read().replace("]]>", "]]]]><![CDATA[>")
           env = os.environ
           repository = env["GITHUB_REPOSITORY"]
-          title = escape("Local Desktop Host " + env["SHORT_VERSION"])
+          title = escape("LocalDesktop " + env["SHORT_VERSION"])
           published = datetime.fromisoformat(release["publishedAt"].replace("Z", "+00:00"))
           date = email.utils.format_datetime(published)
           build = escape(env["BUILD_VERSION"])
@@ -104,7 +106,7 @@ jobs:
           print(f"""<?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
             <channel>
-              <title>Local Desktop Host</title>
+              <title>LocalDesktop</title>
               <link>https://github.com/{repository}/releases</link>
               <item>
                 <title>{title}</title>
@@ -121,4 +123,4 @@ jobs:
           PY
           xmllint --noout "$RUNNER_TEMP/appcast.xml"
           gh release upload "$TAG" "$RUNNER_TEMP/appcast.xml" --repo "$GITHUB_REPOSITORY" --clobber
-          echo "Attached appcast.xml to $TAG: Local Desktop Host $SHORT_VERSION ($BUILD_VERSION)." >> "$GITHUB_STEP_SUMMARY"
+          echo "Attached appcast.xml to $TAG: LocalDesktop $SHORT_VERSION ($BUILD_VERSION)." >> "$GITHUB_STEP_SUMMARY"

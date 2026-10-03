@@ -4,14 +4,14 @@
 # a background that shows dragging one onto the other. The layout is in
 # Packaging/dmg/settings.py; the DMG is not signed here.
 #
-# Usage: Scripts/make-dmg.sh <LocalDesktopHost.app> <output.dmg> [volume name]
+# Usage: Scripts/make-dmg.sh <LocalDesktop.app> <output.dmg> [volume name]
 
 set -euo pipefail
 
-usage="usage: make-dmg.sh <LocalDesktopHost.app> <output.dmg> [volume name]"
+usage="usage: make-dmg.sh <LocalDesktop.app> <output.dmg> [volume name]"
 APP="${1:?$usage}"
 DMG="${2:?$usage}"
-VOLUME_NAME="${3:-Local Desktop Host}"
+VOLUME_NAME="${3:-LocalDesktop}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 PACKAGING="$SCRIPT_DIR/../Packaging/dmg"
 

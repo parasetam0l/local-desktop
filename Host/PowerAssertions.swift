@@ -13,7 +13,7 @@ final class PowerAssertions {
             IOPMAssertionCreateWithName(
                 kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
                 IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                "Local Desktop Active Remote Session" as CFString,
+                "LocalDesktop Active Remote Session" as CFString,
                 &displaySleepAssertion
             )
         }
@@ -21,7 +21,7 @@ final class PowerAssertions {
             IOPMAssertionCreateWithName(
                 kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
                 IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                "Local Desktop Active Remote Session" as CFString,
+                "LocalDesktop Active Remote Session" as CFString,
                 &systemSleepAssertion
             )
         }

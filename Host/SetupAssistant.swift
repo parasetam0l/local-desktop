@@ -328,7 +328,7 @@ private struct WelcomeStep: View {
         VStack(spacing: 22) {
             StepHeader(symbol: "macbook.and.iphone",
                        tint: .blue,
-                       title: "Welcome to Local Desktop",
+                       title: "Welcome to LocalDesktop",
                        message: "Control this Mac from your iPhone or iPad over your local network. Setup takes about a minute.")
             VStack(alignment: .leading, spacing: 12) {
                 ChecklistRow(symbol: "rectangle.dashed.badge.record", title: "Allow Screen Recording",
@@ -383,7 +383,7 @@ private struct PermissionStep: View {
     private var message: String {
         switch kind {
         case .screenRecording:
-            return "Local Desktop streams this Mac's screen to your paired devices, encrypted. Nothing is recorded or stored."
+            return "LocalDesktop streams this Mac's screen to your paired devices, encrypted. Nothing is recorded or stored."
         case .accessibility:
             return "This lets your iPhone move the pointer, click, scroll, and type on this Mac."
         }
@@ -409,7 +409,7 @@ private struct PermissionStep: View {
             if !granted {
                 VStack(alignment: .leading, spacing: 6) {
                     instruction(1, "Click **Open System Settings**.")
-                    instruction(2, "Turn on **Local Desktop Host** in the list.")
+                    instruction(2, "Turn on **LocalDesktop** in the list.")
                     if kind == .screenRecording {
                         instruction(3, "If macOS asks, choose **Quit & Reopen**. Setup continues where you left off.")
                     }
@@ -541,7 +541,7 @@ private struct ReadyStep: View {
             }
             .frame(maxWidth: 420)
 
-            Toggle("Open Local Desktop Host at login", isOn: Binding(
+            Toggle("Open LocalDesktop at login", isOn: Binding(
                 get: { model.launchAtLogin },
                 set: { model.setLaunchAtLogin($0) }
             ))
@@ -576,7 +576,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             self?.window?.close()
         }
         let window = NSWindow(contentViewController: NSHostingController(rootView: view))
-        window.title = "Local Desktop Setup"
+        window.title = "LocalDesktop Setup"
         window.styleMask = [.titled, .closable, .fullSizeContentView]
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false

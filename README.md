@@ -2,7 +2,7 @@
 
 A Swift-based local desktop for your local network:
 
-- **`LocalDesktopHost` (macOS, menu bar app)** — shares the screen over the LAN and injects remote input.
+- **`LocalDesktop` (macOS, menu bar app)** — shares the screen over the LAN and injects remote input.
 - **`LocalDesktopClient` (iOS/iPadOS app)** — discovers Macs, connects, and controls them.
 
 Both apps speak the same custom TCP protocol (see [`Protocol.md`](Protocol.md)) built on
@@ -75,7 +75,7 @@ To change the team permanently, edit `DEVELOPMENT_TEAM` (and the host's `CODE_SI
 
 1. Generate the Xcode project: `xcodegen generate`
 2. Open `LocalDesktop.xcodeproj`.
-3. Run the **LocalDesktopHost** scheme on your Mac.
+3. Run the **LocalDesktopHost** scheme on your Mac (it builds LocalDesktop.app).
 4. Run the **LocalDesktopClient** scheme on your iPhone/iPad.
    *(For a physical device, select your development team in "Signing & Capabilities". The iOS simulator works too, but cannot reach Macs outside its host network.)*
 5. Run the **LocalDesktopTests** scheme (⌘U) for the unit tests.
@@ -113,7 +113,7 @@ from its identity key, so it shows up as a new entry in Recents.
 
 - Nothing discovered? Make sure both devices are on the same Wi‑Fi/LAN, no "AP/client isolation" is enabled on the router, and Local Network permission was granted on both sides.
 - Remote control does nothing? Grant Accessibility to the host app on the Mac.
-- "This Mac's identity doesn't match"? The Mac's identity key changed (e.g. Local Desktop Host was reset) or something else on the network is answering for it. If you reset the Mac yourself, tap **Forget & Pair Again**.
+- "This Mac's identity doesn't match"? The Mac's identity key changed (e.g. LocalDesktop was reset) or something else on the network is answering for it. If you reset the Mac yourself, tap **Forget & Pair Again**.
 - "PIN entry locked"? Too many wrong PINs were entered. Wait, or press **Clear** next to the failed-attempts line in the Mac's menu.
 - Wrong scroll direction on the Mac? Scroll deltas follow `Protocol.md` (`dy > 0` scrolls up); flip the sign in `InputInjector.scroll` if it feels inverted with your setup.
 - To force the PIN again on a device, revoke it on the Mac (Trusted devices → Revoke).

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds and installs LocalDesktopHost (macOS) and LocalDesktopClient (iOS).
+# Builds and installs LocalDesktop (macOS) and LocalDesktopClient (iOS).
 #
 # Usage:
 #   ./build.sh                 Builds both macOS Host and iOS Client
@@ -82,7 +82,7 @@ if [[ "$RUN_TESTS" -eq 1 ]]; then
 fi
 
 if [[ "$BUILD_HOST" -eq 1 ]]; then
-    echo "==> Building LocalDesktopHost ($CONFIG)..."
+    echo "==> Building LocalDesktop for Mac ($CONFIG)..."
     xcodebuild -project LocalDesktop.xcodeproj \
         -scheme LocalDesktopHost \
         -configuration "$CONFIG" \
@@ -90,20 +90,22 @@ if [[ "$BUILD_HOST" -eq 1 ]]; then
         -derivedDataPath "$DERIVED_DATA" \
         build -quiet
 
-    HOST_APP="$DERIVED_DATA/Build/Products/$CONFIG/LocalDesktopHost.app"
+    HOST_APP="$DERIVED_DATA/Build/Products/$CONFIG/LocalDesktop.app"
     echo "==> Built Host: $HOST_APP"
 
     if [[ "$INSTALL" -eq 1 ]]; then
-        echo "==> Installing LocalDesktopHost to /Applications..."
+        echo "==> Installing LocalDesktop to /Applications..."
         # Stop the supervisor first so it doesn't relaunch the old copy; the app itself
         # treats SIGTERM as a clean quit.
-        pkill -f "LocalDesktopHost --supervisor" || true
+        # Before 1.1.1 the app was LocalDesktopHost.app: replace either.
+        pkill -f "MacOS/LocalDesktop(Host)? --supervisor" || true
+        pkill -x LocalDesktop || true
         pkill -x LocalDesktopHost || true
         sleep 1
-        rm -rf /Applications/LocalDesktopHost.app
+        rm -rf /Applications/LocalDesktopHost.app /Applications/LocalDesktop.app
         cp -R "$HOST_APP" /Applications/
-        open /Applications/LocalDesktopHost.app
-        echo "==> LocalDesktopHost installed and launched."
+        open /Applications/LocalDesktop.app
+        echo "==> LocalDesktop installed and launched."
     fi
 fi
 
