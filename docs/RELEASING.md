@@ -131,6 +131,9 @@ updates for it would mean distributing it through TestFlight.
   background). After changing it, redraw the background with
   `swift Scripts/dmg-background.swift` and try it with
   `Scripts/make-dmg.sh path/to/LocalDesktop.app test.dmg`.
+- The Mac app icon is built from `Packaging/icon/artwork-1024.png`: run
+  `swift Scripts/mac-app-icon.swift` after changing the artwork. It cuts the
+  rounded tile out onto Apple's icon grid with transparent corners.
 - The Developer ID certificate is valid until 2031. When it is renewed,
   update `CODE_SIGN_IDENTITY` in `project.yml` and the
   `DEVELOPER_ID_P12_*` secrets.
