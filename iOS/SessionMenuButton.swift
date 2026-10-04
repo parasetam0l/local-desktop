@@ -19,7 +19,8 @@ struct SessionMenuButton: View {
                 Label("Mac Hardware Controls…", systemImage: "slider.horizontal.3")
             }
 
-            if displays.count > 1 {
+            // Empty with a Mac older than 1.2.1, which doesn't send its displays.
+            if !displays.isEmpty {
                 Menu {
                     ForEach(displays) { display in
                         Button {
@@ -32,9 +33,15 @@ struct SessionMenuButton: View {
                             }
                         }
                     }
+                    if displays.count == 1 {
+                        Section {
+                            Text("Connect another display to the Mac to switch between them.")
+                        }
+                    }
                 } label: {
                     let current = displays.first { $0.id == selectedDisplayId }
-                    Label("Display: \(current?.name ?? "Choose")", systemImage: "display.2")
+                    Label("Display: \(current?.name ?? "Choose")",
+                          systemImage: displays.count > 1 ? "display.2" : "display")
                 }
             }
 
