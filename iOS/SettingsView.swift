@@ -78,8 +78,16 @@ struct SettingsView: View {
                 Section {
                     LabeledContent("Version", value: AppUpdater.currentVersion)
                     if let version = updater.availableVersion {
+                        if let notes = updater.releaseNotesURL(for: version) {
+                            Link("What's New in \(version)", destination: notes)
+                        }
                         Button("Install LocalDesktop \(version)") {
-                            if let url = updater.installURL { openURL(url) }
+                            // The main screen's banner then shows how to finish.
+                            guard let url = updater.beginInstall() else { return }
+                            dismiss()
+                            openURL(url) { accepted in
+                                if !accepted { updater.endInstall() }
+                            }
                         }
                     }
                     Button {

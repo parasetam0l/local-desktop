@@ -115,34 +115,83 @@ struct ConnectView: View {
     }
 
     private func updateBanner(_ version: String) -> some View {
-        Section {
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.down.app.fill")
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("LocalDesktop \(version) is available")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Paired Macs and settings are kept.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+        let awaiting = updater.isAwaitingInstall
+        return Section {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: awaiting ? "arrow.down.to.line" : "arrow.down")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(awaiting ? "Almost done" : "Update available")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tint)
+                        Text("LocalDesktop \(version)")
+                            .font(.headline)
+                        Text(awaiting
+                             ? "After tapping Install, close the app. It updates on the Home Screen."
+                             : "Your paired Macs and settings are kept.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    Button {
+                        if awaiting {
+                            updater.endInstall()
+                        } else {
+                            updater.dismissBanner()
+                        }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(awaiting ? "Cancel" : "Not now")
                 }
-                Spacer(minLength: 8)
-                Button("Install") {
-                    if let url = updater.installURL { openURL(url) }
+
+                HStack(spacing: 10) {
+                    if awaiting {
+                        Button {
+                            updater.closeAppToFinishInstall()
+                        } label: {
+                            Text("Close App").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Button {
+                            installUpdate()
+                        } label: {
+                            Text("Install").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        if let notes = updater.releaseNotesURL(for: version) {
+                            Button {
+                                openURL(notes)
+                            } label: {
+                                Text("What's New").frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                Button {
-                    updater.dismissBanner()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Not now")
+                .controlSize(.large)
+                .fontWeight(.semibold)
             }
+            .padding(.vertical, 6)
+            .animation(.default, value: awaiting)
+        }
+    }
+
+    private func installUpdate() {
+        guard let url = updater.beginInstall() else { return }
+        openURL(url) { accepted in
+            if !accepted { updater.endInstall() }
         }
     }
 

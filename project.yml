@@ -101,6 +101,7 @@ targets:
         # Updates: the install page (GitHub Pages) serves the latest published
         # release's Ad Hoc build with this manifest. See docs/RELEASING.md.
         LDUpdateManifestURL: https://parasetam0l.github.io/local-desktop/manifest.plist
+        LDReleasesURL: https://github.com/parasetam0l/local-desktop/releases
   LocalDesktopTests:
     type: bundle.unit-test
     platform: macOS

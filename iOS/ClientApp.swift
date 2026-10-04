@@ -13,8 +13,13 @@ struct LocalDesktopClientApp: App {
                 .environmentObject(updater)
         }
         .onChange(of: scenePhase, initial: true) {
-            if scenePhase == .active {
+            switch scenePhase {
+            case .active:
                 Task { await updater.checkIfDue() }
+            case .background:
+                updater.endInstall()
+            default:
+                break
             }
         }
     }

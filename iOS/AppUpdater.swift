@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Offers newer releases of this app. Releases are Ad Hoc builds installed over the
 /// air from the install page on GitHub Pages; its `manifest.plist` (the file iOS
@@ -10,6 +13,9 @@ final class AppUpdater: ObservableObject {
     @Published private(set) var availableVersion: String?
     @Published private(set) var isChecking = false
     @Published private(set) var lastCheckFailed = false
+    /// The install was handed to iOS, which replaces this app only once it has left the
+    /// foreground; until then the banner asks to close the app.
+    @Published private(set) var isAwaitingInstall = false
     @Published private var dismissedVersion: String? {
         didSet { UserDefaults.standard.set(dismissedVersion, forKey: Self.dismissedKey) }
     }
@@ -23,6 +29,7 @@ final class AppUpdater: ObservableObject {
 
     private let manifestURL = (Bundle.main.object(forInfoDictionaryKey: "LDUpdateManifestURL") as? String)
         .flatMap(URL.init(string:))
+    private let releasesURL = Bundle.main.object(forInfoDictionaryKey: "LDReleasesURL") as? String
     private var lastCheck: Date?
 
     init() {
@@ -36,13 +43,42 @@ final class AppUpdater: ObservableObject {
     }
 
     /// Opening this asks iOS to install the latest release over this one.
-    var installURL: URL? {
+    private var installURL: URL? {
         manifestURL.flatMap { URL(string: "itms-services://?action=download-manifest&url=\($0.absoluteString)") }
+    }
+
+    /// The GitHub release page with that version's notes.
+    func releaseNotesURL(for version: String) -> URL? {
+        releasesURL.flatMap { URL(string: "\($0)/tag/v\(version)") }
     }
 
     func dismissBanner() {
         dismissedVersion = availableVersion
     }
+
+    /// The URL to open for installing the latest release.
+    func beginInstall() -> URL? {
+        guard let installURL else { return nil }
+        isAwaitingInstall = true
+        return installURL
+    }
+
+    /// The install was cancelled, or the app left the foreground (where the install either
+    /// proceeds and ends this process, or was cancelled after all).
+    func endInstall() {
+        isAwaitingInstall = false
+    }
+
+    #if canImport(UIKit)
+    /// Goes to the Home Screen, as the Home gesture would, and quits, so that iOS can
+    /// replace the app. It's the only way to finish an install started from inside it.
+    func closeAppToFinishInstall() {
+        let suspend = NSSelectorFromString("suspend")
+        guard UIApplication.shared.responds(to: suspend) else { exit(0) }
+        _ = UIApplication.shared.perform(suspend)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { exit(0) }
+    }
+    #endif
 
     func checkIfDue() async {
         if let lastCheck, Date().timeIntervalSince(lastCheck) < Self.checkInterval { return }
