@@ -138,3 +138,7 @@ workflow), and installed copies update themselves from GitHub Releases. How to s
 ## Regenerating the project after edits
 
 Sources live outside the `.xcodeproj`; after adding/removing files run `xcodegen generate` again (`build.sh` does this for you).
+
+## License
+
+MIT; see [LICENSE](LICENSE). The Mac app bundles [Sparkle](https://github.com/sparkle-project/Sparkle), which is MIT-licensed as well.
