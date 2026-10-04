@@ -229,7 +229,7 @@ final class ClientSession: ObservableObject {
             if phase == .connected {
                 fail("Connection closed by host")
             } else if identity == nil {
-                fail("The Mac closed the connection during setup. Make sure Local Desktop is up to date on both devices.")
+                fail("The Mac closed the connection during setup. Make sure LocalDesktop is up to date on both devices.")
             } else {
                 fail("Connection closed")
             }

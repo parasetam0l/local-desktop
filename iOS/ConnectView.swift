@@ -2,6 +2,8 @@ import SwiftUI
 
 struct ConnectView: View {
     @EnvironmentObject private var app: AppModel
+    @EnvironmentObject private var updater: AppUpdater
+    @Environment(\.openURL) private var openURL
 
     @State private var manualAddress = ""
     @State private var showSettings = false
@@ -9,6 +11,10 @@ struct ConnectView: View {
     var body: some View {
         NavigationStack {
             List {
+                if let version = updater.bannerVersion {
+                    updateBanner(version)
+                }
+
                 Section {
                     if app.browser.hosts.isEmpty {
                         HStack(spacing: 10) {
@@ -83,7 +89,7 @@ struct ConnectView: View {
             .refreshable {
                 app.browser.restart()
             }
-            .navigationTitle("Local Desktop")
+            .navigationTitle("LocalDesktop")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -97,6 +103,7 @@ struct ConnectView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(app)
+                .environmentObject(updater)
         }
         .fullScreenCover(item: $app.session, onDismiss: {
             app.endSession()
@@ -104,6 +111,38 @@ struct ConnectView: View {
             SessionView(session: session, app: app, onDismiss: {
                 app.endSession()
             })
+        }
+    }
+
+    private func updateBanner(_ version: String) -> some View {
+        Section {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.down.app.fill")
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("LocalDesktop \(version) is available")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Paired Macs and settings are kept.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button("Install") {
+                    if let url = updater.installURL { openURL(url) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Button {
+                    updater.dismissBanner()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Not now")
+            }
         }
     }
 

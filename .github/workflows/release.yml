@@ -1,8 +1,10 @@
-# Builds LocalDesktop (the Mac app) signed with Developer ID, notarizes
-# it, and creates a draft GitHub release with the DMG. It runs only when
+# Builds both apps from the same commit with the same version and creates a
+# draft GitHub release with them: LocalDesktop for the Mac, signed with
+# Developer ID and notarized, as a DMG, and the iPhone and iPad app as an
+# Ad Hoc IPA for the devices registered with the team. It runs only when
 # started by hand: Actions → Release → Run workflow.
 #
-# One-time setup (certificate, secrets): docs/RELEASING.md.
+# One-time setup (certificate, keys, secrets): docs/RELEASING.md.
 name: Release
 
 on:
@@ -45,9 +47,13 @@ jobs:
           DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           missing=()
-          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD NOTARY_APPLE_ID NOTARY_PASSWORD; do
+          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD NOTARY_APPLE_ID NOTARY_PASSWORD \
+                      APP_STORE_CONNECT_KEY APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID; do
             [[ -n "${!name}" ]] || missing+=("$name")
           done
           if (( ${#missing[@]} )); then
@@ -99,7 +105,10 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          # A new, higher build number every time, so Sparkle sees each release as newer.
+          # A new, higher build number every time, so Sparkle sees each release as
+          # newer. Both apps get the same one.
+          build_number="$(date +%s)"
+          echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
           xcodebuild archive \
             -project LocalDesktop.xcodeproj \
             -scheme LocalDesktopHost \
@@ -107,7 +116,7 @@ jobs:
             -destination "generic/platform=macOS" \
             -archivePath "$RUNNER_TEMP/LocalDesktop.xcarchive" \
             MARKETING_VERSION="$VERSION" \
-            CURRENT_PROJECT_VERSION="$(date +%s)" 2>&1 \
+            CURRENT_PROJECT_VERSION="$build_number" 2>&1 \
             | tee "$RUNNER_TEMP/xcodebuild.log" \
             | { grep -E "error:|warning: .*(sign|profile|entitlement)|ARCHIVE (SUCCEEDED|FAILED)" || true; }
           echo "APP=$RUNNER_TEMP/LocalDesktop.xcarchive/Products/Applications/LocalDesktop.app" >> "$GITHUB_ENV"
@@ -132,6 +141,63 @@ jobs:
           [[ "$(printf '%s' "$key" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')" == 32 ]] \
             || { echo "::error::SUPublicEDKey in project.yml is not a Sparkle public key: $key"; exit 1; }
 
+      - name: Build the iPhone app
+        env:
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -o pipefail
+          # Archived unsigned and signed only on export: Xcode signs with the team's
+          # cloud-managed Apple Distribution certificate and an Ad Hoc profile for
+          # every enabled device, creating or renewing both with the API key.
+          xcodebuild archive \
+            -project LocalDesktop.xcodeproj \
+            -scheme LocalDesktopClient \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/LocalDesktopClient.xcarchive" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO 2>&1 \
+            | tee -a "$RUNNER_TEMP/xcodebuild.log" \
+            | { grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" || true; }
+          key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$APP_STORE_CONNECT_KEY" > "$key"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/LocalDesktopClient.xcarchive" \
+            -exportPath "$RUNNER_TEMP/ios" \
+            -exportOptionsPlist Packaging/ios/ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$key" \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" 2>&1 \
+            | tee -a "$RUNNER_TEMP/xcodebuild.log" \
+            | { grep -E "error:|EXPORT (SUCCEEDED|FAILED)" || true; }
+          rm -f "$key"
+          ipa="$RUNNER_TEMP/LocalDesktop-$VERSION.ipa"
+          mv "$RUNNER_TEMP/ios/LocalDesktopClient.ipa" "$ipa"
+          echo "IPA=$ipa" >> "$GITHUB_ENV"
+
+      - name: Check the iPhone app
+        run: |
+          dir="$RUNNER_TEMP/ipa"
+          unzip -q "$IPA" -d "$dir"
+          app="$dir/Payload/LocalDesktopClient.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          grep -q "Authority=Apple Distribution" <<< "$(codesign -dvv "$app" 2>&1)" \
+            || { echo "::error::The iPhone app is not signed for distribution"; exit 1; }
+          version="$(plutil -extract CFBundleShortVersionString raw -o - "$app/Info.plist")"
+          [[ "$version" == "$VERSION" ]] \
+            || { echo "::error::The iPhone app is version $version, not $VERSION"; exit 1; }
+          security cms -D -i "$app/embedded.mobileprovision" > "$dir/profile.plist"
+          [[ "$(plutil -extract Entitlements.get-task-allow raw -o - "$dir/profile.plist")" == false ]] \
+            || { echo "::error::The iPhone app has a development profile, not Ad Hoc"; exit 1; }
+          devices="$(plutil -extract ProvisionedDevices raw -o - "$dir/profile.plist")"
+          expires="$(plutil -extract ExpirationDate raw -o - "$dir/profile.plist")"
+          (( devices > 0 )) || { echo "::error::The Ad Hoc profile lists no devices"; exit 1; }
+          echo "iPhone and iPad app: Ad Hoc for $devices registered devices, runs until $expires." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Notarize the app
         env:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
@@ -155,6 +221,9 @@ jobs:
 
       - name: Create the draft release
         run: |
+          # Served by the Install page workflow once this release is published.
+          owner="$(tr '[:upper:]' '[:lower:]' <<< "$GITHUB_REPOSITORY_OWNER")"
+          INSTALL_PAGE="https://$owner.github.io/${GITHUB_REPOSITORY#*/}/"
           # GitHub's generated notes list merged pull requests, and this
           # repository is committed to directly: list the commits instead.
           previous="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
@@ -163,13 +232,11 @@ jobs:
             cat <<EOF
           ## Install
 
-          Open LocalDesktop-$VERSION.dmg and drag LocalDesktop to Applications, then open it. The Setup Assistant asks for the Screen Recording and Accessibility permissions and a PIN.
+          **Mac:** open LocalDesktop-$VERSION.dmg and drag LocalDesktop to Applications, then open it. The Setup Assistant asks for the Screen Recording and Accessibility permissions and a PIN. Requires macOS 14 or later.
 
-          **Updating:** LocalDesktop 1.1 and later offer new versions by themselves (menu bar icon → gear → Check for Updates…). From a build without the updater, quit it and replace it in Applications with the new one.
+          **iPhone and iPad:** open $INSTALL_PAGE in Safari on the device and tap Install. LocalDesktop-$VERSION.ipa is an Ad Hoc build: it installs only on devices registered with the developer account. Requires iOS 17 or later.
 
-          The iPhone and iPad app isn't part of this release; build it with \`./build.sh --client --install\`. Use matching versions of both apps.
-
-          Requires macOS 14 or later.
+          **Updating:** the Mac app offers new versions by itself (menu bar icon → gear → Check for Updates…), and so does the iPhone app from 1.2 on (a banner on its main screen). Use the same version of both apps.
 
           ## Changes
 
@@ -181,7 +248,7 @@ jobs:
               echo "First release."
             fi
           } > "$RUNNER_TEMP/notes.md"
-          gh release create "v$VERSION" "$DMG" \
+          gh release create "v$VERSION" "$DMG" "$IPA" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "LocalDesktop $VERSION" \
@@ -202,3 +269,4 @@ jobs:
         if: always()
         run: |
           [[ -n "${KEYCHAIN:-}" ]] && security delete-keychain "$KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8"

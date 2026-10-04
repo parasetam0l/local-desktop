@@ -39,7 +39,7 @@ struct PinSheet: View {
                     Text("Fingerprint \(fingerprint)")
                         .font(.caption.monospaced())
                         .foregroundStyle(.white.opacity(0.6))
-                        .accessibilityHint("Should match the fingerprint in the Mac's Local Desktop menu")
+                        .accessibilityHint("Should match the fingerprint in the Mac's LocalDesktop menu")
                 }
             }
 

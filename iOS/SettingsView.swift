@@ -2,7 +2,9 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
+    @EnvironmentObject private var updater: AppUpdater
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         NavigationStack {
@@ -72,6 +74,31 @@ struct SettingsView: View {
                 } footer: {
                     Text("Forgetting a Mac here only removes its pairing from this device. Revoke access on the Mac itself to block this device.")
                 }
+
+                Section {
+                    LabeledContent("Version", value: AppUpdater.currentVersion)
+                    if let version = updater.availableVersion {
+                        Button("Install LocalDesktop \(version)") {
+                            if let url = updater.installURL { openURL(url) }
+                        }
+                    }
+                    Button {
+                        Task { await updater.check() }
+                    } label: {
+                        HStack {
+                            Text("Check for Updates")
+                            if updater.isChecking {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(updater.isChecking)
+                } header: {
+                    Text("Updates")
+                } footer: {
+                    Text(updateStatus)
+                }
             }
             .navigationTitle("Settings")
             .toolbar {
@@ -81,5 +108,15 @@ struct SettingsView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private var updateStatus: String {
+        if updater.lastCheckFailed {
+            return "Couldn't check for updates. Check the internet connection and try again."
+        }
+        if updater.availableVersion != nil {
+            return "Installing replaces this version and keeps paired Macs and settings. Use the same version on the Mac."
+        }
+        return "New versions are offered on the main screen. Keep the Mac on the same version."
     }
 }

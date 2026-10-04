@@ -71,16 +71,22 @@ targets:
     type: application
     platform: iOS
     settings:
-      PRODUCT_BUNDLE_IDENTIFIER: localdesktop.client
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: localdesktop.client
+        # Signed automatically; the Release workflow exports it for registered devices
+        # (Ad Hoc) and overrides both versions to match the Mac app's (see docs/RELEASING.md).
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
     sources:
       - iOS
       - Shared
     info:
       path: iOS/Info.plist
       properties:
-        CFBundleDisplayName: Local Desktop
-        CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
+        CFBundleDisplayName: LocalDesktop
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -90,8 +96,11 @@ targets:
         CADisableMinimumFrameDurationOnPhone: true
         UIBackgroundModes:
           - audio
-        NSLocalNetworkUsageDescription: "Local Desktop scans your local network for Macs to connect to."
+        NSLocalNetworkUsageDescription: "LocalDesktop scans your local network for Macs to connect to."
         NSBonjourServices: ["_rd-desktop._tcp"]
+        # Updates: the install page (GitHub Pages) serves the latest published
+        # release's Ad Hoc build with this manifest. See docs/RELEASING.md.
+        LDUpdateManifestURL: https://parasetam0l.github.io/local-desktop/manifest.plist
   LocalDesktopTests:
     type: bundle.unit-test
     platform: macOS
@@ -108,6 +117,7 @@ targets:
       - Shared/RDSecureChannel.swift
       - Host/PINSecurity.swift
       - iOS/ClientConnection.swift
+      - iOS/AppUpdater.swift
 schemes:
   LocalDesktopHost:
     build:

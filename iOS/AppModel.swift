@@ -179,7 +179,7 @@ final class AppModel: ObservableObject {
             portPart = UInt16(trimmed[trimmed.index(after: colon)...])
         }
         guard !hostPart.isEmpty, let rawPort = portPart, let port = NWEndpoint.Port(rawValue: rawPort) else {
-            manualError = "Use the format ip:port (the port is shown in the Mac's Local Desktop menu)."
+            manualError = "Use the format ip:port (the port is shown in the Mac's LocalDesktop menu)."
             return
         }
         connect(endpoint: .hostPort(host: NWEndpoint.Host(hostPart), port: port), fallbackName: hostPart)

@@ -215,7 +215,7 @@ final class ClientConnection: @unchecked Sendable {
                     // peer's own text isn't shown (it could ask for the PIN), and nothing else follows.
                     let msg = RDJSON.decode(AuthFailedMsg.self, from: frame.body)
                     finish(msg?.kind == .unsupportedVersion
-                           ? .rejected("This Mac runs a different version of Local Desktop. Update both apps.")
+                           ? .rejected("This Mac runs a different version of LocalDesktop. Update both apps.")
                            : .failed("Protocol error: the Mac refused the connection before identifying itself."))
                     return
                 default:

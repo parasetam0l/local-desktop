@@ -342,7 +342,7 @@ final class ClientSession {
         }
         guard msg.version == RDService.protocolVersion else {
             let reason = msg.version < RDService.protocolVersion
-                ? "Update Local Desktop on this device to connect to this Mac."
+                ? "Update LocalDesktop on this device to connect to this Mac."
                 : "Update LocalDesktop on this Mac to connect from this device."
             sendAuthFailed(reason, kind: .unsupportedVersion)
             closeAfterFlush()

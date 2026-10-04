@@ -1,4 +1,4 @@
-# Local Desktop
+# LocalDesktop
 
 A Swift-based local desktop for your local network:
 
@@ -66,7 +66,8 @@ Signing (set in `project.yml`, team `P7V7795SS9`):
   because an older certificate has the same name), with Hardened Runtime, so it can be notarized
   for use on other Macs. No provisioning profile is needed.
 - **iOS client**: *Apple Development*, automatic signing with the team's wildcard profile. The first
-  `./build.sh --install` with the iPhone connected registers it with the team.
+  `./build.sh --install` with the iPhone connected registers it with the team. Releases are signed
+  for Ad Hoc distribution instead (see below).
 
 To change the team permanently, edit `DEVELOPMENT_TEAM` (and the host's `CODE_SIGN_IDENTITY`) in
 `project.yml`; `--team` / the `DEVELOPMENT_TEAM` environment variable only override the iOS build.
@@ -131,8 +132,11 @@ from its identity key, so it shows up as a new entry in Recents.
 
 ## Releases and updates
 
-Signed, notarized releases of the Mac app are built by GitHub Actions when started by hand (the **Release**
-workflow), and installed copies update themselves from GitHub Releases. How to set it up and make a release:
+Releases are built by GitHub Actions when started by hand (the **Release** workflow). Each one has both
+apps with the same version: the Mac app signed and notarized as a DMG, and the iPhone and iPad app as an
+Ad Hoc build, which installs only on devices registered with the developer account (there's no App Store
+version). Install it on the device from **https://parasetam0l.github.io/local-desktop/** in Safari.
+Both apps offer new releases by themselves. How to set it up and make a release:
 [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Regenerating the project after edits

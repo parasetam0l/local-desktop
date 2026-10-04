@@ -1,0 +1,59 @@
+# Publishes the iPhone and iPad install page on GitHub Pages for the latest
+# published release: its Ad Hoc IPA with the manifest.plist iOS installs it
+# from (Safari can't install from a GitHub release link) and the page with the
+# Install button. Installed copies check the same manifest for updates.
+#
+# It runs after the Appcast workflow, so it never sees drafts. That run is on
+# the default branch, which the github-pages environment deploys from (a
+# release event's tag isn't).
+#
+# One-time setup (GitHub Pages): docs/RELEASING.md.
+name: Install page
+
+on:
+  workflow_run:
+    workflows: [Appcast]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Build the page
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          read -r tag url < <(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,url --jq '"\(.tagName) \(.url)"')
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "LocalDesktop-*.ipa" --dir "$RUNNER_TEMP" \
+            || { echo "::error::The latest release, $tag, has no LocalDesktop-*.ipa."; exit 1; }
+          python3 Scripts/install-page.py "$RUNNER_TEMP"/LocalDesktop-*.ipa "$tag" "$url" "$BASE_URL" "$RUNNER_TEMP/site"
+          echo "Install page for $tag: $BASE_URL/" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ runner.temp }}/site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5

@@ -519,7 +519,7 @@ private struct ReadyStep: View {
             if model.isComplete {
                 StepHeader(symbol: "checkmark.seal.fill", tint: .green,
                            title: "You're All Set",
-                           message: "On your iPhone or iPad, open Local Desktop, tap \(model.environment.computerName), and enter your PIN.")
+                           message: "On your iPhone or iPad, open LocalDesktop, tap \(model.environment.computerName), and enter your PIN.")
             } else {
                 StepHeader(symbol: "exclamationmark.triangle.fill", tint: .orange,
                            title: "Almost There",

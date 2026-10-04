@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// Bonjour discovery of Local Desktop hosts on the local network.
+/// Bonjour discovery of LocalDesktop hosts on the local network.
 struct DiscoveredHost: Identifiable, Equatable {
     /// Bonjour instance name, e.g. "MacBook Pro [A1B2]".
     let id: String
