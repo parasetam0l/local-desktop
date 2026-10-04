@@ -13,8 +13,13 @@ final class HostServer: ObservableObject {
     @Published private(set) var running = false
     @Published private(set) var port: UInt16 = 0
     @Published private(set) var clientName: String?
-    @Published private(set) var displays: [DisplayInfo] = []
-    @Published var selectedDisplayID: CGDirectDisplayID?
+    @Published private(set) var displays: [RDDisplay] = [] {
+        didSet { if displays != oldValue { broadcastDisplays() } }
+    }
+    /// The display to stream, chosen in the menu or from a client.
+    @Published private(set) var selectedDisplayID: CGDirectDisplayID? {
+        didSet { if selectedDisplayID != oldValue { broadcastDisplays() } }
+    }
     @Published var preset: RDQualityPreset = .high
     @Published var lastError: String?
     /// Why screen capture last failed; cleared once capture runs again.
@@ -82,9 +87,6 @@ final class HostServer: ObservableObject {
                 }
             }
         }
-        ScreenStreamer.shared.onError = { [weak self] message in
-            self?.lastError = message
-        }
         ScreenStreamer.shared.onCaptureStopped = { [weak self] error in
             self?.captureDidStop(error)
         }
@@ -111,6 +113,7 @@ final class HostServer: ObservableObject {
         }
         // Displays came or went (lid opened, display plugged in); pick capture back up.
         observe(NotificationCenter.default, NSApplication.didChangeScreenParametersNotification) { server, _ in
+            server.refreshDisplays()
             if !server.activeSessions.isEmpty, !ScreenStreamer.shared.isRunning {
                 server.restartCapture()
             }
@@ -261,11 +264,40 @@ final class HostServer: ObservableObject {
         screenGranted = Permissions.isGranted(.screenRecording)
     }
 
+    /// Re-reads the Mac's displays; clients hear about any change. A chosen display
+    /// that's gone gives way to the main one.
     func refreshDisplays() {
-        Task {
-            let list = await ScreenStreamer.shared.loadDisplays()
-            displays = list
-            if selectedDisplayID == nil { selectedDisplayID = list.first?.id }
+        displays = Self.currentDisplays()
+        if selectedDisplayID.map({ id in !displays.contains { $0.id == id } }) ?? true {
+            selectedDisplayID = displays.first?.id
+        }
+    }
+
+    /// The active displays, the main one (with the menu bar) first. Displays with the
+    /// same name are numbered so they can be told apart.
+    private static func currentDisplays() -> [RDDisplay] {
+        var nameCounts: [String: Int] = [:]
+        return NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            var name = screen.localizedName
+            nameCounts[name, default: 0] += 1
+            if let count = nameCounts[name], count > 1 { name += " \(count)" }
+            return RDDisplay(id: number.uint32Value, name: name,
+                             width: Int(screen.frame.width), height: Int(screen.frame.height),
+                             isMain: number.uint32Value == CGMainDisplayID())
+        }
+    }
+
+    private var displaysMessage: RDDisplaysMsg {
+        RDDisplaysMsg(displays: displays, selectedId: selectedDisplayID)
+    }
+
+    private func broadcastDisplays() {
+        let message = displaysMessage
+        for session in activeSessions {
+            session.sendDisplays(message)
         }
     }
 
@@ -274,8 +306,9 @@ final class HostServer: ObservableObject {
         Task { await ScreenStreamer.shared.updatePreset(newPreset) }
     }
 
+    /// Streams another display, chosen in the menu or by a client; unknown ids are ignored.
     func setDisplay(_ id: CGDirectDisplayID) {
-        guard selectedDisplayID != id else { return }
+        guard selectedDisplayID != id, displays.contains(where: { $0.id == id }) else { return }
         selectedDisplayID = id
         guard running, !activeSessions.isEmpty else { return }
         restartCapture()
@@ -290,10 +323,16 @@ final class HostServer: ObservableObject {
         Task {
             // The last client may have left between scheduling this and running it.
             guard !activeSessions.isEmpty else { return }
+            let requested = selectedDisplayID
             do {
-                try await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset,
+                try await ScreenStreamer.shared.restart(displayID: requested, preset: preset,
                                                         codec: codec ?? ScreenStreamer.shared.currentCodec)
                 captureError = nil
+                // The chosen display was gone and capture fell back to another one.
+                let streamed = ScreenStreamer.shared.currentDisplay
+                if requested != nil, streamed != requested, selectedDisplayID == requested {
+                    selectedDisplayID = streamed
+                }
             } catch is CancellationError {
             } catch where ScreenStreamer.isDisplayUnavailable(error) {
                 // Nothing to capture until a display wakes or returns; the observers restart it then.
@@ -354,6 +393,7 @@ final class HostServer: ObservableObject {
     // MARK: Called by ClientSession
 
     func sessionDidAuthenticate(_ session: ClientSession, name: String) {
+        refreshDisplays()
         pendingSessions.removeAll { $0 === session }
         if !activeSessions.contains(where: { $0 === session }) {
             activeSessions.append(session)
@@ -367,6 +407,7 @@ final class HostServer: ObservableObject {
         session.sendHostState(HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping))
         session.sendRunningApps(appSwitcher.runningApps())
         session.sendHardwareControls(HardwareController.getState())
+        session.sendDisplays(displaysMessage)
 
         updateClientName()
         updateFrameGate()

@@ -4,11 +4,6 @@ import CoreMedia
 import CoreVideo
 import ScreenCaptureKit
 
-struct DisplayInfo: Identifiable, Equatable {
-    let id: CGDirectDisplayID
-    let label: String
-}
-
 typealias EncodedKeyframe = (data: Data, width: Int, height: Int, codec: RDCodec)
 
 /// State shared between the main actor and the capture / encoder threads.
@@ -120,7 +115,6 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         set { state.onVideoPacket = newValue }
     }
 
-    var onError: ((String) -> Void)?
     /// The system ended a running capture; the streamer has already let go of it.
     var onCaptureStopped: ((Error) -> Void)?
 
@@ -170,19 +164,6 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func setClientsReady(_ ready: Bool) {
         state.setClientsReady(ready)
-    }
-
-    func loadDisplays() async -> [DisplayInfo] {
-        let content: SCShareableContent
-        do {
-            content = try await SCShareableContent.current
-        } catch {
-            onError?("Screen recording permission is required. \(error.localizedDescription)")
-            return []
-        }
-        return content.displays.map {
-            DisplayInfo(id: $0.displayID, label: "\($0.width)×\($0.height)")
-        }
     }
 
     func start(displayID: CGDirectDisplayID?, preset newPreset: RDQualityPreset, codec: RDCodec = .hevc, forceRestart: Bool = false) async throws {

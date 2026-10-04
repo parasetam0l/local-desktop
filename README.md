@@ -14,6 +14,7 @@ Both apps speak the same custom TCP protocol (see [`Protocol.md`](Protocol.md)) 
 - **Auto-connection** — optionally dials the last paired Mac on launch (as soon as it appears on the network) and reconnects after drops with exponential backoff (1 s → 30 s, giving up after 5 minutes). A Mac that stops sharing tells the client not to reconnect.
 - **Hardware-Accelerated Video (HEVC & H.264)** — real-time hardware video compression via `VideoToolbox`, rendered with `AVSampleBufferDisplayLayer`.
 - **Live Adaptive Bitrate (ABR) & Anti-Bufferbloat** — RTT telemetry scales the bitrate (to the slowest connected client) and stale P-frames are dropped instead of queued when Wi-Fi backs up.
+- **Display picker** — on a Mac with several displays, choose which one to stream from the iPhone (session menu → Display) or the Mac's menu bar. Every connected device follows the choice, and pointer input maps to that display.
 - **Automatic Display Wake** — multi-vector background wake pulses wake sleeping displays immediately upon connection without manual interaction.
 - **Wake-on-LAN** — tapping a recent Mac sends a magic packet first and keeps retrying for a minute while it wakes.
 - **Mac identity pinning** — every Mac has a long-term Ed25519 identity. The iPhone pins it when pairing and refuses to talk to anything else claiming to be that Mac.

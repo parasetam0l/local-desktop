@@ -47,6 +47,8 @@ enum RDWire: UInt8 {
     case setQuality = 0x50
     case hostState = 0x52
     case wakeDisplay = 0x53
+    case displays = 0x54
+    case selectDisplay = 0x55
     case bye = 0x60
 
     // App Switcher & Actions
@@ -429,6 +431,32 @@ enum RDSystemActionType: String, Codable {
 
 struct RDSystemActionMsg: Codable {
     let action: RDSystemActionType
+}
+
+// MARK: - Displays
+
+/// One of the Mac's displays. Sizes are in points, as macOS lists them.
+struct RDDisplay: Codable, Equatable, Identifiable {
+    let id: UInt32          // CGDirectDisplayID
+    let name: String        // e.g. "Built-in Retina Display"
+    let width: Int
+    let height: Int
+    let isMain: Bool        // the one with the menu bar
+
+    var resolution: String { "\(width)×\(height)" }
+}
+
+/// The Mac's displays and the one being streamed. The host sends it after
+/// authentication and whenever either changes.
+struct RDDisplaysMsg: Codable, Equatable {
+    let displays: [RDDisplay]
+    let selectedId: UInt32?
+}
+
+/// Asks the host to stream another display. It applies to every connected client,
+/// like choosing it in the Mac's menu.
+struct RDSelectDisplayMsg: Codable {
+    let id: UInt32
 }
 
 // MARK: - Hardware Controls

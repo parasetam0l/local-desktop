@@ -239,6 +239,30 @@ final class FramingTests: XCTestCase {
     }
 }
 
+final class DisplayMessageTests: XCTestCase {
+    func testDisplaysRoundTripWithTheDocumentedKeys() throws {
+        let message = RDDisplaysMsg(
+            displays: [RDDisplay(id: 1, name: "Built-in Retina Display", width: 1728, height: 1117, isMain: true),
+                       RDDisplay(id: 4_278_190_082, name: "LG UltraFine", width: 2560, height: 1440, isMain: false)],
+            selectedId: 4_278_190_082)
+        let data = RDJSON.encode(message)
+        XCTAssertEqual(RDJSON.decode(RDDisplaysMsg.self, from: data), message)
+
+        // Protocol.md documents these field names; older or newer peers rely on them.
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["displays", "selectedId"])
+        let first = try XCTUnwrap((json["displays"] as? [[String: Any]])?.first)
+        XCTAssertEqual(Set(first.keys), ["id", "name", "width", "height", "isMain"])
+        XCTAssertEqual(message.displays[0].resolution, "1728×1117")
+    }
+
+    func testSelectionIsOptional() {
+        let data = Data(#"{"displays":[]}"#.utf8)
+        XCTAssertEqual(RDJSON.decode(RDDisplaysMsg.self, from: data), RDDisplaysMsg(displays: [], selectedId: nil))
+        XCTAssertEqual(RDJSON.decode(RDSelectDisplayMsg.self, from: Data(#"{"id":2}"#.utf8))?.id, 2)
+    }
+}
+
 final class PINSecurityTests: XCTestCase {
     func testFormat() {
         XCTAssertTrue(PINHasher.isValidFormat("0429"))

@@ -107,6 +107,8 @@ struct SessionView: View {
                         touchpadMode: $touchpadMode,
                         app: app,
                         session: session,
+                        displays: session.displays,
+                        selectedDisplayId: session.selectedDisplayId,
                         canvasController: canvasController,
                         onDismiss: onDismiss
                     )

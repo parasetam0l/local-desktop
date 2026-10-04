@@ -38,7 +38,7 @@ struct MenuBarState {
     var hasPIN = false
     var preset: RDQualityPreset = .high
     var codec: RDCodec = .hevc
-    var displays: [DisplayInfo] = []
+    var displays: [RDDisplay] = []
     var selectedDisplay: CGDirectDisplayID?
     var devices: [TrustedDevice] = []
     var launchAtLogin = false
@@ -361,8 +361,8 @@ struct MenuBarContent: View {
                         get: { state.selectedDisplay ?? state.displays.first?.id ?? 0 },
                         set: { [actions] in actions.setDisplay($0) }
                     )) {
-                        ForEach(Array(state.displays.enumerated()), id: \.element.id) { index, display in
-                            Text("Display \(index + 1) · \(display.label)").tag(display.id)
+                        ForEach(state.displays) { display in
+                            Text("\(display.name) · \(display.resolution)").tag(display.id)
                         }
                     }
                     .labelsHidden()

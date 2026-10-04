@@ -239,6 +239,11 @@ final class ClientSession {
         send(.hardwareControlsState, json: controls)
     }
 
+    func sendDisplays(_ message: RDDisplaysMsg) {
+        guard phase == .active else { return }
+        send(.displays, json: message)
+    }
+
     // MARK: Receiving
 
     private func receiveLoop() {
@@ -419,7 +424,7 @@ final class ClientSession {
         case .mouseMoveAbs, .mouseMoveRel, .mouseDown, .mouseUp, .scroll, .keyEvent, .textEvent:
             InputInjector.tickleUserActivity()
             handleInput(wire, payload: payload)
-        case .requestApps, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls:
+        case .requestApps, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay:
             handleControl(wire, payload: payload)
         default:
             break
@@ -569,6 +574,10 @@ final class ClientSession {
                 HardwareController.lockScreen()
             }
             sendHardwareControls(HardwareController.getState())
+
+        case .selectDisplay:
+            guard let msg = RDJSON.decode(RDSelectDisplayMsg.self, from: payload) else { return }
+            server.setDisplay(msg.id)
 
         default:
             break

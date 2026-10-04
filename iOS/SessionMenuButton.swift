@@ -4,6 +4,9 @@ struct SessionMenuButton: View {
     @Binding var touchpadMode: Bool
     @ObservedObject var app: AppModel
     let session: ClientSession
+    /// Passed in rather than read from `session`, which this view doesn't observe.
+    let displays: [RDDisplay]
+    let selectedDisplayId: UInt32?
     @ObservedObject var canvasController: CanvasController
     let onDismiss: () -> Void
     @State private var showHardwareSheet = false
@@ -14,6 +17,25 @@ struct SessionMenuButton: View {
                 showHardwareSheet = true
             } label: {
                 Label("Mac Hardware Controls…", systemImage: "slider.horizontal.3")
+            }
+
+            if displays.count > 1 {
+                Menu {
+                    ForEach(displays) { display in
+                        Button {
+                            session.selectDisplay(display.id)
+                        } label: {
+                            if display.id == selectedDisplayId {
+                                Label("\(display.name) · \(display.resolution)", systemImage: "checkmark")
+                            } else {
+                                Text("\(display.name) · \(display.resolution)")
+                            }
+                        }
+                    }
+                } label: {
+                    let current = displays.first { $0.id == selectedDisplayId }
+                    Label("Display: \(current?.name ?? "Choose")", systemImage: "display.2")
+                }
             }
 
             Button {

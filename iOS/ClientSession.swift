@@ -38,6 +38,9 @@ final class ClientSession: ObservableObject {
     @Published private(set) var isDisplaySleeping = false
     @Published private(set) var runningApps: [RDRunningApp] = []
     @Published private(set) var hardwareControls = RDHardwareControls(brightness: 0.5, volume: 50, isMuted: false)
+    /// The Mac's displays and the one being streamed (Macs before 1.2.1 don't send them).
+    @Published private(set) var displays: [RDDisplay] = []
+    @Published private(set) var selectedDisplayId: UInt32?
     @Published var showDebugHUD = false
     @Published private(set) var liveFPS: Double = 0.0
     @Published private(set) var liveBitrateMbps: Double = 0.0
@@ -415,6 +418,11 @@ final class ClientSession: ObservableObject {
             guard let msg = RDJSON.decode(RDHardwareControls.self, from: payload) else { break }
             hardwareControls = msg
 
+        case .displays:
+            guard let msg = RDJSON.decode(RDDisplaysMsg.self, from: payload) else { break }
+            displays = msg.displays
+            selectedDisplayId = msg.selectedId
+
         case .bye:
             let msg = RDJSON.decode(ByeMsg.self, from: payload)
             // The host said goodbye on purpose; reconnecting on our own would just loop.
@@ -713,6 +721,13 @@ final class ClientSession: ObservableObject {
 
     func triggerSystemAction(_ action: RDSystemActionType) {
         sendJSON(.systemAction, RDSystemActionMsg(action: action))
+    }
+
+    /// Streams another of the Mac's displays; the Mac confirms with a new `displays` message.
+    func selectDisplay(_ id: UInt32) {
+        guard phase == .connected, id != selectedDisplayId, displays.contains(where: { $0.id == id }) else { return }
+        selectedDisplayId = id
+        sendJSON(.selectDisplay, RDSelectDisplayMsg(id: id))
     }
 
     func requestHardwareControls() {
