@@ -188,9 +188,15 @@ only on the devices registered with the team when the release was built.
 - **The device list is public:** the profile inside the IPA lists the UDIDs
   of the devices it installs on, and anyone can download the IPA. Keep only
   your own devices enabled.
-- **Expiry:** an Ad Hoc build runs for a year from its release (the run's
-  summary has the date); installing a newer release resets it. Without
-  one, the app stops opening after that date.
+- **Expiry:** the Ad Hoc profile is valid for a year from when Xcode
+  created it, and Xcode reuses it for every release until then, so all
+  installed releases stop opening on the same date (the run's summary has
+  it; the current profile expires on 4 October 2027). From 60 days before,
+  the Release workflow warns. Then delete the profile at
+  [developer.apple.com](https://developer.apple.com/account/resources/profiles/list)
+  → Profiles → "iOS Team Ad Hoc Provisioning Profile: localdesktop.client"
+  and make a release: Xcode creates a new profile for another year, and
+  installing that release keeps the app opening.
 - **Development builds** (`./build.sh --client --install`, or Xcode) still
   work as before. They're version 1.0, so they offer the latest release,
   which replaces them when installed.

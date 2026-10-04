@@ -197,6 +197,12 @@ jobs:
           expires="$(plutil -extract ExpirationDate raw -o - "$dir/profile.plist")"
           (( devices > 0 )) || { echo "::error::The Ad Hoc profile lists no devices"; exit 1; }
           echo "iPhone and iPad app: Ad Hoc for $devices registered devices, runs until $expires." >> "$GITHUB_STEP_SUMMARY"
+          # Xcode reuses the profile until it expires, and every release signed with
+          # it stops opening then.
+          days_left=$(( ($(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$expires" +%s) - $(date +%s)) / 86400 ))
+          if (( days_left < 60 )); then
+            echo "::warning::The Ad Hoc profile expires in $days_left days ($expires). Delete it in the developer account and release again for a new one (docs/RELEASING.md)."
+          fi
 
       - name: Notarize the app
         env:
