@@ -17,6 +17,8 @@ final class HostServer: ObservableObject {
     @Published var selectedDisplayID: CGDirectDisplayID?
     @Published var preset: RDQualityPreset = .high
     @Published var lastError: String?
+    /// Why screen capture last failed; cleared once capture runs again.
+    @Published var captureError: String?
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var screenGranted = false
     @Published private(set) var isHostLocked = false
@@ -61,6 +63,8 @@ final class HostServer: ObservableObject {
     private var pendingSessions: [ClientSession] = []
     /// All authenticated, streaming sessions.
     private(set) var activeSessions: [ClientSession] = []
+    /// When capture last retried after losing its display.
+    private var lastDisplayLossRetry = Date.distantPast
 
     var bonjourName: String {
         "\(HostServer.computerName) [\(String(AuthStore.shared.serverId.prefix(4)))]"
@@ -81,6 +85,9 @@ final class HostServer: ObservableObject {
         ScreenStreamer.shared.onError = { [weak self] message in
             self?.lastError = message
         }
+        ScreenStreamer.shared.onCaptureStopped = { [weak self] error in
+            self?.captureDidStop(error)
+        }
 
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked")) { server, _ in
             server.isHostLocked = true
@@ -99,6 +106,12 @@ final class HostServer: ObservableObject {
             server.isDisplaySleeping = false
             server.broadcastHostState()
             if !server.activeSessions.isEmpty {
+                server.restartCapture()
+            }
+        }
+        // Displays came or went (lid opened, display plugged in); pick capture back up.
+        observe(NotificationCenter.default, NSApplication.didChangeScreenParametersNotification) { server, _ in
+            if !server.activeSessions.isEmpty, !ScreenStreamer.shared.isRunning {
                 server.restartCapture()
             }
         }
@@ -280,13 +293,32 @@ final class HostServer: ObservableObject {
             do {
                 try await ScreenStreamer.shared.restart(displayID: selectedDisplayID, preset: preset,
                                                         codec: codec ?? ScreenStreamer.shared.currentCodec)
+                captureError = nil
             } catch is CancellationError {
+            } catch where ScreenStreamer.isDisplayUnavailable(error) {
+                // Nothing to capture until a display wakes or returns; the observers restart it then.
             } catch {
-                lastError = "Screen capture: \(error.localizedDescription)"
+                captureError = "Screen capture: \(error.localizedDescription)"
             }
             if activeSessions.isEmpty {
                 ScreenStreamer.shared.stop()
             }
+        }
+    }
+
+    /// The system ended capture. A display that went away is routine, so capture moves to
+    /// another display if there is one and otherwise waits quietly for one to come back.
+    private func captureDidStop(_ error: Error) {
+        guard !activeSessions.isEmpty else { return }
+        guard ScreenStreamer.isDisplayUnavailable(error) else {
+            captureError = "Screen capture stopped: \(error.localizedDescription)"
+            return
+        }
+        // One retry finds another display if one is left. Should that capture die
+        // too, the wake and screen-change observers restart it instead of a loop here.
+        if Date().timeIntervalSince(lastDisplayLossRetry) > 5 {
+            lastDisplayLossRetry = Date()
+            restartCapture()
         }
     }
 

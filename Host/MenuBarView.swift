@@ -31,7 +31,7 @@ struct MenuBarView: View {
         state.missingSetup = server.missingSetup
         state.failedPINAttempts = auth.lockout.failures
         state.pinLockedUntil = auth.lockout.lockedUntil
-        state.lastError = server.lastError
+        state.lastError = server.lastError ?? server.captureError
         state.hasPIN = auth.hasPIN
         state.preset = server.preset
         state.codec = ScreenStreamer.shared.currentCodec
@@ -59,7 +59,10 @@ struct MenuBarView: View {
             revoke: { AuthStore.shared.revoke(ids: [$0]) },
             changePIN: { await AuthStore.shared.setPIN($0) },
             clearLockout: { AuthStore.shared.clearLockout() },
-            dismissError: { HostServer.shared.lastError = nil },
+            dismissError: {
+                HostServer.shared.lastError = nil
+                HostServer.shared.captureError = nil
+            },
             setLaunchAtLogin: { LaunchManager.shared.setLaunchOnRestart($0) },
             openLoginItems: { LaunchManager.shared.openSystemSettings() },
             checkForUpdates: { AppUpdater.shared.checkForUpdates() },

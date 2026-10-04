@@ -121,6 +121,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     var onError: ((String) -> Void)?
+    /// The system ended a running capture; the streamer has already let go of it.
+    var onCaptureStopped: ((Error) -> Void)?
 
     private(set) var currentDisplay: CGDirectDisplayID = CGMainDisplayID()
     var frameSize: CGSize { state.frameSize }
@@ -143,6 +145,24 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     var isRunning: Bool { stream != nil }
+
+    private static let errorDomain = "rd.capture"
+    private static let noDisplayCode = 1
+
+    /// Whether capture failed only because no display is available, as happens while the
+    /// lid is closed, the display sleeps or it's unplugged. That clears up on its own.
+    static func isDisplayUnavailable(_ error: Error) -> Bool {
+        let error = error as NSError
+        switch error.domain {
+        case SCStreamErrorDomain:
+            return [SCStreamError.Code.noCaptureSource, .noDisplayList]
+                .map(\.rawValue).contains(error.code)
+        case errorDomain:
+            return error.code == noDisplayCode
+        default:
+            return false
+        }
+    }
 
     func requestKeyframe() {
         state.requestKeyframe()
@@ -179,7 +199,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         let content = try await SCShareableContent.current
         guard myGeneration == generation else { throw CancellationError() }
         guard let display = content.displays.first(where: { $0.displayID == target }) ?? content.displays.first else {
-            throw NSError(domain: "rd.capture", code: 1,
+            throw NSError(domain: Self.errorDomain, code: Self.noDisplayCode,
                           userInfo: [NSLocalizedDescriptionKey: "No capturable display found"])
         }
 
@@ -322,9 +342,12 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: SCStreamDelegate
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
-        let errDesc = error.localizedDescription
+        let stopped = ObjectIdentifier(stream)
         Task { @MainActor in
-            self.onError?("Screen capture stopped: \(errDesc)")
+            // A stream that was already replaced or stopped isn't news.
+            guard let current = self.stream, ObjectIdentifier(current) == stopped else { return }
+            self.teardownCapture()
+            self.onCaptureStopped?(error)
         }
     }
 }
