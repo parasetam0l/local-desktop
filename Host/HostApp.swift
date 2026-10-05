@@ -65,11 +65,17 @@ struct LocalDesktopApp: App {
                 .environmentObject(auth)
                 .environmentObject(launchManager)
         } label: {
-            // An arrow badge while an update is waiting to be looked at.
-            Image(systemName: updater.pendingUpdateVersion == nil ? "desktopcomputer" : "desktopcomputer.and.arrow.down")
-                .accessibilityLabel(updater.pendingUpdateVersion == nil
-                                    ? "LocalDesktop"
-                                    : "LocalDesktop, update available")
+            // A lock while this Mac's own keyboard and trackpad are blocked, so someone at
+            // it can tell why; an arrow badge while an update is waiting to be looked at.
+            if server.isBlockingLocalInput {
+                Image(systemName: "lock.display")
+                    .accessibilityLabel("LocalDesktop, this Mac's keyboard and trackpad are blocked")
+            } else {
+                Image(systemName: updater.pendingUpdateVersion == nil ? "desktopcomputer" : "desktopcomputer.and.arrow.down")
+                    .accessibilityLabel(updater.pendingUpdateVersion == nil
+                                        ? "LocalDesktop"
+                                        : "LocalDesktop, update available")
+            }
         }
         .menuBarExtraStyle(.window)
     }

@@ -7,6 +7,7 @@ struct SessionMenuButton: View {
     /// Passed in rather than read from `session`, which this view doesn't observe.
     let displays: [RDDisplay]
     let selectedDisplayId: UInt32?
+    let blocksMacInput: Bool?
     @ObservedObject var canvasController: CanvasController
     let onDismiss: () -> Void
     @State private var showHardwareSheet = false
@@ -17,6 +18,12 @@ struct SessionMenuButton: View {
                 showHardwareSheet = true
             } label: {
                 Label("Mac Hardware Controls…", systemImage: "slider.horizontal.3")
+            }
+
+            if let blocksMacInput {
+                Toggle(isOn: Binding(get: { blocksMacInput }, set: { session.setBlocksMacInput($0) })) {
+                    Label("Block Mac's Keyboard & Trackpad", systemImage: "lock.display")
+                }
             }
 
             // Empty with a Mac older than 1.2.1, which doesn't send its displays.

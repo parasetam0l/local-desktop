@@ -49,6 +49,7 @@ enum RDWire: UInt8 {
     case wakeDisplay = 0x53
     case displays = 0x54
     case selectDisplay = 0x55
+    case setLocalInputBlock = 0x56
     case bye = 0x60
 
     // App Switcher & Actions
@@ -286,6 +287,15 @@ struct RequestKeyframeMsg: Codable {
 struct HostStateMsg: Codable {
     var isLocked: Bool
     var isDisplaySleeping: Bool
+    /// Whether the Mac blocks its own keyboard and trackpad while devices are connected
+    /// (nil from Macs before 1.2.4, which can't).
+    var blocksLocalInput: Bool? = nil
+}
+
+/// Turns the Mac's setting for blocking its own keyboard and trackpad during remote
+/// sessions on or off. It applies to every client, like the switch in the Mac's menu.
+struct RDSetLocalInputBlockMsg: Codable {
+    let enabled: Bool
 }
 
 struct SetQualityMsg: Codable {

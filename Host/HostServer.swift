@@ -28,6 +28,11 @@ final class HostServer: ObservableObject {
     @Published private(set) var screenGranted = false
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
+    /// The setting: block this Mac's own keyboard and trackpad while devices are connected.
+    @Published private(set) var blocksLocalInput = UserDefaults.standard.bool(forKey: HostServer.blocksLocalInputKey)
+    /// Whether they're blocked right now.
+    @Published private(set) var isBlockingLocalInput = false
+    @Published private(set) var localInputBlockError: String?
 
     static let computerName: String = Host.current().localizedName ?? "Mac"
 
@@ -36,9 +41,11 @@ final class HostServer: ObservableObject {
     private static let maxPendingSessionsPerAddress = 2
     /// Remembers whether the user wants sharing on, so a crash relaunch restores it.
     private static let sharingWantedKey = "rd.sharingWanted"
+    private static let blocksLocalInputKey = "rd.blocksLocalInput"
 
     let appSwitcher = AppSwitcher()
     private let power = PowerAssertions()
+    private let inputBlocker = LocalInputBlocker()
 
     /// First IPv4 address on a physical interface (en0…), for display in the menu.
     static func primaryLANAddress() -> String? {
@@ -249,6 +256,7 @@ final class HostServer: ObservableObject {
             session.close(sendingBye: RDByeReason.hostStopped)
         }
         power.release()
+        updateLocalInputBlocking()
         listener?.cancel()
         listener = nil
         ScreenStreamer.shared.stop()
@@ -404,13 +412,14 @@ final class HostServer: ObservableObject {
         InputInjector.wakeDisplay(within: streamedDisplayBounds)
         isDisplaySleeping = false
 
-        session.sendHostState(HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping))
+        session.sendHostState(hostStateMessage)
         session.sendRunningApps(appSwitcher.runningApps())
         session.sendHardwareControls(HardwareController.getState())
         session.sendDisplays(displaysMessage)
 
         updateClientName()
         updateFrameGate()
+        updateLocalInputBlocking()
         if let keyframe = ScreenStreamer.shared.lastKeyframe {
             session.sendVideoFrame(keyframe.data, isKeyframe: true, width: keyframe.width, height: keyframe.height, codec: keyframe.codec)
         }
@@ -421,6 +430,7 @@ final class HostServer: ObservableObject {
         pendingSessions.removeAll { $0 === session }
         activeSessions.removeAll { $0 === session }
         updateFrameGate()
+        updateLocalInputBlocking()
         if activeSessions.isEmpty {
             clientName = nil
             power.release()
@@ -477,8 +487,35 @@ final class HostServer: ObservableObject {
         broadcastRunningApps()
     }
 
+    var hostStateMessage: HostStateMsg {
+        HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping, blocksLocalInput: blocksLocalInput)
+    }
+
+    /// Changes the setting, from the menu or a client, and tells every client.
+    func setBlocksLocalInput(_ on: Bool) {
+        guard on != blocksLocalInput else { return }
+        blocksLocalInput = on
+        UserDefaults.standard.set(on, forKey: Self.blocksLocalInputKey)
+        updateLocalInputBlocking()
+        broadcastHostState()
+    }
+
+    /// Blocks the Mac's own input while the setting is on and a device is connected.
+    private func updateLocalInputBlocking() {
+        let wanted = blocksLocalInput && !activeSessions.isEmpty
+        if wanted, !inputBlocker.isActive {
+            localInputBlockError = inputBlocker.start()
+                ? nil
+                : "macOS didn't allow it. Check that LocalDesktop is on under Privacy & Security → Accessibility."
+        } else if !wanted {
+            inputBlocker.stop()
+            if !blocksLocalInput { localInputBlockError = nil }
+        }
+        isBlockingLocalInput = inputBlocker.isActive
+    }
+
     func broadcastHostState() {
-        let msg = HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping)
+        let msg = hostStateMessage
         for s in activeSessions {
             s.sendHostState(msg)
         }

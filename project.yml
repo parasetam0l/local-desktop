@@ -117,6 +117,7 @@ targets:
       - Shared/RDCrypto.swift
       - Shared/RDSecureChannel.swift
       - Host/PINSecurity.swift
+      - Host/LocalInputBlocker.swift
       - iOS/ClientConnection.swift
       - iOS/AppUpdater.swift
 schemes:

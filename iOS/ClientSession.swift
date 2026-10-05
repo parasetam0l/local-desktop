@@ -41,6 +41,8 @@ final class ClientSession: ObservableObject {
     /// The Mac's displays and the one being streamed (Macs before 1.2.1 don't send them).
     @Published private(set) var displays: [RDDisplay] = []
     @Published private(set) var selectedDisplayId: UInt32?
+    /// Whether the Mac blocks its own keyboard and trackpad during sessions (nil before 1.2.4).
+    @Published private(set) var blocksMacInput: Bool?
     @Published var showDebugHUD = false
     @Published private(set) var liveFPS: Double = 0.0
     @Published private(set) var liveBitrateMbps: Double = 0.0
@@ -409,6 +411,7 @@ final class ClientSession: ObservableObject {
             guard let msg = RDJSON.decode(HostStateMsg.self, from: payload) else { break }
             isHostLocked = msg.isLocked
             isDisplaySleeping = msg.isDisplaySleeping
+            blocksMacInput = msg.blocksLocalInput
 
         case .runningApps:
             guard let msg = RDJSON.decode(RDRunningAppsMsg.self, from: payload) else { break }
@@ -728,6 +731,14 @@ final class ClientSession: ObservableObject {
         guard phase == .connected, id != selectedDisplayId, displays.contains(where: { $0.id == id }) else { return }
         selectedDisplayId = id
         sendJSON(.selectDisplay, RDSelectDisplayMsg(id: id))
+    }
+
+    /// Changes the Mac's setting for blocking its own keyboard and trackpad; the Mac
+    /// confirms with `hostState`.
+    func setBlocksMacInput(_ on: Bool) {
+        guard phase == .connected, blocksMacInput != nil else { return }
+        blocksMacInput = on
+        sendJSON(.setLocalInputBlock, RDSetLocalInputBlockMsg(enabled: on))
     }
 
     func requestHardwareControls() {

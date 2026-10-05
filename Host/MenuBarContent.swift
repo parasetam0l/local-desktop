@@ -40,6 +40,9 @@ struct MenuBarState {
     var codec: RDCodec = .hevc
     var displays: [RDDisplay] = []
     var selectedDisplay: CGDirectDisplayID?
+    var blocksLocalInput = false
+    var isBlockingLocalInput = false
+    var localInputBlockError: String?
     var devices: [TrustedDevice] = []
     var launchAtLogin = false
     var launchNeedsApproval = false
@@ -65,6 +68,7 @@ struct MenuBarActions {
     var setPreset: Action<RDQualityPreset> = { _ in }
     var setCodec: Action<RDCodec> = { _ in }
     var setDisplay: Action<CGDirectDisplayID> = { _ in }
+    var setBlocksLocalInput: Action<Bool> = { _ in }
     var revoke: Action<String> = { _ in }
     var changePIN: @MainActor @Sendable (String) async -> Void = { _ in }
     var clearLockout: Command = {}
@@ -369,6 +373,25 @@ struct MenuBarContent: View {
                     .fixedSize()
                 }
             }
+            Divider()
+            Toggle(isOn: Binding(get: { state.blocksLocalInput }, set: { [actions] in actions.setBlocksLocalInput($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Block this Mac's keyboard and trackpad")
+                    Group {
+                        if let error = state.localInputBlockError {
+                            Text(error).foregroundStyle(.red)
+                        } else if state.isBlockingLocalInput {
+                            Text("Blocked now. Only connected devices can type and click.")
+                        } else {
+                            Text("While a device is connected. Input comes back when the last one disconnects.")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
         }
     }
 

@@ -424,7 +424,8 @@ final class ClientSession {
         case .mouseMoveAbs, .mouseMoveRel, .mouseDown, .mouseUp, .scroll, .keyEvent, .textEvent:
             InputInjector.tickleUserActivity()
             handleInput(wire, payload: payload)
-        case .requestApps, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay:
+        case .requestApps, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay,
+             .setLocalInputBlock:
             handleControl(wire, payload: payload)
         default:
             break
@@ -578,6 +579,12 @@ final class ClientSession {
         case .selectDisplay:
             guard let msg = RDJSON.decode(RDSelectDisplayMsg.self, from: payload) else { return }
             server.setDisplay(msg.id)
+
+        case .setLocalInputBlock:
+            guard let msg = RDJSON.decode(RDSetLocalInputBlockMsg.self, from: payload) else { return }
+            server.setBlocksLocalInput(msg.enabled)
+            // Confirms the setting even when it didn't change.
+            sendHostState(server.hostStateMessage)
 
         default:
             break

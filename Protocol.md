@@ -42,10 +42,11 @@ newer message types don't break older peers.
 | 0x41 | pong                  | S → C 🔒  | `{t}` |
 | 0x42 | networkStats          | C → S 🔒  | `{rttMs, decodeMs, fps, droppedFrames}` |
 | 0x50 | setQuality            | C → S 🔒  | `{preset, cursor?, codec?}` (preset: 0 low, 1 balanced, 2 high, 3 sharp; codec: 1 h264, 2 hevc) |
-| 0x52 | hostState             | S → C 🔒  | `{isLocked, isDisplaySleeping}` |
+| 0x52 | hostState             | S → C 🔒  | `{isLocked, isDisplaySleeping, blocksLocalInput?}` — `blocksLocalInput`: the Mac drops its own keyboard and trackpad input while clients are connected (absent before 1.2.4) |
 | 0x53 | wakeDisplay           | C → S 🔒  | empty |
 | 0x54 | displays              | S → C 🔒  | `{displays: [{id, name, width, height, isMain}], selectedId?}` — after authentication and whenever the displays or the streamed one change (sizes in points) |
 | 0x55 | selectDisplay         | C → S 🔒  | `{id}` — stream that display; applies to every client. Ignored unless `id` is in the last `displays` |
+| 0x56 | setLocalInputBlock    | C → S 🔒  | `{enabled}` — the Mac's setting for blocking its own keyboard and trackpad during sessions; answered with `hostState` |
 | 0x60 | bye                   | both 🔒   | `{reason?}` — `host_stopped` means the client must not reconnect on its own |
 | 0x70 | requestApps           | C → S 🔒  | empty |
 | 0x71 | runningApps           | S → C 🔒  | `{apps: [{bundleId, name, isActive, isHidden, iconPNG?}]}` (icon = base64 PNG) |

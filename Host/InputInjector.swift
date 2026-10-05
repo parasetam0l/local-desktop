@@ -8,7 +8,13 @@ import Carbon
 /// Posts mouse, scroll, and keyboard events into the system event stream.
 @MainActor
 enum InputInjector {
-    private static let source = CGEventSource(stateID: .hidSystemState)
+    /// Every event comes from this source, which tags them so `LocalInputBlocker` can
+    /// tell them from the Mac's own keyboard and trackpad.
+    private static let source: CGEventSource? = {
+        let source = CGEventSource(stateID: .hidSystemState)
+        source?.userData = LocalInputBlocker.injectedEventTag
+        return source
+    }()
     private static var trackedPosition: CGPoint?
     private static var trackedAt: TimeInterval = 0
     private static var pressedButtons = Set<Int>()
@@ -60,7 +66,7 @@ enum InputInjector {
             // Buttons are ignored for `.mouseMoved`; `.left` just satisfies the initializer.
             (type, button) = (.mouseMoved, .left)
         }
-        if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) {
+        if let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) {
             event.post(tap: .cghidEventTap)
         }
     }

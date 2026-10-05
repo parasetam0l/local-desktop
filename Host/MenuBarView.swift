@@ -37,6 +37,9 @@ struct MenuBarView: View {
         state.codec = ScreenStreamer.shared.currentCodec
         state.displays = server.displays
         state.selectedDisplay = server.selectedDisplayID
+        state.blocksLocalInput = server.blocksLocalInput
+        state.isBlockingLocalInput = server.isBlockingLocalInput
+        state.localInputBlockError = server.localInputBlockError
         state.devices = auth.devices
         state.launchAtLogin = launchManager.isEnabled
         state.launchNeedsApproval = launchManager.status == .requiresApproval
@@ -56,6 +59,7 @@ struct MenuBarView: View {
             setPreset: { HostServer.shared.setPreset($0) },
             setCodec: { HostServer.shared.setCodec($0) },
             setDisplay: { HostServer.shared.setDisplay($0) },
+            setBlocksLocalInput: { HostServer.shared.setBlocksLocalInput($0) },
             revoke: { AuthStore.shared.revoke(ids: [$0]) },
             changePIN: { await AuthStore.shared.setPIN($0) },
             clearLockout: { AuthStore.shared.clearLockout() },

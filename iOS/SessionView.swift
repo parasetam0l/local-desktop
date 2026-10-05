@@ -109,6 +109,7 @@ struct SessionView: View {
                         session: session,
                         displays: session.displays,
                         selectedDisplayId: session.selectedDisplayId,
+                        blocksMacInput: session.blocksMacInput,
                         canvasController: canvasController,
                         onDismiss: onDismiss
                     )
