@@ -15,6 +15,11 @@ enum InputInjector {
         source?.userData = LocalInputBlocker.injectedEventTag
         return source
     }()
+    /// The modifiers the client holds down. Pointer and scroll events carry exactly these:
+    /// an event from `source` otherwise picks up the modifiers held on the Mac's own
+    /// keyboard, even while `LocalInputBlocker` drops that keyboard, so a Control held
+    /// there turned every click into a right-click.
+    private static var heldModifiers: CGEventFlags = []
     private static var trackedPosition: CGPoint?
     private static var trackedAt: TimeInterval = 0
     private static var pressedButtons = Set<Int>()
@@ -67,6 +72,7 @@ enum InputInjector {
             (type, button) = (.mouseMoved, .left)
         }
         if let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) {
+            event.flags = heldModifiers
             event.post(tap: .cghidEventTap)
         }
     }
@@ -166,6 +172,7 @@ enum InputInjector {
                                mouseCursorPosition: position,
                                mouseButton: mouseButton) {
             event.setIntegerValueField(.mouseEventClickState, value: clickCount)
+            event.flags = heldModifiers
             event.post(tap: .cghidEventTap)
         }
     }
@@ -180,6 +187,7 @@ enum InputInjector {
                                mouseCursorPosition: position,
                                mouseButton: mouseButton) {
             event.setIntegerValueField(.mouseEventClickState, value: clickCount)
+            event.flags = heldModifiers
             event.post(tap: .cghidEventTap)
         }
     }
@@ -223,6 +231,7 @@ enum InputInjector {
             if precise {
                 event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
             }
+            event.flags = heldModifiers
             event.post(tap: .cghidEventTap)
         }
     }
@@ -442,11 +451,14 @@ enum InputInjector {
                     }
                 }
             } else {
-                // Fallback for unmapped characters (emojis, complex scripts)
+                // Fallback for unmapped characters (emojis, complex scripts). Flags are
+                // cleared so a modifier held on the Mac can't turn key 0 into, say, ⌘A.
                 let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+                down?.flags = []
                 down?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
                 down?.post(tap: .cghidEventTap)
                 let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+                up?.flags = []
                 up?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: &buffer)
                 up?.post(tap: .cghidEventTap)
             }
@@ -470,6 +482,7 @@ enum InputInjector {
                 }
                 event.flags = cleanFlags
                 event.post(tap: .cghidEventTap)
+                heldModifiers = cleanFlags
             }
         } else {
             if let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) {
