@@ -14,6 +14,10 @@ import Foundation
 /// event taps, so typing into one isn't blocked. Key releases pass so nothing stays
 /// pressed. A volume key held when blocking starts keeps acting until it stops, because
 /// its release never reaches the tap.
+///
+/// Sessions run on the main queue, so anything that stalls it, such as a modal alert,
+/// stops sessions from ending or injecting input, and only the Mac's own input can clear
+/// it. So blocking lets input through while the main queue is stuck.
 final class LocalInputBlocker: @unchecked Sendable {
     /// `InputInjector` sets this as the user data of every event it posts.
     static let injectedEventTag: Int64 = 0x4C44_6573_6B74 // "LDeskt"
@@ -23,6 +27,10 @@ final class LocalInputBlocker: @unchecked Sendable {
     private var runLoop: CFRunLoop?
     /// Where LocalDesktop last put the pointer; set before the tap starts, then only on its thread.
     private var heldPosition: CGPoint?
+    /// How long the main queue may go quiet before the Mac's own input passes.
+    static let mainQueueStallLimit: TimeInterval = 3
+    private var lastMainQueueBeat: TimeInterval?
+    private var heartbeat: DispatchSourceTimer?
 
     var isActive: Bool { lock.withLock { tap != nil } }
 
@@ -60,10 +68,33 @@ final class LocalInputBlocker: @unchecked Sendable {
         thread.qualityOfService = .userInteractive
         thread.start()
         started.wait()
+        if created { startHeartbeat() }
         return created
     }
 
+    /// Runs on the same queue as sessions, so it stops exactly when they do.
+    private func startHeartbeat() {
+        noteMainQueueAlive()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(200))
+        timer.setEventHandler { [weak self] in self?.noteMainQueueAlive() }
+        timer.resume()
+        heartbeat = timer
+    }
+
+    func noteMainQueueAlive(at time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        lock.withLock { lastMainQueueBeat = time }
+    }
+
+    private var isMainQueueStalled: Bool {
+        guard let beat = lock.withLock({ lastMainQueueBeat }) else { return false }
+        return ProcessInfo.processInfo.systemUptime - beat > Self.mainQueueStallLimit
+    }
+
     func stop() {
+        heartbeat?.cancel()
+        heartbeat = nil
+        lock.withLock { lastMainQueueBeat = nil }
         let (tap, runLoop) = lock.withLock {
             defer {
                 self.tap = nil
@@ -100,7 +131,7 @@ final class LocalInputBlocker: @unchecked Sendable {
         }
         // A key held when blocking started would otherwise stay pressed. A release does
         // nothing on its own.
-        if Self.isRelease(type, event) { return Unmanaged.passUnretained(event) }
+        if Self.isRelease(type, event) || isMainQueueStalled { return Unmanaged.passUnretained(event) }
         if isPointerMove, let heldPosition {
             CGWarpMouseCursorPosition(heldPosition)
             CGAssociateMouseAndMouseCursorPosition(1)

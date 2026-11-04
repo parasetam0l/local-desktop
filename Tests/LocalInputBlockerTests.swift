@@ -29,6 +29,16 @@ final class LocalInputBlockerTests: XCTestCase {
         XCTAssertTrue(passes(.leftMouseDown, try click(.leftMouseDown, tagged: true)))
     }
 
+    func testTheMacsOwnInputPassesOnlyWhileTheMainQueueIsStuck() throws {
+        let now = ProcessInfo.processInfo.systemUptime
+        blocker.noteMainQueueAlive(at: now)
+        XCTAssertFalse(passes(.keyDown, try key(tagged: false)))
+        blocker.noteMainQueueAlive(at: now - LocalInputBlocker.mainQueueStallLimit - 1)
+        XCTAssertTrue(passes(.keyDown, try key(tagged: false)))
+        blocker.noteMainQueueAlive(at: now)
+        XCTAssertFalse(passes(.keyDown, try key(tagged: false)))
+    }
+
     func testTheMacsOwnInputIsDropped() throws {
         XCTAssertFalse(passes(.keyDown, try key(tagged: false)))
         XCTAssertFalse(passes(.flagsChanged, try key(tagged: false)))
