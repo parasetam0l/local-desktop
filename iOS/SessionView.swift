@@ -216,7 +216,7 @@ struct SessionView: View {
     }
 
     private func click(button: Int) {
-        if session.isDisplaySleeping {
+        if session.isDisplaySleeping, !session.isHeadlessClosedLid {
             session.wakeHostDisplay()
         }
         session.click(button: button, atRemote: virtualCursor)
@@ -248,7 +248,7 @@ struct SessionView: View {
     }
 
     private func handleDragEvent(_ event: DragEvent) {
-        if session.isDisplaySleeping {
+        if session.isDisplaySleeping, !session.isHeadlessClosedLid {
             session.wakeHostDisplay()
         }
         switch event {

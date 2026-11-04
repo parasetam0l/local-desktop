@@ -2,6 +2,10 @@ import Foundation
 import IOKit.pwr_mgt
 
 /// Keeps the Mac and its display awake while a client is connected.
+///
+/// These are *idle-sleep* assertions. They cannot prevent forced sleep: with the lid
+/// shut and no external display macOS enters clamshell sleep regardless of what this
+/// class holds, so the host treats that state separately (see `LidStateMonitor`).
 @MainActor
 final class PowerAssertions {
     private var displaySleepAssertion: IOPMAssertionID = 0

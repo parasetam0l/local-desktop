@@ -83,6 +83,12 @@ enum InputInjector {
     }
 
     private static var lastUserActivityTickle: TimeInterval = 0
+    /// A wake request runs a fairly heavy sequence, and clients ask for it on every
+    /// reconnect and tap. One attempt at a time, spaced out, so requests can't turn into
+    /// a wake loop of their own.
+    private static var wakeInFlight = false
+    private static var lastWakeAttempt: TimeInterval = -Double.greatestFiniteMagnitude
+    private static let wakeCooldown: TimeInterval = 5
 
     /// Throttled user activity declaration to inform macOS powerd of ongoing local interaction.
     static func tickleUserActivity() {
@@ -105,8 +111,23 @@ enum InputInjector {
     /// 2. Asynchronous caffeinate -u invocation
     /// 3. Non-zero hardware cursor delta nudge
     /// 4. Non-destructive modifier key pulse (Shift key tap)
-    static func wakeDisplay(within bounds: CGRect) {
-        lastUserActivityTickle = ProcessInfo.processInfo.systemUptime
+    @discardableResult
+    static func wakeDisplay(within bounds: CGRect) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard !wakeInFlight, now - lastWakeAttempt >= wakeCooldown else { return false }
+        // The display never slept; declaring user activity is enough.
+        guard CGDisplayIsAsleep(CGMainDisplayID()) != 0 else {
+            tickleUserActivity()
+            return false
+        }
+        wakeInFlight = true
+        lastWakeAttempt = now
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            MainActor.assumeIsolated {
+                wakeInFlight = false
+            }
+        }
+        lastUserActivityTickle = now
         // 1. Declare User Activity to IOKit Power Management
         var assertionID: IOPMAssertionID = 0
         let ret = IOPMAssertionDeclareUserActivity("LocalDesktop Wake Display" as CFString, kIOPMUserActiveLocal, &assertionID)
@@ -148,6 +169,7 @@ enum InputInjector {
                 }
             }
         }
+        return true
     }
 
     private static var lastClickTime: TimeInterval = 0

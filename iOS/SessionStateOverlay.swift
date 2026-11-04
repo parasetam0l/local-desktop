@@ -6,6 +6,9 @@ struct SessionStateOverlay: View {
     @ObservedObject var session: ClientSession
     @ObservedObject var app: AppModel
     var onDismiss: () -> Void
+    /// The sleeping card waits for a stable state so transient sleep/wake chatter doesn't
+    /// flash it on and off.
+    @State private var showsDisplaySleeping = false
 
     var body: some View {
         switch session.phase {
@@ -30,6 +33,15 @@ struct SessionStateOverlay: View {
             failedOverlay(message: message, countdown: countdown)
         case .connected:
             connectedOverlay
+                .task(id: session.isDisplaySleeping) {
+                    if session.isDisplaySleeping {
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        guard !Task.isCancelled else { return }
+                        showsDisplaySleeping = true
+                    } else {
+                        showsDisplaySleeping = false
+                    }
+                }
         default:
             EmptyView()
         }
@@ -132,42 +144,74 @@ struct SessionStateOverlay: View {
 
     @ViewBuilder
     private var connectedOverlay: some View {
-        if session.isDisplaySleeping {
-            VStack(spacing: 14) {
-                Image(systemName: "moon.stars.fill")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.indigo)
-                Text("Mac Display is Sleeping")
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white)
-                Text("Tap anywhere to wake the screen")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.7))
-                Button {
-                    session.wakeHostDisplay()
-                } label: {
-                    Label("Wake Display", systemImage: "sun.max.fill")
-                }
-                .glassButton(variant: .primary, size: .regular)
-            }
-            .padding(28)
-            .glassCard(cornerRadius: 24, opacity: 0.25, shadowRadius: 20)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                session.wakeHostDisplay()
-            }
+        if session.isHeadlessClosedLid {
+            lidClosedOverlay
+        } else if showsDisplaySleeping {
+            sleepingOverlay
         } else if !session.hasVideoFrame {
-            VStack(spacing: 14) {
-                ProgressView()
-                    .controlSize(.large)
-                    .tint(.white)
-                Text("Loading display…")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.8))
-            }
-            .padding(24)
-            .glassCard(cornerRadius: 20, opacity: 0.15, shadowRadius: 16)
+            loadingOverlay
         }
+    }
+
+    /// A shut lid with no external display is a forced-sleep state: macOS sleeps the Mac
+    /// no matter which assertions the host holds, so asking the user to wake the screen
+    /// would just restart the wake/sleep loop. Show one stable explanation instead.
+    private var lidClosedOverlay: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "laptopcomputer.slash")
+                .font(.system(size: 34))
+                .foregroundStyle(.white.opacity(0.85))
+            Text("Mac Lid Is Closed")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+            Text("macOS sleeps this Mac when the lid is closed, so its screen isn't available. Open the lid or connect an external display to keep using it remotely.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(28)
+        .frame(maxWidth: 320)
+        .glassCard(cornerRadius: 24, opacity: 0.25, shadowRadius: 20)
+    }
+
+    private var sleepingOverlay: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "moon.stars.fill")
+                .font(.system(size: 36))
+                .foregroundStyle(.indigo)
+            Text("Mac Display is Sleeping")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+            Text("Tap anywhere to wake the screen")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+            Button {
+                session.wakeHostDisplay()
+            } label: {
+                Label("Wake Display", systemImage: "sun.max.fill")
+            }
+            .glassButton(variant: .primary, size: .regular)
+        }
+        .padding(28)
+        .glassCard(cornerRadius: 24, opacity: 0.25, shadowRadius: 20)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            session.wakeHostDisplay()
+        }
+    }
+
+    private var loadingOverlay: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(.white)
+            Text("Loading display…")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(24)
+        .glassCard(cornerRadius: 20, opacity: 0.15, shadowRadius: 16)
     }
 }
 

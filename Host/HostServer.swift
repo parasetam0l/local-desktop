@@ -26,8 +26,16 @@ final class HostServer: ObservableObject {
     @Published var captureError: String?
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var screenGranted = false
-    @Published private(set) var isHostLocked = false
+    @Published private(set) var isHostLocked = HostServer.readIsLocked()
     @Published private(set) var isDisplaySleeping = false
+    /// Whether this MacBook's lid is shut, and whether a non-built-in display is active.
+    /// With the lid shut and no external display macOS forces clamshell sleep, so there is
+    /// no screen to stream until the lid opens or a display is attached.
+    @Published private(set) var isLidClosed = false
+    @Published private(set) var hasExternalDisplay = false
+    /// The lid is shut and there is no external display: a forced-sleep state the host
+    /// can't fight with power assertions.
+    var isHeadlessClosedLid: Bool { isLidClosed && !hasExternalDisplay }
     /// The setting: block this Mac's own keyboard and trackpad while devices are connected.
     @Published private(set) var blocksLocalInput = UserDefaults.standard.bool(forKey: HostServer.blocksLocalInputKey)
     /// Whether they're blocked right now.
@@ -46,6 +54,12 @@ final class HostServer: ObservableObject {
     let appSwitcher = AppSwitcher()
     private let power = PowerAssertions()
     private let inputBlocker = LocalInputBlocker()
+    private let lid = LidStateMonitor()
+    /// Coalesces the bursts of host-state notifications macOS emits around sleep/wake and
+    /// lock/unlock into a single send; remembers what was last sent so it isn't repeated.
+    private var hostStateBroadcastWorkItem: DispatchWorkItem?
+    private var lastBroadcastHostState: HostStateMsg?
+    private static let hostStateDebounce: TimeInterval = 0.5
 
     /// First IPv4 address on a physical interface (en0…), for display in the menu.
     static func primaryLANAddress() -> String? {
@@ -98,30 +112,43 @@ final class HostServer: ObservableObject {
             self?.captureDidStop(error)
         }
 
+        lid.onChange = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.lidStateChanged()
+            }
+        }
+        lid.start()
+
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked")) { server, _ in
             server.isHostLocked = true
-            server.broadcastHostState()
+            server.scheduleHostStateBroadcast()
         }
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsUnlocked")) { server, _ in
             server.isHostLocked = false
-            server.broadcastHostState()
+            server.scheduleHostStateBroadcast()
         }
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.screensDidSleepNotification) { server, _ in
             server.isDisplaySleeping = true
-            server.broadcastHostState()
+            server.lid.refresh()
+            server.scheduleHostStateBroadcast()
         }
         observe(workspace, NSWorkspace.screensDidWakeNotification) { server, _ in
             server.isDisplaySleeping = false
-            server.broadcastHostState()
-            if !server.activeSessions.isEmpty {
+            // A missed unlock notification mustn't leave a false lock behind.
+            server.isHostLocked = Self.readIsLocked()
+            server.lid.refresh()
+            server.scheduleHostStateBroadcast()
+            if !server.activeSessions.isEmpty, !server.isHeadlessClosedLid {
                 server.restartCapture()
             }
         }
         // Displays came or went (lid opened, display plugged in); pick capture back up.
         observe(NotificationCenter.default, NSApplication.didChangeScreenParametersNotification) { server, _ in
             server.refreshDisplays()
-            if !server.activeSessions.isEmpty, !ScreenStreamer.shared.isRunning {
+            server.lid.refresh()
+            server.scheduleHostStateBroadcast()
+            if !server.activeSessions.isEmpty, !server.isHeadlessClosedLid, !ScreenStreamer.shared.isRunning {
                 server.restartCapture()
             }
         }
@@ -154,6 +181,23 @@ final class HostServer: ObservableObject {
                 handler(self, name)
             }
         }
+    }
+
+    /// The lid opened/closed or an external display appeared/vanished. While macOS forces
+    /// clamshell sleep there is nothing capture can use, so capture waits instead of
+    /// retrying; once a usable display exists again it picks back up.
+    private func lidStateChanged() {
+        isLidClosed = lid.isLidClosed
+        hasExternalDisplay = lid.hasExternalDisplay
+        scheduleHostStateBroadcast()
+        guard !activeSessions.isEmpty, !ScreenStreamer.shared.isRunning, !isHeadlessClosedLid else { return }
+        restartCapture()
+    }
+
+    /// Reads the real display-sleep state so a client isn't told stale news after a wake
+    /// request. With the lid shut and no external display the screen is simply gone.
+    private func refreshDisplaySleepState() {
+        isDisplaySleeping = isHeadlessClosedLid ? true : CGDisplayIsAsleep(CGMainDisplayID()) != 0
     }
 
     /// Starts sharing at launch when everything it needs is in place. After a crash
@@ -256,6 +300,9 @@ final class HostServer: ObservableObject {
             session.close(sendingBye: RDByeReason.hostStopped)
         }
         power.release()
+        hostStateBroadcastWorkItem?.cancel()
+        hostStateBroadcastWorkItem = nil
+        lastBroadcastHostState = nil
         updateLocalInputBlocking()
         listener?.cancel()
         listener = nil
@@ -331,6 +378,9 @@ final class HostServer: ObservableObject {
         Task {
             // The last client may have left between scheduling this and running it.
             guard !activeSessions.isEmpty else { return }
+            // With the lid shut and no external display there is nothing capture can use
+            // until the lid opens (or a display is attached); `lidStateChanged` retries then.
+            guard !isHeadlessClosedLid else { return }
             let requested = selectedDisplayID
             do {
                 try await ScreenStreamer.shared.restart(displayID: requested, preset: preset,
@@ -357,6 +407,9 @@ final class HostServer: ObservableObject {
     /// another display if there is one and otherwise waits quietly for one to come back.
     private func captureDidStop(_ error: Error) {
         guard !activeSessions.isEmpty else { return }
+        // Forced clamshell sleep takes the display away; waiting for the lid is quieter
+        // than a retry loop that can never succeed.
+        guard !isHeadlessClosedLid else { return }
         guard ScreenStreamer.isDisplayUnavailable(error) else {
             captureError = "Screen capture stopped: \(error.localizedDescription)"
             return
@@ -407,12 +460,18 @@ final class HostServer: ObservableObject {
             activeSessions.append(session)
         }
 
-        // Force wake the display from Dark Wake when a client connects.
+        // A client should get a live screen when one is available. Waking is pointless
+        // (and only restarts the sleep/wake loop) with the lid shut and no external
+        // display, where macOS forces clamshell sleep regardless of any assertion.
         power.acquire()
-        InputInjector.wakeDisplay(within: streamedDisplayBounds)
-        isDisplaySleeping = false
+        if !isHeadlessClosedLid {
+            InputInjector.wakeDisplay(within: streamedDisplayBounds)
+        }
+        refreshDisplaySleepState()
 
-        session.sendHostState(hostStateMessage)
+        let state = hostStateMessage
+        session.sendHostState(state)
+        lastBroadcastHostState = state
         session.sendRunningApps(appSwitcher.runningApps())
         session.sendHardwareControls(HardwareController.getState())
         session.sendDisplays(displaysMessage)
@@ -435,6 +494,9 @@ final class HostServer: ObservableObject {
             clientName = nil
             power.release()
             ScreenStreamer.shared.stop()
+            hostStateBroadcastWorkItem?.cancel()
+            hostStateBroadcastWorkItem = nil
+            lastBroadcastHostState = nil
         } else {
             updateClientName()
             updateBitrate()
@@ -464,6 +526,14 @@ final class HostServer: ObservableObject {
 
     func handleWakeDisplayRequest() {
         power.acquire()
+        lid.refresh()
+        guard !isHeadlessClosedLid else {
+            // macOS forces clamshell sleep with the lid shut and no external display;
+            // another wake attempt would only restart the sleep/wake loop.
+            refreshDisplaySleepState()
+            broadcastHostState()
+            return
+        }
         InputInjector.wakeDisplay(within: streamedDisplayBounds)
         isDisplaySleeping = false
         broadcastHostState()
@@ -488,7 +558,11 @@ final class HostServer: ObservableObject {
     }
 
     var hostStateMessage: HostStateMsg {
-        HostStateMsg(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping, blocksLocalInput: blocksLocalInput)
+        HostStateMsg(isLocked: HostStateMsg.reportsLocked(isLocked: isHostLocked, isDisplaySleeping: isDisplaySleeping),
+                     isDisplaySleeping: isDisplaySleeping,
+                     blocksLocalInput: blocksLocalInput,
+                     isLidClosed: isLidClosed,
+                     hasExternalDisplay: hasExternalDisplay)
     }
 
     /// Changes the setting, from the menu or a client, and tells every client.
@@ -514,11 +588,34 @@ final class HostServer: ObservableObject {
         isBlockingLocalInput = inputBlocker.isActive
     }
 
+    nonisolated private static func readIsLocked() -> Bool {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        return session?["CGSSessionScreenIsLocked"] as? Bool ?? false
+    }
+
+    /// Sends the current host state to every client. Identical state is not re-sent.
     func broadcastHostState() {
+        hostStateBroadcastWorkItem?.cancel()
+        hostStateBroadcastWorkItem = nil
         let msg = hostStateMessage
+        guard msg != lastBroadcastHostState else { return }
+        lastBroadcastHostState = msg
         for s in activeSessions {
             s.sendHostState(msg)
         }
+    }
+
+    /// Coalesces the bursts of state changes macOS emits around sleep/wake and
+    /// lock/unlock, so the client sees one settled state instead of flickering.
+    func scheduleHostStateBroadcast() {
+        hostStateBroadcastWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                self?.broadcastHostState()
+            }
+        }
+        hostStateBroadcastWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hostStateDebounce, execute: work)
     }
 
     func applyPresetFromClient(_ raw: Int, showRemoteCursor: Bool? = nil, codec requestedCodec: RDCodec? = nil) {

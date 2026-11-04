@@ -36,6 +36,10 @@ final class ClientSession: ObservableObject {
     @Published private(set) var identityMismatchServerId: String?
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
+    /// Whether the Mac's lid is shut, and whether an external display keeps it usable
+    /// (nil fields from older Macs decode to "lid open, display exists").
+    @Published private(set) var isLidClosed = false
+    @Published private(set) var hasExternalDisplay = true
     @Published private(set) var runningApps: [RDRunningApp] = []
     @Published private(set) var hardwareControls = RDHardwareControls(brightness: 0.5, volume: 50, isMuted: false)
     /// The Mac's displays and the one being streamed (Macs before 1.2.1 don't send them).
@@ -59,6 +63,10 @@ final class ClientSession: ObservableObject {
         }
         return hostDescription.isEmpty ? "Mac" : hostDescription
     }
+
+    /// The lid is shut and no external display is attached: macOS forces clamshell sleep,
+    /// so there is no screen to show until the lid opens or a display is connected.
+    var isHeadlessClosedLid: Bool { isLidClosed && !hasExternalDisplay }
 
     let deviceName: String
     var onConnected: ((ClientSession) -> Void)?
@@ -412,6 +420,10 @@ final class ClientSession: ObservableObject {
             isHostLocked = msg.isLocked
             isDisplaySleeping = msg.isDisplaySleeping
             blocksMacInput = msg.blocksLocalInput
+            isLidClosed = msg.isLidClosed ?? false
+            // Macs before this protocol version don't report it; assume a display rather
+            // than showing a false "lid closed" warning to them.
+            hasExternalDisplay = msg.hasExternalDisplay ?? true
 
         case .runningApps:
             guard let msg = RDJSON.decode(RDRunningAppsMsg.self, from: payload) else { break }
@@ -461,7 +473,8 @@ final class ClientSession: ObservableObject {
             onPaired?(identity.serverId)
         }
         startPing()
-        wakeHostDisplay()
+        // The Mac wakes its own display when that can help; doing it here as well doubled
+        // every wake request and kept a closed-lid Mac cycling between wake and sleep.
         onConnected?(self)
     }
 

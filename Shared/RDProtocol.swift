@@ -284,12 +284,24 @@ struct RequestKeyframeMsg: Codable {
     var reason: String?
 }
 
-struct HostStateMsg: Codable {
+struct HostStateMsg: Codable, Equatable {
+    /// macOS calls the screen locked as soon as the display sleeps, even when no password
+    /// is due yet and the next input just wakes it. So a lock only counts once the display
+    /// is awake and still locked; until then clients show that the display is sleeping.
+    static func reportsLocked(isLocked: Bool, isDisplaySleeping: Bool) -> Bool {
+        isLocked && !isDisplaySleeping
+    }
+
     var isLocked: Bool
     var isDisplaySleeping: Bool
     /// Whether the Mac blocks its own keyboard and trackpad while devices are connected
     /// (nil from Macs before 1.2.4, which can't).
     var blocksLocalInput: Bool? = nil
+    /// Whether this MacBook's lid is shut (nil from older Macs, which don't say).
+    var isLidClosed: Bool? = nil
+    /// Whether a display other than the built-in one is active, i.e. a closed lid can
+    /// still be used in clamshell mode (nil from older Macs, which don't say).
+    var hasExternalDisplay: Bool? = nil
 }
 
 /// Turns the Mac's setting for blocking its own keyboard and trackpad during remote
