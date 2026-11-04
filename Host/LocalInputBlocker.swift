@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -10,7 +11,9 @@ import Foundation
 /// The tap runs on its own thread because every input event on the Mac waits for its
 /// callback. macOS removes the tap with the process, so input comes back even if
 /// LocalDesktop quits or crashes. Password fields (Secure Input) hide keystrokes from
-/// event taps, so typing into one isn't blocked.
+/// event taps, so typing into one isn't blocked. Key releases pass so nothing stays
+/// pressed. A volume key held when blocking starts keeps acting until it stops, because
+/// its release never reaches the tap.
 final class LocalInputBlocker: @unchecked Sendable {
     /// `InputInjector` sets this as the user data of every event it posts.
     static let injectedEventTag: Int64 = 0x4C44_6573_6B74 // "LDeskt"
@@ -33,7 +36,9 @@ final class LocalInputBlocker: @unchecked Sendable {
         nonisolated(unsafe) var created = false
         let thread = Thread { [self] in
             let userInfo = Unmanaged.passUnretained(self).toOpaque()
-            guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
+            // At the HID level, ahead of the session, so system shortcuts like modifier and
+            // function key combinations can't act on input first.
+            guard let tap = CGEvent.tapCreate(tap: .cghidEventTap, place: .headInsertEventTap,
                                               options: .defaultTap, eventsOfInterest: Self.eventMask,
                                               callback: tapCallback, userInfo: userInfo),
                   let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else {
@@ -72,8 +77,8 @@ final class LocalInputBlocker: @unchecked Sendable {
         CFRunLoopStop(runLoop)
     }
 
-    /// The tap's decision: LocalDesktop's own events and the tap's housekeeping pass,
-    /// anything else is dropped.
+    /// The tap's decision: LocalDesktop's own events, the tap's housekeeping and releases
+    /// pass, anything else is dropped.
     func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
@@ -93,12 +98,36 @@ final class LocalInputBlocker: @unchecked Sendable {
             }
             return Unmanaged.passUnretained(event)
         }
+        // A key held when blocking started would otherwise stay pressed. A release does
+        // nothing on its own.
+        if Self.isRelease(type, event) { return Unmanaged.passUnretained(event) }
         if isPointerMove, let heldPosition {
             CGWarpMouseCursorPosition(heldPosition)
             CGAssociateMouseAndMouseCursorPosition(1)
         }
         return nil
     }
+
+    static func isRelease(_ type: CGEventType, _ event: CGEvent) -> Bool {
+        switch type {
+        case .keyUp, .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            return true
+        case .flagsChanged:
+            guard let flag = modifierFlags[event.getIntegerValueField(.keyboardEventKeycode)] else { return false }
+            return event.flags.rawValue & flag == 0
+        default:
+            // Media and brightness keys: system-defined events with the key state in data1.
+            guard type.rawValue == 14, let systemEvent = NSEvent(cgEvent: event),
+                  systemEvent.subtype.rawValue == 8 else { return false }
+            return (systemEvent.data1 & 0xFF00) >> 8 == 0x0B
+        }
+    }
+
+    // NX_DEVICE*KEYMASK for each modifier, and the Fn flag. Caps Lock toggles in hardware
+    // below the tap, so its events have no release to pass.
+    private static let modifierFlags: [Int64: UInt64] = [
+        54: 0x10, 55: 0x08, 56: 0x02, 60: 0x04, 59: 0x01, 62: 0x2000, 58: 0x20, 61: 0x40, 63: 0x800000,
+    ]
 
     private static let pointerMoves: Set<CGEventType> = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
     private static let pointerButtons: Set<CGEventType> = [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,

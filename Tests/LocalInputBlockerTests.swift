@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 import CoreGraphics
 
@@ -32,9 +33,40 @@ final class LocalInputBlockerTests: XCTestCase {
         XCTAssertFalse(passes(.keyDown, try key(tagged: false)))
         XCTAssertFalse(passes(.flagsChanged, try key(tagged: false)))
         XCTAssertFalse(passes(.leftMouseDown, try click(.leftMouseDown, tagged: false)))
-        XCTAssertFalse(passes(.rightMouseUp, try click(.rightMouseUp, tagged: false)))
         let scroll = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 5, wheel2: 0, wheel3: 0))
         XCTAssertFalse(passes(.scrollWheel, scroll))
+    }
+
+    func testReleasesPassSoNothingStaysPressed() throws {
+        let keyUp = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false))
+        XCTAssertTrue(passes(.keyUp, keyUp))
+        XCTAssertTrue(passes(.rightMouseUp, try click(.rightMouseUp, tagged: false)))
+    }
+
+    private func modifier(keyCode: Int64, flags: UInt64) throws -> CGEvent {
+        let event = try XCTUnwrap(CGEvent(source: nil))
+        event.type = .flagsChanged
+        event.setIntegerValueField(.keyboardEventKeycode, value: keyCode)
+        event.flags = CGEventFlags(rawValue: flags)
+        return event
+    }
+
+    func testOnlyAModifiersReleasePasses() throws {
+        XCTAssertTrue(passes(.flagsChanged, try modifier(keyCode: 56, flags: 0x100)))
+        XCTAssertFalse(passes(.flagsChanged, try modifier(keyCode: 56, flags: 0x20102)))
+        XCTAssertFalse(passes(.flagsChanged, try modifier(keyCode: 57, flags: 0x100)))
+    }
+
+    private func mediaKey(state: Int) throws -> CGEvent {
+        let event = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                       context: nil, subtype: 8, data1: (1 << 16) | (state << 8), data2: -1)
+        return try XCTUnwrap(event?.cgEvent)
+    }
+
+    func testOnlyAMediaKeysReleasePasses() throws {
+        let systemDefined = try XCTUnwrap(CGEventType(rawValue: 14))
+        XCTAssertTrue(passes(systemDefined, try mediaKey(state: 0x0B)))
+        XCTAssertFalse(passes(systemDefined, try mediaKey(state: 0x0A)))
     }
 
     func testOtherTaggedValuesDontPass() throws {
