@@ -49,6 +49,7 @@ struct MenuBarView: View {
         state.canCheckForUpdates = updater.canCheckForUpdates
         state.checksForUpdatesAutomatically = updater.automaticallyChecksForUpdates
         state.pendingUpdateVersion = updater.pendingUpdateVersion
+        state.backgroundCheckResult = updater.backgroundCheckResult
         return state
     }
 

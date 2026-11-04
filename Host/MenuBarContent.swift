@@ -54,6 +54,7 @@ struct MenuBarState {
     var checksForUpdatesAutomatically = false
     /// A version found by a scheduled check, waiting for the user.
     var pendingUpdateVersion: String?
+    var backgroundCheckResult: String?
 
     var canStartSharing: Bool { missingSetup.isEmpty }
 }
@@ -429,6 +430,11 @@ struct MenuBarContent: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let result = state.backgroundCheckResult {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 8) {
                 Text("Version \(state.appVersion)")
                     .font(.caption)
