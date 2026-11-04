@@ -1,8 +1,7 @@
+import AVFoundation
+import CryptoKit
 import Foundation
 import Network
-import CryptoKit
-import AVFoundation
-import UIKit
 
 /// Client side of one local-desktop session: connection lifecycle, the
 /// authentication decisions, reconnects, and the input API used by the UI.
@@ -52,6 +51,7 @@ final class ClientSession: ObservableObject {
     @Published private(set) var liveBitrateMbps: Double = 0.0
     @Published private(set) var liveDecodeMs: Double = 0.0
     @Published private(set) var currentRTT: Double = 0.0
+    private var lastRTT = 0.0
     private(set) var serverMacAddress: String?
 
     var displayName: String {
@@ -411,7 +411,7 @@ final class ClientSession: ObservableObject {
         case .pong:
             lastPongAt = Date()
             if let msg = RDJSON.decode(PingMsg.self, from: payload) {
-                currentRTT = max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)
+                lastRTT = max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)
                 reportNetworkStatsIfNeeded()
             }
 
@@ -536,13 +536,18 @@ final class ClientSession: ObservableObject {
 
         let network = connection?.drainStats() ?? ClientConnection.Stats()
         let decoded = video.drainStats()
-        liveFPS = Double(decoded.frames) / elapsed
-        liveBitrateMbps = (Double(network.bytes) * 8.0) / (elapsed * 1_000_000.0)
-        liveDecodeMs = decoded.decodeMs
+        let fps = Double(decoded.frames) / elapsed
+        // These redraw the session's views, so they only change while the HUD shows them.
+        if showDebugHUD {
+            liveFPS = fps
+            liveBitrateMbps = (Double(network.bytes) * 8.0) / (elapsed * 1_000_000.0)
+            liveDecodeMs = decoded.decodeMs
+            currentRTT = lastRTT
+        }
 
-        sendJSON(.networkStats, NetworkStatsMsg(rttMs: currentRTT,
+        sendJSON(.networkStats, NetworkStatsMsg(rttMs: lastRTT,
                                                 decodeMs: decoded.decodeMs,
-                                                fps: liveFPS,
+                                                fps: fps,
                                                 droppedFrames: 0))
     }
 

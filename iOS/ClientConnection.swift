@@ -70,6 +70,8 @@ final class ClientConnection: @unchecked Sendable {
         tcpOptions.connectionTimeout = 6
         tcpOptions.enableFastOpen = true
         let params = NWParameters(tls: nil, tcp: tcpOptions)
+        // Asks Wi-Fi to give this connection's packets the low-delay video queue.
+        params.serviceClass = .interactiveVideo
         params.allowLocalEndpointReuse = true
         params.includePeerToPeer = false
         if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {

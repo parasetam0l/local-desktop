@@ -11,8 +11,8 @@ import CoreGraphics
 /// cannot deliver a usable screen; it uses this state to stop trying to wake/stream and
 /// to tell the client why instead of flashing sleep/lock states.
 ///
-/// IOPMrootDomain has no public notification for the lid, so the state is polled. Both
-/// reads are cheap: one IORegistry property lookup plus one display-list query.
+/// IOPMrootDomain has no public notification for the lid, so the state is polled during
+/// sessions. Both reads are cheap: one IORegistry property lookup plus one display-list query.
 @MainActor
 final class LidStateMonitor {
     private(set) var isLidClosed = false
@@ -43,6 +43,7 @@ final class LidStateMonitor {
                 self?.refresh()
             }
         }
+        timer.tolerance = 0.5
         self.timer = timer
     }
 

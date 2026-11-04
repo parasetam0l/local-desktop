@@ -117,7 +117,6 @@ final class HostServer: ObservableObject {
                 self?.lidStateChanged()
             }
         }
-        lid.start()
 
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked")) { server, _ in
             server.isHostLocked = true
@@ -190,8 +189,20 @@ final class HostServer: ObservableObject {
         isLidClosed = lid.isLidClosed
         hasExternalDisplay = lid.hasExternalDisplay
         scheduleHostStateBroadcast()
+        updatePowerAssertions()
         guard !activeSessions.isEmpty, !ScreenStreamer.shared.isRunning, !isHeadlessClosedLid else { return }
         restartCapture()
+    }
+
+    /// Keeps the Mac awake only for a session that can use it. macOS forces clamshell sleep
+    /// with the lid shut and no external display whatever is held, and holding anything then
+    /// only stretches the brief wakes during that sleep, which costs battery.
+    private func updatePowerAssertions() {
+        if activeSessions.isEmpty || isHeadlessClosedLid {
+            power.release()
+        } else {
+            power.acquire()
+        }
     }
 
     /// Reads the real display-sleep state so a client isn't told stale news after a wake
@@ -243,6 +254,8 @@ final class HostServer: ObservableObject {
             tcpOptions.noDelay = true
             tcpOptions.enableFastOpen = true
             let parameters = NWParameters(tls: nil, tcp: tcpOptions)
+            // Asks Wi-Fi to give this connection's packets the low-delay video queue.
+            parameters.serviceClass = .interactiveVideo
             parameters.allowLocalEndpointReuse = true
             parameters.includePeerToPeer = false
             if let ipOptions = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
@@ -299,6 +312,7 @@ final class HostServer: ObservableObject {
         for session in sessions {
             session.close(sendingBye: RDByeReason.hostStopped)
         }
+        lid.stop()
         power.release()
         hostStateBroadcastWorkItem?.cancel()
         hostStateBroadcastWorkItem = nil
@@ -453,9 +467,11 @@ final class HostServer: ObservableObject {
 
     // MARK: Called by ClientSession
 
-    func sessionDidAuthenticate(_ session: ClientSession, name: String) {
+    func sessionDidAuthenticate(_ session: ClientSession) {
         refreshDisplays()
         pendingSessions.removeAll { $0 === session }
+        // Only a session needs the lid state, so nothing polls while no one is connected.
+        lid.start()
         if !activeSessions.contains(where: { $0 === session }) {
             activeSessions.append(session)
         }
@@ -463,7 +479,7 @@ final class HostServer: ObservableObject {
         // A client should get a live screen when one is available. Waking is pointless
         // (and only restarts the sleep/wake loop) with the lid shut and no external
         // display, where macOS forces clamshell sleep regardless of any assertion.
-        power.acquire()
+        updatePowerAssertions()
         if !isHeadlessClosedLid {
             InputInjector.wakeDisplay(within: streamedDisplayBounds)
         }
@@ -492,6 +508,7 @@ final class HostServer: ObservableObject {
         updateLocalInputBlocking()
         if activeSessions.isEmpty {
             clientName = nil
+            lid.stop()
             power.release()
             ScreenStreamer.shared.stop()
             hostStateBroadcastWorkItem?.cancel()
@@ -525,8 +542,8 @@ final class HostServer: ObservableObject {
     }
 
     func handleWakeDisplayRequest() {
-        power.acquire()
         lid.refresh()
+        updatePowerAssertions()
         guard !isHeadlessClosedLid else {
             // macOS forces clamshell sleep with the lid shut and no external display;
             // another wake attempt would only restart the sleep/wake loop.

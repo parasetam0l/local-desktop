@@ -1,5 +1,4 @@
 import Foundation
-import SystemConfiguration
 
 func getPrimaryMACAddress() -> String? {
     var ifaddr: UnsafeMutablePointer<ifaddrs>?

@@ -1,7 +1,7 @@
+import CoreGraphics
+import CryptoKit
 import Foundation
 import Network
-import CryptoKit
-import CoreGraphics
 
 /// One client connection on the host: performs the v2 handshake and PIN/device
 /// authentication, then relays input events to InputInjector and receives video
@@ -412,7 +412,7 @@ final class ClientSession {
         send(.authOK, json: AuthOKMsg(serverName: HostServer.computerName,
                                       trusted: trusted,
                                       macAddress: getPrimaryMACAddress()))
-        server?.sessionDidAuthenticate(self, name: peerName)
+        server?.sessionDidAuthenticate(self)
     }
 
     // MARK: Authenticated messages

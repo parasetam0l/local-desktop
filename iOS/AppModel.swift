@@ -35,7 +35,16 @@ struct AppSettings: Codable {
 final class AppModel: ObservableObject {
     let browser = HostBrowser()
 
-    @Published var session: ClientSession?
+    @Published var session: ClientSession? {
+        didSet {
+            // Looking for Macs on the network has no use during a session.
+            if session == nil, oldValue != nil {
+                browser.restart()
+            } else if session != nil, oldValue == nil {
+                browser.stop()
+            }
+        }
+    }
     @Published var recents: [RecentHost] = []
     @Published var manualError: String?
     @Published var settings: AppSettings {
