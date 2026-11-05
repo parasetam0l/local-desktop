@@ -592,6 +592,9 @@ final class ClientSession: ObservableObject {
         sendJSON(.scroll, ScrollMsg(dx: dx, dy: dy, precise: precise ? true : nil))
     }
 
+    /// The modifiers kept pressed on the Mac by `setHeldModifiers`.
+    private var heldModifiers: RDModifiers = []
+
     private func sendModifier(_ modifier: RDModifiers, down: Bool, currentFlags: UInt8) {
         let code: UInt16
         if modifier == .command { code = 55 }
@@ -603,14 +606,15 @@ final class ClientSession: ObservableObject {
     }
 
     private func sendModifiersDown(_ modifiers: RDModifiers) {
-        if modifiers.contains(.command) { sendModifier(.command, down: true, currentFlags: modifiers.rawValue) }
-        if modifiers.contains(.shift) { sendModifier(.shift, down: true, currentFlags: modifiers.rawValue) }
-        if modifiers.contains(.option) { sendModifier(.option, down: true, currentFlags: modifiers.rawValue) }
-        if modifiers.contains(.control) { sendModifier(.control, down: true, currentFlags: modifiers.rawValue) }
+        let flags = modifiers.union(heldModifiers).rawValue
+        if modifiers.contains(.command) { sendModifier(.command, down: true, currentFlags: flags) }
+        if modifiers.contains(.shift) { sendModifier(.shift, down: true, currentFlags: flags) }
+        if modifiers.contains(.option) { sendModifier(.option, down: true, currentFlags: flags) }
+        if modifiers.contains(.control) { sendModifier(.control, down: true, currentFlags: flags) }
     }
 
     private func sendModifiersUp(_ modifiers: RDModifiers) {
-        var remaining = modifiers
+        var remaining = modifiers.union(heldModifiers)
         if modifiers.contains(.control) {
             remaining.remove(.control)
             sendModifier(.control, down: false, currentFlags: remaining.rawValue)
@@ -629,11 +633,24 @@ final class ClientSession: ObservableObject {
         }
     }
 
+    /// Presses and releases modifiers on the Mac so that it sees exactly these held, as
+    /// with physical keys: menus switch to their Option items and clicks carry them.
+    func setHeldModifiers(_ modifiers: RDModifiers) {
+        let released = heldModifiers.subtracting(modifiers)
+        let pressed = modifiers.subtracting(heldModifiers)
+        heldModifiers = heldModifiers.intersection(modifiers)
+        sendModifiersUp(released)
+        sendModifiersDown(pressed)
+        heldModifiers = modifiers
+    }
+
     func keyTap(_ key: RDKey, modifiers: RDModifiers = []) {
-        sendModifiersDown(modifiers)
-        sendJSON(.keyEvent, KeyEventMsg(code: key.rawValue, down: true, flags: modifiers.rawValue))
-        sendJSON(.keyEvent, KeyEventMsg(code: key.rawValue, down: false, flags: modifiers.rawValue))
-        sendModifiersUp(modifiers)
+        let added = modifiers.subtracting(heldModifiers)
+        let flags = modifiers.union(heldModifiers).rawValue
+        sendModifiersDown(added)
+        sendJSON(.keyEvent, KeyEventMsg(code: key.rawValue, down: true, flags: flags))
+        sendJSON(.keyEvent, KeyEventMsg(code: key.rawValue, down: false, flags: flags))
+        sendModifiersUp(added)
     }
 
     func sendText(_ text: String) {
@@ -652,16 +669,18 @@ final class ClientSession: ObservableObject {
             sendText(text.uppercased())
             return
         }
-        sendModifiersDown(modifiers)
+        let added = modifiers.subtracting(heldModifiers)
+        let flags = modifiers.union(heldModifiers).rawValue
+        sendModifiersDown(added)
         for character in text.lowercased() {
             if let code = Self.virtualKey(for: character) {
-                sendJSON(.keyEvent, KeyEventMsg(code: code, down: true, flags: modifiers.rawValue))
-                sendJSON(.keyEvent, KeyEventMsg(code: code, down: false, flags: modifiers.rawValue))
+                sendJSON(.keyEvent, KeyEventMsg(code: code, down: true, flags: flags))
+                sendJSON(.keyEvent, KeyEventMsg(code: code, down: false, flags: flags))
             } else {
                 sendText(String(character))
             }
         }
-        sendModifiersUp(modifiers)
+        sendModifiersUp(added)
     }
 
     private static func virtualKey(for character: Character) -> UInt16? {

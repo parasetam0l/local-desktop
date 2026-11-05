@@ -5,6 +5,8 @@ struct SessionView: View {
     @ObservedObject var app: AppModel
     var onDismiss: () -> Void
 
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var touchpadMode: Bool
     @State private var keyboardVisible = false
     /// Modifiers armed for the next key; `lockedModifiers` stay armed afterwards.
@@ -25,6 +27,11 @@ struct SessionView: View {
     }
 
     private var isConnected: Bool { session.phase == .connected }
+    /// Only while the key bar shows them can they be seen and turned off, so a hidden
+    /// keyboard or a backgrounded app never leaves a key stuck down on the Mac.
+    private var modifiersToHold: RDModifiers {
+        isConnected && keyboardVisible && scenePhase == .active ? modifiers : []
+    }
 
     var body: some View {
         ZStack {
@@ -59,6 +66,7 @@ struct SessionView: View {
                             session.buttonDown(0)
                         } else {
                             session.buttonUp(0)
+                            _ = consumeModifiers()
                         }
                     }
                 )
@@ -157,6 +165,9 @@ struct SessionView: View {
                 .background(.ultraThinMaterial)
             }
         }
+        .onChange(of: modifiersToHold) { _, held in
+            session.setHeldModifiers(held)
+        }
         .onChange(of: touchpadMode) { _, isTrackpad in
             if isTrackpad {
                 if !app.settings.showRemoteCursor, let cursor = currentVirtualCursor() {
@@ -175,7 +186,7 @@ struct SessionView: View {
         }
     }
 
-    /// Returns the modifiers for the key being sent and disarms the one-shot ones.
+    /// Returns the modifiers for the key or click being sent and disarms the one-shot ones.
     private func consumeModifiers() -> RDModifiers {
         let current = modifiers
         modifiers = modifiers.intersection(lockedModifiers)
@@ -220,6 +231,7 @@ struct SessionView: View {
             session.wakeHostDisplay()
         }
         session.click(button: button, atRemote: virtualCursor)
+        _ = consumeModifiers()
     }
 
     // MARK: Direct mode
@@ -230,6 +242,7 @@ struct SessionView: View {
                 session.wakeHostDisplay()
             }
             session.click(button: 0, atRemote: point)
+            _ = consumeModifiers()
         } : nil
     }
 
@@ -239,6 +252,7 @@ struct SessionView: View {
                 session.wakeHostDisplay()
             }
             session.click(button: 1, atRemote: point)
+            _ = consumeModifiers()
         } : nil
     }
 
@@ -259,6 +273,7 @@ struct SessionView: View {
             session.moveAbs(Double(point.x), Double(point.y))
         case .ended:
             session.buttonUp(0)
+            _ = consumeModifiers()
         }
     }
 }

@@ -26,7 +26,7 @@ Both apps speak the same custom TCP protocol (see [`Protocol.md`](Protocol.md)) 
 - **Zoom on mobile** — pinch to zoom (fit → 8×) and pan while zoomed.
 - **Direct mode** — tap = left click, two-finger tap = right click, long-press = right click, tap-and-drag = press & drag.
 - **Touchpad mode** — the whole screen becomes a trackpad: one-finger drag moves the pointer (with on-screen cursor), tap = click, two-finger tap = right click, two-finger drag = smooth scroll, pinch = zoom, tap-and-drag = click-drag.
-- **Keyboard** — full system keyboard via a hidden capture field, plus a key bar with modifiers (⇧⌃⌥⌘: tap for the next key, double-tap to lock), Esc/Tab/arrows/Home/End/Page keys, so shortcuts like ⌘C work.
+- **Keyboard** — full system keyboard via a hidden capture field, plus a key bar with modifiers (⇧⌃⌥⌘: held on the Mac while on, tap for the next key or click, double-tap to lock), Esc/Tab/arrows/Home/End/Page/Caps Lock keys, so shortcuts like ⌘C work.
 - **Quality presets** — Low (30 FPS), Balanced (60 FPS), High (60 FPS), and Sharp (Native 60 FPS) presets, switchable live from the client.
 - **Crash recovery** — a small supervisor process relaunches the host if it crashes and restores the sharing state it had.
 - **Setup Assistant** — walks through the Screen Recording and Accessibility permissions and the PIN on first launch, and whenever one goes missing.

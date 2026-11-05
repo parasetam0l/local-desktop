@@ -2,9 +2,10 @@ import SwiftUI
 
 /// Accessory bar above the session controls: modifiers plus common special keys.
 ///
-/// Modifiers work like the iOS Shift key: a tap arms a modifier for the next key
-/// only (including typed letters, which become shortcuts when non-shift modifiers
-/// are active); a double tap locks it until it is tapped again.
+/// Modifiers work like the iOS Shift key: a tap arms a modifier for the next key or
+/// click only (typed letters become shortcuts when non-shift modifiers are active); a
+/// double tap locks it until it is tapped again. The Mac sees an armed modifier as a
+/// held key, so menus show their Option items while it is on.
 struct KeyBar: View {
     /// Modifiers that apply to the next key.
     @Binding var modifiers: RDModifiers
@@ -40,6 +41,7 @@ struct KeyBar: View {
                 keyButton("end", .end)
                 keyButton("pg↑", .pageUp)
                 keyButton("pg↓", .pageDown)
+                keyButton("caps", .capsLock)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)

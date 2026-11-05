@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import IOKit.hidsystem
 import IOKit.pwr_mgt
 import Carbon
 
@@ -20,6 +21,19 @@ enum InputInjector {
     /// keyboard, even while `LocalInputBlocker` drops that keyboard, so a Control held
     /// there turned every click into a right-click.
     private static var heldModifiers: CGEventFlags = []
+    private static let capsLockKeyCode: CGKeyCode = 57
+    /// Caps Lock's on/off state sits below the event stream: a posted key 57 doesn't
+    /// change it, so it is read and set through this connection.
+    private static let hidSystem: io_connect_t? = {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(kIOHIDSystemClass))
+        guard service != IO_OBJECT_NULL else { return nil }
+        defer { IOObjectRelease(service) }
+        var connection: io_connect_t = 0
+        guard IOServiceOpen(service, mach_task_self_, UInt32(kIOHIDParamConnectType), &connection) == KERN_SUCCESS else {
+            return nil
+        }
+        return connection
+    }()
     private static var trackedPosition: CGPoint?
     private static var trackedAt: TimeInterval = 0
     private static var pressedButtons = Set<Int>()
@@ -418,27 +432,29 @@ enum InputInjector {
     /// ensuring hypervisors (like Parallels Desktop), remote sessions, and native macOS apps
     /// receive both physical keycodes and Unicode payloads.
     static func text(_ string: String) {
+        let capsLockOn = isCapsLockOn
         for character in string {
-            let charStr = String(character)
+            let charStr = capsLockOn ? capsLocked(String(character)) : String(character)
             var buffer = Array(charStr.utf16)
             guard !buffer.isEmpty else { continue }
 
             if let mapping = keyMapping(for: charStr) {
-                let needsShift = mapping.flags.contains(.maskShift)
-                let needsAlt = mapping.flags.contains(.maskAlternate)
+                // A modifier the client already holds stays down through this character.
+                let needsShift = mapping.flags.contains(.maskShift) && !heldModifiers.contains(.maskShift)
+                let needsAlt = mapping.flags.contains(.maskAlternate) && !heldModifiers.contains(.maskAlternate)
 
                 // 1. Press modifier keys if required so hypervisors (Parallels/VMware) see the modifier state
                 if needsShift {
                     if let shiftDown = CGEvent(keyboardEventSource: source, virtualKey: 56, keyDown: true) {
                         shiftDown.type = .flagsChanged
-                        shiftDown.flags = [.maskShift]
+                        shiftDown.flags = heldModifiers.union(.maskShift)
                         shiftDown.post(tap: .cghidEventTap)
                     }
                 }
                 if needsAlt {
                     if let altDown = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: true) {
                         altDown.type = .flagsChanged
-                        var f: CGEventFlags = [.maskAlternate]
+                        var f = heldModifiers.union(.maskAlternate)
                         if needsShift { f.insert(.maskShift) }
                         altDown.flags = f
                         altDown.post(tap: .cghidEventTap)
@@ -461,14 +477,14 @@ enum InputInjector {
                 if needsAlt {
                     if let altUp = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: false) {
                         altUp.type = .flagsChanged
-                        altUp.flags = needsShift ? [.maskShift] : []
+                        altUp.flags = needsShift ? heldModifiers.union(.maskShift) : heldModifiers
                         altUp.post(tap: .cghidEventTap)
                     }
                 }
                 if needsShift {
                     if let shiftUp = CGEvent(keyboardEventSource: source, virtualKey: 56, keyDown: false) {
                         shiftUp.type = .flagsChanged
-                        shiftUp.flags = []
+                        shiftUp.flags = heldModifiers
                         shiftUp.post(tap: .cghidEventTap)
                     }
                 }
@@ -491,8 +507,31 @@ enum InputInjector {
         [54, 55, 56, 58, 59, 60, 61, 62].contains(code)
     }
 
+    private static var isCapsLockOn: Bool {
+        guard let hidSystem else { return false }
+        var isOn = false
+        return IOHIDGetModifierLockState(hidSystem, Int32(kIOHIDCapsLockState), &isOn) == KERN_SUCCESS && isOn
+    }
+
+    /// What a character types with Caps Lock on. `text` events name their characters
+    /// outright, so the real Caps Lock doesn't change them. The Mac's layout decides
+    /// where it can ("i" is "İ" on Turkish).
+    private static func capsLocked(_ character: String) -> String {
+        guard character.first?.isLowercase == true else { return character }
+        if let mapping = keyMapping(for: character), mapping.flags.isEmpty,
+           let event = CGEvent(keyboardEventSource: source, virtualKey: mapping.keyCode, keyDown: true) {
+            event.flags = .maskAlphaShift
+            if let typed = NSEvent(cgEvent: event)?.characters { return typed }
+        }
+        return character.uppercased()
+    }
+
     static func key(code: CGKeyCode, down: Bool, flags: CGEventFlags) {
-        if isModifierKey(code) {
+        if code == capsLockKeyCode {
+            if down, let hidSystem {
+                IOHIDSetModifierLockState(hidSystem, Int32(kIOHIDCapsLockState), !isCapsLockOn)
+            }
+        } else if isModifierKey(code) {
             if let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) {
                 event.type = .flagsChanged
                 var cleanFlags = flags

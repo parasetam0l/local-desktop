@@ -36,7 +36,7 @@ newer message types don't break older peers.
 | 0x22 | mouseDown             | C → S 🔒  | `{button}` (0 left, 1 right) |
 | 0x23 | mouseUp               | C → S 🔒  | `{button}` |
 | 0x24 | scroll                | C → S 🔒  | `{dx, dy, precise?}` — lines, or points when `precise`; dy > 0 scrolls **up** (toward the start of the document) |
-| 0x30 | keyEvent              | C → S 🔒  | `{code, down, flags}` — Mac virtual key code, flags = modifier bitmask (shift 1, ctrl 2, alt 4, cmd 8) |
+| 0x30 | keyEvent              | C → S 🔒  | `{code, down, flags}` — Mac virtual key code, flags = modifier bitmask (shift 1, ctrl 2, alt 4, cmd 8); pressing code 57 toggles Caps Lock |
 | 0x31 | textEvent             | C → S 🔒  | `{s}` — unicode text |
 | 0x40 | ping                  | C → S 🔒  | `{t}` |
 | 0x41 | pong                  | S → C 🔒  | `{t}` |

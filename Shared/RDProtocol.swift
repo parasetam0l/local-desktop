@@ -343,6 +343,7 @@ enum RDKey: UInt16 {
     case left = 123
     case right = 124
     case key5 = 23
+    case capsLock = 57
 }
 
 struct RDModifiers: OptionSet, Hashable {
