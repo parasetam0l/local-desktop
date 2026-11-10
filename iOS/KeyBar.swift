@@ -16,6 +16,8 @@ struct KeyBar: View {
     @Binding var favourites: [String]
     /// Sends a key; the second argument holds modifiers the button itself adds (e.g. ⌘ for "⌘ space").
     var onKeyTap: (RDKey, RDModifiers) -> Void
+    /// Puts the keyboard (and this bar) away.
+    var onHideKeyboard: () -> Void
 
     @AppStorage("keyBarPage") private var pageRaw = KeyBarPage.keys.rawValue
     @State private var lastModifierTap: [RDModifiers: Date] = [:]
@@ -72,6 +74,16 @@ struct KeyBar: View {
                 } else {
                     pageButton
                 }
+                // Always in reach: the control bar's keyboard button may be shrunk away.
+                Button(action: onHideKeyboard) {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.footnote.weight(.semibold))
+                        .frame(width: 36, height: 34)
+                        .background(SessionStyle.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Hide keyboard")
             }
             .padding(.horizontal, 8)
             .frame(maxHeight: .infinity)

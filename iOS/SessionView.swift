@@ -135,6 +135,9 @@ struct SessionView: View {
                 if keyboardVisible, let frame = keyboardFrame {
                     KeyBar(modifiers: $modifiers, locked: $lockedModifiers, favourites: favouriteKeys) { key, extra in
                         session.keyTap(key, modifiers: consumeModifiers().union(extra))
+                    } onHideKeyboard: {
+                        keyboardAutoShown = false
+                        keyboardVisible = false
                     }
                     .frame(width: frame.width)
                     .clipShape(RoundedRectangle(cornerRadius: frame.minX > 1 ? 12 : 0))
