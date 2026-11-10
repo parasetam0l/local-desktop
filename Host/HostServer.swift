@@ -35,7 +35,11 @@ final class HostServer: ObservableObject {
     @Published private(set) var hasExternalDisplay = false
     /// The lid is shut and there is no external display: a forced-sleep state the host
     /// can't fight with power assertions.
-    var isHeadlessClosedLid: Bool { isLidClosed && !hasExternalDisplay }
+    /// A client's touch asked to wake the Mac anyway. The display often does wake with the
+    /// lid shut, so an explicit request is tried; only automatic wakes stay off. Cleared when
+    /// the lid or displays change or the last client leaves.
+    private var wakeRequestedWithClosedLid = false
+    var isHeadlessClosedLid: Bool { isLidClosed && !hasExternalDisplay && !wakeRequestedWithClosedLid }
     /// The setting: block this Mac's own keyboard and trackpad while devices are connected.
     @Published private(set) var blocksLocalInput = UserDefaults.standard.bool(forKey: HostServer.blocksLocalInputKey)
     /// Whether they're blocked right now.
@@ -186,6 +190,9 @@ final class HostServer: ObservableObject {
     /// clamshell sleep there is nothing capture can use, so capture waits instead of
     /// retrying; once a usable display exists again it picks back up.
     private func lidStateChanged() {
+        if lid.isLidClosed != isLidClosed || lid.hasExternalDisplay != hasExternalDisplay {
+            wakeRequestedWithClosedLid = false
+        }
         isLidClosed = lid.isLidClosed
         hasExternalDisplay = lid.hasExternalDisplay
         scheduleHostStateBroadcast()
@@ -508,6 +515,7 @@ final class HostServer: ObservableObject {
         updateLocalInputBlocking()
         if activeSessions.isEmpty {
             clientName = nil
+            wakeRequestedWithClosedLid = false
             lid.stop()
             power.release()
             ScreenStreamer.shared.stop()
@@ -544,12 +552,12 @@ final class HostServer: ObservableObject {
     func handleWakeDisplayRequest() {
         lid.refresh()
         updatePowerAssertions()
-        guard !isHeadlessClosedLid else {
-            // macOS forces clamshell sleep with the lid shut and no external display;
-            // another wake attempt would only restart the sleep/wake loop.
-            refreshDisplaySleepState()
-            broadcastHostState()
-            return
+        // Wake requests come from the user's touches on the client, so try even with the lid
+        // shut and no external display: the display often wakes then. Automatic wakes
+        // (on connect, after capture loss) still skip that state to avoid a wake/sleep loop.
+        if isLidClosed, !hasExternalDisplay, !wakeRequestedWithClosedLid {
+            wakeRequestedWithClosedLid = true
+            updatePowerAssertions()
         }
         InputInjector.wakeDisplay(within: streamedDisplayBounds)
         isDisplaySleeping = false

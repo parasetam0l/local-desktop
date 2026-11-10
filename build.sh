@@ -5,7 +5,8 @@
 #   ./build.sh                 Builds both macOS Host and iOS Client
 #   ./build.sh --host          Builds macOS Host only
 #   ./build.sh --client        Builds iOS Client only
-#   ./build.sh --install       Builds and installs (Host -> /Applications, Client -> connected iPhone)
+#   ./build.sh --install       Builds and installs (Host -> /Applications, Client -> cabled iPhone/iPad;
+#                              DEVICE=<UDID> picks another)
 #   ./build.sh --test          Runs the protocol unit tests and exits
 #   ./build.sh --team ABCDE12345
 #                              Signs the iOS app with this Apple Developer Team ID instead of the
@@ -111,9 +112,26 @@ fi
 
 if [[ "$BUILD_CLIENT" -eq 1 ]]; then
     echo "==> Finding connected iOS device..."
-    # Pick the first connected physical device's UDID (device names can contain spaces).
-    DEVICE_ID=$(xcrun devicectl list devices 2>/dev/null | grep "physical" \
-        | grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}|[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}' | head -n 1 || true)
+    # DEVICE=<UDID> picks the device. Otherwise take a physical device connected by cable,
+    # then any physical one (a paired iPhone on Wi-Fi only if nothing is plugged in).
+    DEVICE_ID="${DEVICE:-}"
+    if [[ -z "$DEVICE_ID" ]]; then
+        DEVICES_JSON=$(mktemp)
+        xcrun devicectl list devices --json-output "$DEVICES_JSON" >/dev/null 2>&1 || true
+        DEVICE_ID=$(python3 -I - "$DEVICES_JSON" <<'PY' || true
+import json, sys
+try:
+    devices = json.load(open(sys.argv[1]))["result"]["devices"]
+except Exception:
+    sys.exit(0)
+physical = [d for d in devices if d.get("hardwareProperties", {}).get("reality") == "physical"]
+physical.sort(key=lambda d: d.get("connectionProperties", {}).get("transportType") != "wired")
+if physical:
+    print(physical[0]["hardwareProperties"]["udid"])
+PY
+)
+        rm -f "$DEVICES_JSON"
+    fi
 
     DESTINATION="generic/platform=iOS"
     PROVISIONING_ARGS=(-allowProvisioningUpdates)
@@ -143,7 +161,7 @@ if [[ "$BUILD_CLIENT" -eq 1 ]]; then
         echo "==> Installing LocalDesktopClient to device $DEVICE_ID..."
         xcrun devicectl device install app --device "$DEVICE_ID" "$CLIENT_APP"
         xcrun devicectl device process launch --device "$DEVICE_ID" localdesktop.client || true
-        echo "==> LocalDesktopClient installed and launched on iPhone."
+        echo "==> LocalDesktopClient installed on the device."
     fi
 fi
 

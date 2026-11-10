@@ -144,7 +144,9 @@ struct SessionStateOverlay: View {
 
     @ViewBuilder
     private var connectedOverlay: some View {
-        if session.isHeadlessClosedLid {
+        // The display can still wake with the lid shut when asked by a touch, so the card
+        // only stays while the display is actually asleep.
+        if session.isHeadlessClosedLid, session.isDisplaySleeping {
             lidClosedOverlay
         } else if showsDisplaySleeping {
             sleepingOverlay
@@ -153,9 +155,8 @@ struct SessionStateOverlay: View {
         }
     }
 
-    /// A shut lid with no external display is a forced-sleep state: macOS sleeps the Mac
-    /// no matter which assertions the host holds, so asking the user to wake the screen
-    /// would just restart the wake/sleep loop. Show one stable explanation instead.
+    /// A shut lid with no external display: the Mac doesn't wake its screen on its own then
+    /// (that only looped between wake and sleep), but a drag or tap still asks it to.
     private var lidClosedOverlay: some View {
         VStack(spacing: 14) {
             Image(systemName: "laptopcomputer.slash")
@@ -164,7 +165,7 @@ struct SessionStateOverlay: View {
             Text("Mac Lid Is Closed")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white)
-            Text("macOS sleeps this Mac when the lid is closed, so its screen isn't available. Open the lid or connect an external display to keep using it remotely.")
+            Text("The Mac's screen is asleep. Drag or tap to try waking it, or open the lid or connect an external display.")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
