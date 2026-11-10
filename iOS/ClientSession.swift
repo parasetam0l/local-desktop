@@ -44,6 +44,13 @@ final class ClientSession: ObservableObject {
     /// The Mac's displays and the one being streamed (Macs before 1.2.1 don't send them).
     @Published private(set) var displays: [RDDisplay] = []
     @Published private(set) var selectedDisplayId: UInt32?
+    /// Whether the Mac can lay its desktop out at a size we choose (false before 1.2.12).
+    @Published private(set) var sizedMirrorAvailable = false
+    /// The size the Mac's desktop is laid out at for us, nil with the Mac's own layout.
+    @Published private(set) var mirrorSize: RDMirrorSize?
+    /// The desktop size to ask for when a connection starts (from Settings), if any.
+    var defaultMirrorSize: RDMirrorSize?
+    private var appliedDefaultMirrorSize = false
     /// Whether the Mac blocks its own keyboard and trackpad during sessions (nil before 1.2.4).
     @Published private(set) var blocksMacInput: Bool?
     @Published var showDebugHUD = false
@@ -392,6 +399,7 @@ final class ClientSession: ObservableObject {
                 fail("Protocol error: unexpected authentication response")
                 return
             }
+            appliedDefaultMirrorSize = false
             handleAuthOK(msg, attempt: attempt)
 
         case .authFailed:
@@ -437,6 +445,14 @@ final class ClientSession: ObservableObject {
             guard let msg = RDJSON.decode(RDDisplaysMsg.self, from: payload) else { break }
             displays = msg.displays
             selectedDisplayId = msg.selectedId
+            sizedMirrorAvailable = msg.sizedMirrorAvailable ?? false
+            mirrorSize = msg.mirrorSize
+            // The Settings default, asked for once per connection (the Mac drops the
+            // size when its last client leaves); the session menu can change it after.
+            if !appliedDefaultMirrorSize, sizedMirrorAvailable {
+                appliedDefaultMirrorSize = true
+                if let size = defaultMirrorSize { setSizedMirror(size) }
+            }
 
         case .bye:
             let msg = RDJSON.decode(ByeMsg.self, from: payload)
@@ -768,6 +784,13 @@ final class ClientSession: ObservableObject {
         guard phase == .connected, id != selectedDisplayId, displays.contains(where: { $0.id == id }) else { return }
         selectedDisplayId = id
         sendJSON(.selectDisplay, RDSelectDisplayMsg(id: id))
+    }
+
+    /// Lays the Mac's desktop out at `size` (its own screen mirrors that for the session),
+    /// or back at the Mac's own size with nil; the Mac confirms with a new `displays` message.
+    func setSizedMirror(_ size: RDMirrorSize?) {
+        guard phase == .connected, sizedMirrorAvailable, size != mirrorSize else { return }
+        sendJSON(.setSizedMirror, RDSetSizedMirrorMsg(size: size))
     }
 
     /// Changes the Mac's setting for blocking its own keyboard and trackpad; the Mac

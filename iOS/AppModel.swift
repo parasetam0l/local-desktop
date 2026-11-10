@@ -26,6 +26,24 @@ struct AppSettings: Codable {
     var showRemoteCursor = false
     var showScrollHelpers = true
     var pointerSpeedMultiplier: Double = 1.5
+    /// Optional so settings saved before it existed still decode.
+    var zoomLocked: Bool? = nil
+    var oneFingerScroll: Bool? = nil
+    /// The desktop size sessions start with; nil is the Mac's own size.
+    var defaultMirrorSize: RDMirrorSize? = nil
+
+    /// Pinch doesn't zoom, and a two-finger drag always scrolls the Mac.
+    var isZoomLocked: Bool {
+        get { zoomLocked ?? false }
+        set { zoomLocked = newValue }
+    }
+
+    /// In direct mode a one-finger drag scrolls the Mac, and touch-and-hold then drag
+    /// is the mouse drag.
+    var isOneFingerScroll: Bool {
+        get { oneFingerScroll ?? false }
+        set { oneFingerScroll = newValue }
+    }
 
     var preset: RDQualityPreset { RDQualityPreset.from(qualityRaw) }
     var codec: RDCodec { RDCodec(rawValue: codecRaw) ?? .hevc }
@@ -132,6 +150,7 @@ final class AppModel: ObservableObject {
         session?.disconnect()
         let newSession = ClientSession(deviceName: UIDevice.current.name)
         newSession.autoReconnect = settings.autoReconnect
+        newSession.defaultMirrorSize = settings.defaultMirrorSize
         session = newSession
 
         newSession.onConnected = { [weak self] connected in
@@ -286,4 +305,27 @@ final class AppModel: ObservableObject {
     func applyQualitySettings() {
         session?.setQuality(settings.preset, showRemoteCursor: settings.showRemoteCursor, codec: settings.codec)
     }
+}
+
+extension RDMirrorSize {
+    /// Desktop sizes to offer: this device's own screen (landscape, in points) and the
+    /// usual 4:3 iPad sizes around it.
+    @MainActor static let options: [(name: String, size: RDMirrorSize)] = {
+        let bounds = UIScreen.main.bounds
+        let device = RDMirrorSize(width: Int(max(bounds.width, bounds.height)),
+                                  height: Int(min(bounds.width, bounds.height)))
+        var sizes: [(name: String, size: RDMirrorSize)] = [
+            ("Larger Text", RDMirrorSize(width: 1024, height: 768)),
+            ("Medium", RDMirrorSize(width: 1112, height: 834)),
+            ("More Space", RDMirrorSize(width: 1366, height: 1024)),
+            ("Most Space", RDMirrorSize(width: 1600, height: 1200))
+        ]
+        let deviceName = UIDevice.current.userInterfaceIdiom == .pad ? "This iPad" : "This iPhone"
+        if let index = sizes.firstIndex(where: { $0.size == device }) {
+            sizes[index].name = deviceName
+        } else {
+            sizes.insert((deviceName, device), at: 0)
+        }
+        return sizes
+    }()
 }

@@ -45,7 +45,10 @@ struct SessionView: View {
                     controller: canvasController,
                     onTap: directTapHandler,
                     onRightTap: directRightTapHandler,
-                    onDrag: dragHandler
+                    onDrag: dragHandler,
+                    onScroll: directScrollHandler,
+                    isZoomLocked: app.settings.isZoomLocked,
+                    isOneFingerScroll: app.settings.isOneFingerScroll
                 )
                 .allowsHitTesting(isConnected && !touchpadMode)
             }
@@ -117,6 +120,8 @@ struct SessionView: View {
                         session: session,
                         displays: session.displays,
                         selectedDisplayId: session.selectedDisplayId,
+                        sizedMirrorAvailable: session.sizedMirrorAvailable,
+                        mirrorSize: session.mirrorSize,
                         blocksMacInput: session.blocksMacInput,
                         canvasController: canvasController,
                         onDismiss: onDismiss
@@ -139,7 +144,7 @@ struct SessionView: View {
                     }
                 }
                 .padding(.horizontal, 24)
-                .padding(.bottom, 24)
+                .padding(.bottom, 4)
                 .frame(maxHeight: .infinity, alignment: .bottom)
 
                 // Top Overlays: Debug HUD & Mac Locked Banner
@@ -253,6 +258,22 @@ struct SessionView: View {
             }
             session.click(button: 1, atRemote: point)
             _ = consumeModifiers()
+        } : nil
+    }
+
+    /// Two-finger drag in direct mode: point the Mac's cursor at the fingers, then scroll
+    /// like the touchpad's two-finger scroll.
+    private var directScrollHandler: ((CGPoint?, CGFloat, CGFloat) -> Void)? {
+        isConnected && !touchpadMode ? { start, dx, dy in
+            if let start {
+                if session.isDisplaySleeping {
+                    session.wakeHostDisplay()
+                }
+                session.moveAbs(Double(start.x), Double(start.y))
+            }
+            session.scroll(dx: Double(dx) * Self.touchpadScrollSpeed,
+                           dy: Double(dy) * Self.touchpadScrollSpeed,
+                           precise: true)
         } : nil
     }
 

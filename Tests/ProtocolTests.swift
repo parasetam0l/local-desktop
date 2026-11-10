@@ -256,6 +256,24 @@ final class DisplayMessageTests: XCTestCase {
         XCTAssertEqual(message.displays[0].resolution, "1728×1117")
     }
 
+    func testSizedMirrorFieldsAreOptionalAndRoundTrip() throws {
+        // A Mac before 1.2.12 sends neither field.
+        let old = try XCTUnwrap(RDJSON.decode(RDDisplaysMsg.self, from: Data(#"{"displays":[],"selectedId":1}"#.utf8)))
+        XCTAssertNil(old.sizedMirrorAvailable)
+        XCTAssertNil(old.mirrorSize)
+
+        let size = RDMirrorSize(width: 1112, height: 834)
+        let message = RDDisplaysMsg(displays: [], selectedId: 7, sizedMirrorAvailable: true, mirrorSize: size)
+        XCTAssertEqual(RDJSON.decode(RDDisplaysMsg.self, from: RDJSON.encode(message)), message)
+        XCTAssertEqual(size.label, "1112×834")
+
+        let on = RDJSON.decode(RDSetSizedMirrorMsg.self, from: Data(#"{"size":{"width":1024,"height":768}}"#.utf8))
+        XCTAssertEqual(on?.size, RDMirrorSize(width: 1024, height: 768))
+        // Off is a message without a size.
+        let off = try XCTUnwrap(RDJSON.decode(RDSetSizedMirrorMsg.self, from: RDJSON.encode(RDSetSizedMirrorMsg(size: nil))))
+        XCTAssertNil(off.size)
+    }
+
     func testSelectionIsOptional() {
         let data = Data(#"{"displays":[]}"#.utf8)
         XCTAssertEqual(RDJSON.decode(RDDisplaysMsg.self, from: data), RDDisplaysMsg(displays: [], selectedId: nil))

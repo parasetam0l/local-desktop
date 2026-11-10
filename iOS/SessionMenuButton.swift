@@ -7,6 +7,8 @@ struct SessionMenuButton: View {
     /// Passed in rather than read from `session`, which this view doesn't observe.
     let displays: [RDDisplay]
     let selectedDisplayId: UInt32?
+    let sizedMirrorAvailable: Bool
+    let mirrorSize: RDMirrorSize?
     let blocksMacInput: Bool?
     @ObservedObject var canvasController: CanvasController
     let onDismiss: () -> Void
@@ -52,6 +54,38 @@ struct SessionMenuButton: View {
                 }
             }
 
+            if sizedMirrorAvailable {
+                Menu {
+                    Button {
+                        session.setSizedMirror(nil)
+                    } label: {
+                        if mirrorSize == nil {
+                            Label("Mac's Own Size", systemImage: "checkmark")
+                        } else {
+                            Text("Mac's Own Size")
+                        }
+                    }
+                    Section {
+                        ForEach(RDMirrorSize.options, id: \.size) { option in
+                            Button {
+                                session.setSizedMirror(option.size)
+                            } label: {
+                                if option.size == mirrorSize {
+                                    Label("\(option.name) · \(option.size.label)", systemImage: "checkmark")
+                                } else {
+                                    Text("\(option.name) · \(option.size.label)")
+                                }
+                            }
+                        }
+                    } footer: {
+                        Text("The Mac's own screen shows the same layout while this is on.")
+                    }
+                } label: {
+                    Label("Desktop Size: \(mirrorSize?.label ?? "Mac's Own")",
+                          systemImage: "rectangle.dashed")
+                }
+            }
+
             Button {
                 withAnimation {
                     session.showDebugHUD.toggle()
@@ -86,6 +120,16 @@ struct SessionMenuButton: View {
             } label: {
                 let currentSpeedLabel = app.settings.pointerSpeedMultiplier == 2.0 ? "Fast" : (app.settings.pointerSpeedMultiplier == 1.5 ? "Normal" : "Slow")
                 Label("Pointer Speed: \(currentSpeedLabel)", systemImage: "cursorarrow.motionlines")
+            }
+
+            Toggle(isOn: $app.settings.isZoomLocked) {
+                Label("Lock Zoom", systemImage: "lock.rectangle")
+            }
+
+            if !touchpadMode {
+                Toggle(isOn: $app.settings.isOneFingerScroll) {
+                    Label("One-Finger Scroll", systemImage: "hand.draw")
+                }
             }
 
             Button {

@@ -425,7 +425,7 @@ final class ClientSession {
             InputInjector.tickleUserActivity()
             handleInput(wire, payload: payload)
         case .requestApps, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay,
-             .setLocalInputBlock:
+             .setLocalInputBlock, .setSizedMirror:
             handleControl(wire, payload: payload)
         default:
             break
@@ -579,6 +579,12 @@ final class ClientSession {
         case .selectDisplay:
             guard let msg = RDJSON.decode(RDSelectDisplayMsg.self, from: payload) else { return }
             server.setDisplay(msg.id)
+
+        case .setSizedMirror:
+            guard let msg = RDJSON.decode(RDSetSizedMirrorMsg.self, from: payload) else { return }
+            server.setSizedMirror(msg.size)
+            // Tells the client the outcome even when nothing changed (e.g. it failed).
+            sendDisplays(server.displaysMessage)
 
         case .setLocalInputBlock:
             guard let msg = RDJSON.decode(RDSetLocalInputBlockMsg.self, from: payload) else { return }

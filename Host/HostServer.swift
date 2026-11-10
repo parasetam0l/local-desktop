@@ -20,6 +20,13 @@ final class HostServer: ObservableObject {
     @Published private(set) var selectedDisplayID: CGDirectDisplayID? {
         didSet { if selectedDisplayID != oldValue { broadcastDisplays() } }
     }
+    /// The size the desktop is laid out at for the clients, while that mode is on.
+    @Published private(set) var mirrorSize: RDMirrorSize? {
+        didSet { if mirrorSize != oldValue { broadcastDisplays() } }
+    }
+    private let sizedMirror = SizedMirror()
+    /// The display that was streamed before the sized mirror took over.
+    private var displayBeforeSizedMirror: CGDirectDisplayID?
     @Published var preset: RDQualityPreset = .high
     @Published var lastError: String?
     /// Why screen capture last failed; cleared once capture runs again.
@@ -319,6 +326,7 @@ final class HostServer: ObservableObject {
         for session in sessions {
             session.close(sendingBye: RDByeReason.hostStopped)
         }
+        endSizedMirror()
         lid.stop()
         power.release()
         hostStateBroadcastWorkItem?.cancel()
@@ -344,6 +352,8 @@ final class HostServer: ObservableObject {
     /// that's gone gives way to the main one.
     func refreshDisplays() {
         displays = Self.currentDisplays()
+        // The sized mirror's display is listed a moment after it is created.
+        if let mirror = sizedMirror.displayID, selectedDisplayID == mirror, CGDisplayIsOnline(mirror) != 0 { return }
         if selectedDisplayID.map({ id in !displays.contains { $0.id == id } }) ?? true {
             selectedDisplayID = displays.first?.id
         }
@@ -366,8 +376,9 @@ final class HostServer: ObservableObject {
         }
     }
 
-    private var displaysMessage: RDDisplaysMsg {
-        RDDisplaysMsg(displays: displays, selectedId: selectedDisplayID)
+    var displaysMessage: RDDisplaysMsg {
+        RDDisplaysMsg(displays: displays, selectedId: selectedDisplayID,
+                      sizedMirrorAvailable: SizedMirror.isAvailable, mirrorSize: mirrorSize)
     }
 
     private func broadcastDisplays() {
@@ -388,6 +399,40 @@ final class HostServer: ObservableObject {
         selectedDisplayID = id
         guard running, !activeSessions.isEmpty else { return }
         restartCapture()
+    }
+
+    /// Lays the desktop out at `size` and streams that (the Mac's main display mirrors a
+    /// virtual display of that size), or goes back to the Mac's own layout with nil.
+    func setSizedMirror(_ size: RDMirrorSize?) {
+        let wanted = size.map(SizedMirror.clamped)
+        guard wanted != mirrorSize else { return }
+        guard let wanted else {
+            endSizedMirror()
+            return
+        }
+        // Pointless with the lid shut and no display: there is no desktop to lay out.
+        guard running, !activeSessions.isEmpty, !isHeadlessClosedLid else { return }
+        if mirrorSize == nil { displayBeforeSizedMirror = selectedDisplayID }
+        guard let id = sizedMirror.start(size: wanted) else {
+            // `start` removed any earlier virtual display, so the mode is off now.
+            endSizedMirror(force: true)
+            captureError = "Could not set up the \(wanted.label) display."
+            return
+        }
+        mirrorSize = wanted
+        selectedDisplayID = id
+        refreshDisplays()
+        restartCapture()
+    }
+
+    private func endSizedMirror(force: Bool = false) {
+        guard force || mirrorSize != nil else { return }
+        sizedMirror.stop()
+        mirrorSize = nil
+        selectedDisplayID = displayBeforeSizedMirror
+        displayBeforeSizedMirror = nil
+        refreshDisplays()
+        if running, !activeSessions.isEmpty { restartCapture() }
     }
 
     func setCodec(_ codec: RDCodec) {
@@ -516,6 +561,7 @@ final class HostServer: ObservableObject {
         if activeSessions.isEmpty {
             clientName = nil
             wakeRequestedWithClosedLid = false
+            endSizedMirror()
             lid.stop()
             power.release()
             ScreenStreamer.shared.stop()

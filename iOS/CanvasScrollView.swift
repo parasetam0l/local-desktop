@@ -6,6 +6,31 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
     var directTap: ((CGPoint) -> Void)?
     var directRightTap: ((CGPoint) -> Void)?
     var dragEvent: ((DragEvent) -> Void)?
+    /// Two-finger drag at fit zoom scrolls the Mac: the remote point under the fingers when
+    /// the drag starts (nil after), then the finger travel in points. Zoomed in, two
+    /// fingers pan the view instead.
+    var directScroll: ((CGPoint?, CGFloat, CGFloat) -> Void)?
+    private let scrollPan = UIPanGestureRecognizer()
+    /// Zoom stays where it is: pinch is off, one finger pans the view, and a two-finger
+    /// drag scrolls the Mac at any zoom, so scrolling and panning never mix.
+    var isZoomLocked = false {
+        didSet {
+            guard isZoomLocked != oldValue else { return }
+            pinchGestureRecognizer?.isEnabled = !isZoomLocked
+            panGestureRecognizer.maximumNumberOfTouches = isZoomLocked ? 1 : Int.max
+        }
+    }
+
+    /// One finger works like on iOS: a drag scrolls the Mac (at fit zoom; zoomed in it
+    /// pans the view), and touch-and-hold then drag is a mouse drag. Holding without
+    /// moving is still a right click, sent when the finger lifts.
+    var isOneFingerScroll = false {
+        didSet { scrollPan.minimumNumberOfTouches = isOneFingerScroll ? 1 : 2 }
+    }
+    private let longPress = UILongPressGestureRecognizer()
+    /// Where a hold started and whether it has turned into a drag (one-finger scroll only).
+    private var holdStart: (remote: CGPoint, screen: CGPoint)?
+    private var holdIsDragging = false
 
     weak var controller: CanvasController?
 
@@ -37,14 +62,19 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerTap(_:)))
         twoFingerTap.numberOfTouchesRequired = 2
 
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.addTarget(self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.35
 
         let tapAndDrag = UILongPressGestureRecognizer(target: self, action: #selector(handleTapAndDrag(_:)))
         tapAndDrag.numberOfTapsRequired = 1
         tapAndDrag.minimumPressDuration = 0.1
 
-        for gesture in [tap, twoFingerTap, longPress, tapAndDrag] {
+        scrollPan.addTarget(self, action: #selector(handleScrollPan(_:)))
+        scrollPan.minimumNumberOfTouches = 2
+        scrollPan.maximumNumberOfTouches = 2
+        twoFingerTap.require(toFail: scrollPan)
+
+        for gesture in [tap, twoFingerTap, longPress, tapAndDrag, scrollPan] {
             addGestureRecognizer(gesture)
             gesture.delegate = self
         }
@@ -289,6 +319,7 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
 
     /// Zoom driven from the touchpad overlay (which sits on top and owns the touches).
     func zoom(by factor: CGFloat) {
+        guard !isZoomLocked else { return }
         let target = max(minimumZoomScale, min(zoomScale * factor, maximumZoomScale))
         setZoomScale(target, animated: false)
     }
@@ -314,6 +345,32 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         return true
     }
 
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === scrollPan {
+            guard directScroll != nil else { return false }
+            let atFitZoom = zoomScale <= minimumZoomScale + 0.01
+            if scrollPan.numberOfTouches < 2 {
+                // A hold that already began owns the finger: it is a drag, not a scroll.
+                let holding = longPress.state == .began || longPress.state == .changed
+                return isOneFingerScroll && atFitZoom && !holding
+            }
+            return isZoomLocked || atFitZoom
+        }
+        return super.gestureRecognizerShouldBegin(gestureRecognizer)
+    }
+
+    @objc private func handleScrollPan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            let start = gesture.state == .began ? remotePoint(at: gesture.location(in: self)) : nil
+            let translation = gesture.translation(in: self)
+            gesture.setTranslation(.zero, in: self)
+            directScroll?(start, translation.x, translation.y)
+        default:
+            break
+        }
+    }
+
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         guard gesture.state == .ended, let point = remotePoint(at: gesture.location(in: self)) else { return }
         directTap?(point)
@@ -325,9 +382,45 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began, let point = remotePoint(at: gesture.location(in: self)) else { return }
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        directRightTap?(point)
+        guard isOneFingerScroll else {
+            guard gesture.state == .began, let point = remotePoint(at: gesture.location(in: self)) else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            directRightTap?(point)
+            return
+        }
+
+        let screen = gesture.location(in: self)
+        switch gesture.state {
+        case .began:
+            guard let point = remotePoint(at: screen) else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            holdStart = (point, screen)
+            holdIsDragging = false
+        case .changed:
+            guard let start = holdStart else { return }
+            if !holdIsDragging {
+                // A resting finger wobbles a little; only real travel starts the drag.
+                guard hypot(screen.x - start.screen.x, screen.y - start.screen.y) > 6 else { return }
+                holdIsDragging = true
+                isScrollEnabled = false
+                dragEvent?(.began(start.remote))
+            }
+            if let point = remotePoint(at: screen) {
+                dragEvent?(.changed(point))
+            }
+        case .ended, .cancelled, .failed:
+            guard let start = holdStart else { return }
+            holdStart = nil
+            if holdIsDragging {
+                holdIsDragging = false
+                isScrollEnabled = true
+                dragEvent?(.ended)
+            } else if gesture.state == .ended {
+                directRightTap?(start.remote)
+            }
+        default:
+            break
+        }
     }
 
     @objc private func handleTapAndDrag(_ gesture: UILongPressGestureRecognizer) {

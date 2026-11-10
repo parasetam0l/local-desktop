@@ -40,6 +40,9 @@ struct ZoomableCanvas: UIViewRepresentable {
     var onTap: ((CGPoint) -> Void)?
     var onRightTap: ((CGPoint) -> Void)?
     var onDrag: ((DragEvent) -> Void)?
+    var onScroll: ((CGPoint?, CGFloat, CGFloat) -> Void)?
+    var isZoomLocked = false
+    var isOneFingerScroll = false
 
     final class Coordinator {
         weak var session: ClientSession?
@@ -66,6 +69,9 @@ struct ZoomableCanvas: UIViewRepresentable {
         view.directTap = onTap
         view.directRightTap = onRightTap
         view.dragEvent = onDrag
+        view.directScroll = onScroll
+        view.isZoomLocked = isZoomLocked
+        view.isOneFingerScroll = isOneFingerScroll
         view.setContentSize(contentSize)
     }
 

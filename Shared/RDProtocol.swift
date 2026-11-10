@@ -50,6 +50,7 @@ enum RDWire: UInt8 {
     case displays = 0x54
     case selectDisplay = 0x55
     case setLocalInputBlock = 0x56
+    case setSizedMirror = 0x57
     case bye = 0x60
 
     // App Switcher & Actions
@@ -461,6 +462,25 @@ struct RDDisplay: Codable, Equatable, Identifiable {
 struct RDDisplaysMsg: Codable, Equatable {
     let displays: [RDDisplay]
     let selectedId: UInt32?
+    /// Whether the Mac can lay its desktop out at a client's size (nil before 1.2.12).
+    var sizedMirrorAvailable: Bool?
+    /// The size the desktop is laid out at while that mode is on.
+    var mirrorSize: RDMirrorSize?
+}
+
+/// A desktop size in points.
+struct RDMirrorSize: Codable, Equatable, Hashable {
+    let width: Int
+    let height: Int
+
+    var label: String { "\(width)×\(height)" }
+}
+
+/// Asks the host to lay the desktop out at `size` (the Mac's own screen mirrors it for
+/// the session), or to go back to the Mac's own layout when `size` is nil. Like
+/// `selectDisplay` it applies to every connected client.
+struct RDSetSizedMirrorMsg: Codable {
+    let size: RDMirrorSize?
 }
 
 /// Asks the host to stream another display. It applies to every connected client,

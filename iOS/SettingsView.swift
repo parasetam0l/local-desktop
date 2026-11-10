@@ -28,6 +28,13 @@ struct SettingsView: View {
                         app.applyQualitySettings()
                     }
 
+                    Picker("Default Desktop Size", selection: $app.settings.defaultMirrorSize) {
+                        Text("Mac's Own Size").tag(RDMirrorSize?.none)
+                        ForEach(RDMirrorSize.options, id: \.size) { option in
+                            Text("\(option.name) · \(option.size.label)").tag(RDMirrorSize?.some(option.size))
+                        }
+                    }
+
                     Picker("Video Codec", selection: $app.settings.codecRaw) {
                         Text("HEVC / H.265 (Recommended)").tag(RDCodec.hevc.rawValue)
                         Text("H.264").tag(RDCodec.h264.rawValue)
@@ -43,6 +50,8 @@ struct SettingsView: View {
                         .onChange(of: app.settings.showRemoteCursor) {
                             app.applyQualitySettings()
                         }
+                    Toggle("One-finger drag scrolls in direct mode", isOn: $app.settings.isOneFingerScroll)
+                    Toggle("Lock zoom", isOn: $app.settings.isZoomLocked)
                     Picker("Pointer Speed", selection: $app.settings.pointerSpeedMultiplier) {
                         Text("Slow").tag(1.0)
                         Text("Normal").tag(1.5)

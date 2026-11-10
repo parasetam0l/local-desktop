@@ -23,8 +23,10 @@ Both apps speak the same custom TCP protocol (see [`Protocol.md`](Protocol.md)) 
 - **Trusted devices** — after pairing, the iPhone proves itself with its own key (kept in the Keychain), so later connections skip the PIN. The Mac shows trusted devices and can revoke them at any time.
 - **Encryption** — every connection runs an X25519 key exchange; everything after the handshake is sealed with ChaCha20-Poly1305 with per-direction keys and replay protection.
 - **Instant Cursor Prediction** — 0ms perceived pointer latency in touchpad and direct modes with local 120Hz display refresh tracking.
+- **Desktop Size** — lay the Mac's desktop out at the iPad's or iPhone's own size (or another 4:3 size from 1024×768 to 1600×1200) so it fills the screen without zooming. Pick it per session in the session menu, or as the default in Settings. The Mac's own screen shows the same layout while it is on and returns to its own size when the session ends; windows larger than the chosen size may be resized by macOS. It uses a virtual display from a private macOS API, so the choice is hidden on a macOS that doesn't have it.
 - **Zoom on mobile** — pinch to zoom (fit → 8×) and pan while zoomed.
-- **Direct mode** — tap = left click, two-finger tap = right click, long-press = right click, tap-and-drag = press & drag.
+- **Direct mode** — tap = left click, two-finger tap = right click, long-press = right click, tap-and-drag = press & drag, two-finger drag = scroll (pans the view instead while zoomed in, unless **Lock Zoom** in the session menu is on: then pinch is off, one finger pans and two fingers always scroll).
+  With **One-Finger Scroll** on (session menu) a one-finger drag scrolls the Mac too, touch-and-hold then drag is the press & drag, and holding without moving right-clicks when you lift.
 - **Touchpad mode** — the whole screen becomes a trackpad: one-finger drag moves the pointer (with on-screen cursor), tap = click, two-finger tap = right click, two-finger drag = smooth scroll, pinch = zoom, tap-and-drag = click-drag.
 - **Keyboard** — full system keyboard via a hidden capture field, plus a key bar with modifiers (⇧⌃⌥⌘: held on the Mac while on, tap for the next key or click, double-tap to lock), Esc/Tab/arrows/Home/End/Page/Caps Lock keys, so shortcuts like ⌘C work.
 - **Quality presets** — Low (30 FPS), Balanced (60 FPS), High (60 FPS), and Sharp (Native 60 FPS) presets, switchable live from the client.
@@ -101,7 +103,7 @@ or certificate, remove the old entries and grant them again.
 1. On the Mac: open the menu bar icon → set a **4-digit PIN** → **Start Sharing**. The menu shows the address/port, the advertised name, and the Mac's **fingerprint**.
 2. On iPhone: your Mac appears under **Nearby Macs** → tap it → the PIN screen shows the Mac's fingerprint; check it matches the menu bar, then enter the PIN (leave "Trust this device" on) → connected.
 3. Control with the mode you prefer:
-   - **Direct mode**: pinch/zoom, tap, two-finger tap, tap-and-drag.
+   - **Direct mode**: pinch/zoom, tap, two-finger tap, two-finger scroll, tap-and-drag.
    - **Touchpad mode**: toggle in the session menu; the screen acts like a big trackpad with a virtual cursor.
    - **Keyboard**: tap the keyboard button; use the key bar for modifiers and special keys.
 4. From then on, connecting to that Mac skips the PIN (trusted device).
