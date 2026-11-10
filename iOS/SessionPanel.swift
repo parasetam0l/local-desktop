@@ -11,6 +11,7 @@ struct SessionPanel: View {
     var onDisconnect: () -> Void
 
     @State private var showHardwareSheet = false
+    @State private var showGestures = false
 
     private static let pointerSpeeds: [(label: String, value: Double)] = [("Slow", 1.0), ("Normal", 1.5), ("Fast", 2.0)]
 
@@ -162,6 +163,12 @@ struct SessionPanel: View {
                 PanelToggleRow(title: "One-finger scroll", isOn: $app.settings.isOneFingerScroll)
             }
             PanelToggleRow(title: "Lock zoom", isOn: $app.settings.isZoomLocked)
+            PanelButtonRow(title: "Gestures", symbol: "questionmark.circle") {
+                showGestures = true
+            }
+            .adaptiveSheet(isPresented: $showGestures, padSize: CGSize(width: 400, height: 560)) {
+                GestureGuideView(app: app, isPresented: $showGestures)
+            }
         }
     }
 

@@ -84,6 +84,8 @@ struct SettingsView: View {
         }
     }
 
+    @State private var showGestures = false
+
     private var touchSection: some View {
         PanelSection("Touch", footer: "Touchpad mode moves a pointer like a trackpad; direct touch clicks right where your finger is.") {
             PanelToggleRow(title: "Start sessions in touchpad mode", isOn: $app.settings.defaultTouchpad)
@@ -97,11 +99,17 @@ struct SettingsView: View {
             PanelToggleRow(title: "Show the Mac's cursor", isOn: $app.settings.showRemoteCursor)
             PanelToggleRow(title: "One-finger drag scrolls in direct touch", isOn: $app.settings.isOneFingerScroll)
             PanelToggleRow(title: "Lock zoom", isOn: $app.settings.isZoomLocked)
+            PanelButtonRow(title: "Gestures", symbol: "questionmark.circle") {
+                showGestures = true
+            }
+            .sheet(isPresented: $showGestures) {
+                GestureGuideView(app: app, isPresented: $showGestures)
+            }
         }
     }
 
     private var keyboardSection: some View {
-        PanelSection("Keyboard", footer: "The on-screen keyboard opens by itself when you tap a text field on the Mac.") {
+        PanelSection("Keyboard", footer: "In direct touch mode the on-screen keyboard opens by itself when you tap a text field on the Mac.") {
             PanelToggleRow(title: "Show keyboard for text fields",
                            isOn: Binding(get: { app.settings.autoKeyboard ?? true }, set: { app.settings.autoKeyboard = $0 }))
         }

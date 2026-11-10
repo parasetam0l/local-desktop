@@ -28,6 +28,21 @@ struct SessionView: View {
     private struct Toast: Equatable {
         let symbol: String
         let text: String
+        var isFailure = false
+    }
+
+    /// The touch mode whose gestures are being introduced (the first time it is used).
+    @State private var gestureCardForTouchpad: Bool?
+    @AppStorage("seenTouchpadGestures") private var seenTouchpadGestures = false
+    @AppStorage("seenDirectGestures") private var seenDirectGestures = false
+
+    private func introduceGesturesIfNew() {
+        guard isConnected else { return }
+        if touchpadMode ? !seenTouchpadGestures : !seenDirectGestures {
+            gestureCardForTouchpad = touchpadMode
+        } else {
+            gestureCardForTouchpad = nil
+        }
     }
 
     private var favouriteKeys: Binding<[String]> {
@@ -186,7 +201,7 @@ struct SessionView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                     if let toast {
-                        SessionToast(symbol: toast.symbol, text: toast.text)
+                        SessionToast(symbol: toast.symbol, text: toast.text, isFailure: toast.isFailure)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
@@ -196,8 +211,21 @@ struct SessionView: View {
                 .animation(.snappy(duration: 0.25), value: toast)
                 .task(id: toast) {
                     guard toast != nil else { return }
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    // A failure stays long enough to be read.
+                    try? await Task.sleep(nanoseconds: toast?.isFailure == true ? 5_000_000_000 : 2_000_000_000)
                     if !Task.isCancelled { toast = nil }
+                }
+
+                if let forTouchpad = gestureCardForTouchpad {
+                    GestureCard(touchpad: forTouchpad,
+                                hints: GestureHint.hints(touchpad: forTouchpad,
+                                                         oneFingerScroll: app.settings.isOneFingerScroll,
+                                                         zoomLocked: app.settings.isZoomLocked)) {
+                        if forTouchpad { seenTouchpadGestures = true } else { seenDirectGestures = true }
+                        withAnimation(.snappy(duration: 0.25)) { gestureCardForTouchpad = nil }
+                    }
+                    .transition(.opacity)
+                    .zIndex(60)
                 }
             }
         }
@@ -208,6 +236,14 @@ struct SessionView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in
             if isConnected { keyboardVisible = true }
+        }
+        .onChange(of: session.notice) { _, notice in
+            if let notice {
+                toast = Toast(symbol: notice.symbol, text: notice.text, isFailure: notice.isFailure)
+            }
+        }
+        .onChange(of: isConnected, initial: true) {
+            introduceGesturesIfNew()
         }
         .onChange(of: modifiersToHold) { _, held in
             session.setHeldModifiers(held)
@@ -231,6 +267,7 @@ struct SessionView: View {
             toast = isTrackpad
                 ? Toast(symbol: "rectangle.and.hand.point.up.left", text: "Touchpad mode")
                 : Toast(symbol: "hand.tap", text: "Direct touch mode")
+            introduceGesturesIfNew()
             if isTrackpad {
                 if !app.settings.showRemoteCursor, let cursor = currentVirtualCursor() {
                     canvasController.canvas?.showCursor(at: cursor)

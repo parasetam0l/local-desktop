@@ -67,10 +67,12 @@ struct SessionButtonStyle: ButtonStyle {
 struct SessionToast: View {
     let symbol: String
     let text: String
+    var isFailure = false
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: symbol)
+                .foregroundStyle(isFailure ? SessionStyle.danger : .white)
             Text(text)
         }
         .font(.subheadline.weight(.medium))

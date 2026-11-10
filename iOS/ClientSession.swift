@@ -65,6 +65,12 @@ final class ClientSession: ObservableObject {
     /// Whether the Mac blocks its own keyboard and trackpad during sessions (nil before 1.2.4).
     @Published private(set) var blocksMacInput: Bool?
     @Published var showDebugHUD = false
+    /// The outcome of something the user asked the Mac for, to show for a moment.
+    @Published private(set) var notice: SessionNotice?
+    /// A desktop size was asked for and the Mac hasn't answered yet; the inner nil is
+    /// the Mac's own size. `mirrorRequestByUser` is false for the Settings default.
+    private var requestedMirrorSize: RDMirrorSize??
+    private var mirrorRequestByUser = false
     @Published private(set) var liveFPS: Double = 0.0
     @Published private(set) var liveBitrateMbps: Double = 0.0
     @Published private(set) var liveDecodeMs: Double = 0.0
@@ -476,11 +482,19 @@ final class ClientSession: ObservableObject {
             selectedDisplayId = msg.selectedId
             sizedMirrorAvailable = msg.sizedMirrorAvailable ?? false
             mirrorSize = msg.mirrorSize
+            if let requested = requestedMirrorSize {
+                requestedMirrorSize = nil
+                if requested != msg.mirrorSize {
+                    post("The Mac couldn't change the desktop size", symbol: "exclamationmark.triangle", isFailure: true)
+                } else if mirrorRequestByUser {
+                    post("Desktop size: \(requested?.label ?? "Mac's own")", symbol: "rectangle.dashed")
+                }
+            }
             // The Settings default, asked for once per connection (the Mac drops the
             // size when its last client leaves); the session menu can change it after.
             if !appliedDefaultMirrorSize, sizedMirrorAvailable {
                 appliedDefaultMirrorSize = true
-                if let size = defaultMirrorSize { setSizedMirror(size) }
+                if let size = defaultMirrorSize { setSizedMirror(size, byUser: false) }
             }
 
         case .bye:
@@ -820,10 +834,16 @@ final class ClientSession: ObservableObject {
         sendJSON(.selectDisplay, RDSelectDisplayMsg(id: id))
     }
 
+    private func post(_ text: String, symbol: String, isFailure: Bool = false) {
+        notice = SessionNotice(id: (notice?.id ?? 0) + 1, symbol: symbol, text: text, isFailure: isFailure)
+    }
+
     /// Lays the Mac's desktop out at `size` (its own screen mirrors that for the session),
     /// or back at the Mac's own size with nil; the Mac confirms with a new `displays` message.
-    func setSizedMirror(_ size: RDMirrorSize?) {
+    func setSizedMirror(_ size: RDMirrorSize?, byUser: Bool = true) {
         guard phase == .connected, sizedMirrorAvailable, size != mirrorSize else { return }
+        requestedMirrorSize = .some(size)
+        mirrorRequestByUser = byUser
         sendJSON(.setSizedMirror, RDSetSizedMirrorMsg(size: size))
     }
 
@@ -887,4 +907,12 @@ final class ClientSession: ObservableObject {
 
 extension ClientSession: Identifiable {
     nonisolated var id: ObjectIdentifier { ObjectIdentifier(self) }
+}
+
+/// A short message about the session for the user (see `ClientSession.notice`).
+struct SessionNotice: Equatable {
+    let id: Int
+    let symbol: String
+    let text: String
+    var isFailure = false
 }
