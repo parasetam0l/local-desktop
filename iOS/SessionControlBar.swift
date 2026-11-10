@@ -24,20 +24,22 @@ struct SessionControlBar: View {
     @State private var dragTranslation: CGSize?
     @State private var showApps = false
     @State private var showPanel = false
+    @State private var showWindow = false
     @State private var confirmDisconnect = false
 
     private static let idleSeconds: UInt64 = 5
     private static let buttonSize = CGSize(width: 44, height: 40)
     private static let barPadding: CGFloat = 5
     private static let barSpacing: CGFloat = 2
-    private static let buttonCount: CGFloat = 5
+    /// One more with a Mac that can act on its windows.
+    private var buttonCount: CGFloat { session.macWindowActions ? 6 : 5 }
     private static let handleLength: CGFloat = 44
     private static let handleThickness: CGFloat = 22
     private static let margin: CGFloat = 8
 
     private var edge: Edge { Edge(rawValue: edgeRaw) ?? .bottom }
     private var isVertical: Bool { edge == .leading || edge == .trailing }
-    private var isPresenting: Bool { showApps || showPanel || confirmDisconnect }
+    private var isPresenting: Bool { showApps || showPanel || showWindow || confirmDisconnect }
 
     var body: some View {
         GeometryReader { proxy in
@@ -74,7 +76,7 @@ struct SessionControlBar: View {
         } else {
             let along = isVertical ? Self.buttonSize.height : Self.buttonSize.width
             let across = isVertical ? Self.buttonSize.width : Self.buttonSize.height
-            length = along * Self.buttonCount + Self.barSpacing * (Self.buttonCount - 1) + Self.barPadding * 2
+            length = along * buttonCount + Self.barSpacing * (buttonCount - 1) + Self.barPadding * 2
             thickness = across + Self.barPadding * 2
         }
         return isVertical ? CGSize(width: thickness, height: length) : CGSize(width: length, height: thickness)
@@ -149,6 +151,15 @@ struct SessionControlBar: View {
                 }
                 .adaptiveSheet(isPresented: $showApps, padSize: CGSize(width: 440, height: 560)) {
                     AppSwitcherView(session: session, isPresented: $showApps)
+                }
+                if session.macWindowActions {
+                    barButton("macwindow", "Mac window") {
+                        session.requestFrontWindow()
+                        showWindow = true
+                    }
+                    .adaptiveSheet(isPresented: $showWindow, padSize: CGSize(width: 340, height: 250)) {
+                        WindowControlsView(session: session, isPresented: $showWindow)
+                    }
                 }
                 barButton(touchpadMode ? "rectangle.and.hand.point.up.left" : "hand.tap",
                           touchpadMode ? "Touchpad mode" : "Direct touch mode") {

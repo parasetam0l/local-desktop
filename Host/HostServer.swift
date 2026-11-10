@@ -717,7 +717,8 @@ final class HostServer: ObservableObject {
                      blocksLocalInput: blocksLocalInput,
                      isLidClosed: isLidClosed,
                      hasExternalDisplay: hasExternalDisplay,
-                     hidesDock: DockHider.isAvailable ? hidesDock : nil)
+                     hidesDock: DockHider.isAvailable ? hidesDock : nil,
+                     windowActions: true)
     }
 
     /// Hides the Dock for the connected clients or shows it again, and tells every client.

@@ -428,7 +428,7 @@ final class ClientSession {
         case .mouseMoveAbs, .mouseMoveRel, .mouseDown, .mouseUp, .scroll, .keyEvent, .textEvent:
             InputInjector.tickleUserActivity()
             handleInput(wire, payload: payload)
-        case .requestApps, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay,
+        case .requestApps, .requestFrontWindow, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay,
              .setLocalInputBlock, .setSizedMirror, .setHideDock, .setTextFocusReports:
             handleControl(wire, payload: payload)
         default:
@@ -550,6 +550,12 @@ final class ClientSession {
         case .requestApps:
             sendRunningApps(server.appSwitcher.runningApps())
 
+        case .requestFrontWindow:
+            WindowActions.describe { [weak self] window in
+                guard let self, self.phase == .active else { return }
+                self.send(.frontWindow, json: window)
+            }
+
         case .activateApp:
             guard let msg = RDJSON.decode(RDActivateAppMsg.self, from: payload) else { return }
             server.appSwitcher.activate(bundleId: msg.bundleId)
@@ -565,6 +571,11 @@ final class ClientSession {
                 _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/open"), arguments: ["-a", "Launchpad"])
             case .lockScreen:
                 HardwareController.lockScreen()
+            case .windowClose, .windowMinimize, .windowFullScreen, .windowLeftHalf, .windowRightHalf, .windowFill:
+                WindowActions.perform(msg.action) { [weak self] window in
+                    guard let self, self.phase == .active else { return }
+                    self.send(.frontWindow, json: window)
+                }
             }
 
         case .getHardwareControls:

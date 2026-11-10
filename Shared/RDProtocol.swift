@@ -61,6 +61,8 @@ enum RDWire: UInt8 {
     case runningApps = 0x71
     case activateApp = 0x72
     case systemAction = 0x73
+    case requestFrontWindow = 0x74
+    case frontWindow = 0x75
 
     // Hardware Controls
     case getHardwareControls = 0x80
@@ -309,6 +311,8 @@ struct HostStateMsg: Codable, Equatable {
     /// Whether the Mac hides its Dock for the connected clients (nil from Macs before
     /// 1.2.13, or when this macOS can't).
     var hidesDock: Bool? = nil
+    /// Whether the Mac takes the `window…` system actions (nil from Macs before 1.2.16).
+    var windowActions: Bool? = nil
 }
 
 /// After a click from a client that asked for these reports: whether the Mac's keyboard
@@ -461,6 +465,15 @@ struct RDRunningApp: Codable, Identifiable, Equatable {
     let iconPNG: String?
 }
 
+/// The front app's focused window, for the window controls (Macs from 1.2.16). Sent in
+/// answer to `requestFrontWindow` and again after a `window…` system action.
+struct RDFrontWindowMsg: Codable, Equatable {
+    let app: String
+    /// Nil when the app has no window to act on.
+    let title: String?
+    let isFullScreen: Bool
+}
+
 struct RDRunningAppsMsg: Codable {
     let apps: [RDRunningApp]
 }
@@ -474,6 +487,13 @@ enum RDSystemActionType: String, Codable {
     case missionControl
     case launchpad
     case lockScreen
+    /// The front app's focused window (Macs from 1.2.16, see `HostStateMsg.windowActions`).
+    case windowClose
+    case windowMinimize
+    case windowFullScreen
+    case windowLeftHalf
+    case windowRightHalf
+    case windowFill
 }
 
 struct RDSystemActionMsg: Codable {

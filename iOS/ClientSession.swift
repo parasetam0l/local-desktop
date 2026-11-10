@@ -64,6 +64,10 @@ final class ClientSession: ObservableObject {
     @Published private(set) var textFocusReport: (count: Int, editable: Bool) = (0, false)
     /// Whether the Mac blocks its own keyboard and trackpad during sessions (nil before 1.2.4).
     @Published private(set) var blocksMacInput: Bool?
+    /// The Mac can close, minimise and place its front window for this device.
+    @Published private(set) var macWindowActions = false
+    /// The Mac's front window as last reported (see `requestFrontWindow`).
+    @Published private(set) var frontWindow: RDFrontWindowMsg?
     @Published var showDebugHUD = false
     /// The outcome of something the user asked the Mac for, to show for a moment.
     @Published private(set) var notice: SessionNotice?
@@ -448,6 +452,7 @@ final class ClientSession: ObservableObject {
             isDisplaySleeping = msg.isDisplaySleeping
             blocksMacInput = msg.blocksLocalInput
             hidesMacDock = msg.hidesDock
+            macWindowActions = msg.windowActions ?? false
             if !sentTextFocusPreference {
                 sentTextFocusPreference = true
                 // Macs before 1.2.13 ignore this.
@@ -463,6 +468,10 @@ final class ClientSession: ObservableObject {
             // Macs before this protocol version don't report it; assume a display rather
             // than showing a false "lid closed" warning to them.
             hasExternalDisplay = msg.hasExternalDisplay ?? true
+
+        case .frontWindow:
+            guard let msg = RDJSON.decode(RDFrontWindowMsg.self, from: payload) else { break }
+            frontWindow = msg
 
         case .runningApps:
             guard let msg = RDJSON.decode(RDRunningAppsMsg.self, from: payload) else { break }
@@ -817,6 +826,13 @@ final class ClientSession: ObservableObject {
     func requestRunningApps() {
         guard phase == .connected else { return }
         send(.requestApps, Data())
+    }
+
+    /// Asks which window is in front on the Mac; the answer lands in `frontWindow`.
+    func requestFrontWindow() {
+        guard phase == .connected, macWindowActions else { return }
+        frontWindow = nil
+        send(.requestFrontWindow, Data())
     }
 
     func activateApp(bundleId: String) {
