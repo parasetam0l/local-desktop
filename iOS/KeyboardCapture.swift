@@ -58,6 +58,103 @@ final class TrackpadTextView: UITextView, UITextViewDelegate {
         resetToCenter()
     }
 
+    // MARK: - Attached keyboard
+
+    /// A key of an attached keyboard went down or up: the Mac's key code, and whether
+    /// this is the press (true, also for each repeat) or the release.
+    var onHardwareKey: ((UInt16, Bool) -> Void)?
+    /// The modifiers held on the attached keyboard changed.
+    var onHardwareModifiers: ((RDModifiers) -> Void)?
+
+    private var hardwareModifiers: RDModifiers = []
+    private var hardwareKeysDown: Set<UInt16> = []
+    private var repeatTimer: Timer?
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var others = Set<UIPress>()
+        for press in presses {
+            guard let key = press.key else { others.insert(press); continue }
+            if let modifier = HardwareKeyMap.modifier(for: key.keyCode) {
+                hardwareModifiers.insert(modifier)
+                onHardwareModifiers?(hardwareModifiers)
+            } else if let code = HardwareKeyMap.macKeyCode(for: key.keyCode) {
+                hardwareKeysDown.insert(code)
+                onHardwareKey?(code, true)
+                startRepeating(code)
+            } else {
+                others.insert(press)
+            }
+        }
+        // Keys sent to the Mac must not also type into this (invisible) text view.
+        if !others.isEmpty { super.pressesBegan(others, with: event) }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let others = releaseHardwareKeys(in: presses)
+        if !others.isEmpty { super.pressesEnded(others, with: event) }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let others = releaseHardwareKeys(in: presses)
+        if !others.isEmpty { super.pressesCancelled(others, with: event) }
+    }
+
+    private func releaseHardwareKeys(in presses: Set<UIPress>) -> Set<UIPress> {
+        var others = Set<UIPress>()
+        for press in presses {
+            guard let key = press.key else { others.insert(press); continue }
+            if let modifier = HardwareKeyMap.modifier(for: key.keyCode) {
+                hardwareModifiers.remove(modifier)
+                onHardwareModifiers?(hardwareModifiers)
+            } else if let code = HardwareKeyMap.macKeyCode(for: key.keyCode) {
+                if hardwareKeysDown.remove(code) != nil { onHardwareKey?(code, false) }
+                if hardwareKeysDown.isEmpty { stopRepeating() }
+            } else {
+                others.insert(press)
+            }
+        }
+        return others
+    }
+
+    /// Lets go of everything, so nothing stays down on the Mac when the keyboard goes away.
+    func releaseAllHardwareKeys() {
+        stopRepeating()
+        for code in hardwareKeysDown { onHardwareKey?(code, false) }
+        hardwareKeysDown.removeAll()
+        if !hardwareModifiers.isEmpty {
+            hardwareModifiers = []
+            onHardwareModifiers?([])
+        }
+    }
+
+    /// Key presses made for the Mac don't repeat by themselves, so a held key is sent
+    /// again like a keyboard would: after a pause, then quickly.
+    private func startRepeating(_ code: UInt16) {
+        stopRepeating()
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, self.hardwareKeysDown.contains(code) else { return }
+                        self.onHardwareKey?(code, true)
+                    }
+                }
+            }
+        }
+    }
+
+    private func stopRepeating() {
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+    }
+
+    @discardableResult
+    override func resignFirstResponder() -> Bool {
+        releaseAllHardwareKeys()
+        return super.resignFirstResponder()
+    }
+
     func resetToCenter() {
         guard !isResettingRange else { return }
         isResettingRange = true
@@ -142,6 +239,8 @@ struct KeyboardCapture: UIViewRepresentable {
     var onDelete: () -> Void
     var onReturnKey: () -> Void
     var onArrowKey: (RDKey) -> Void
+    var onHardwareKey: (UInt16, Bool) -> Void
+    var onHardwareModifiers: (RDModifiers) -> Void
     var onDismissed: () -> Void
 
     final class Coordinator {
@@ -163,6 +262,8 @@ struct KeyboardCapture: UIViewRepresentable {
         view.onReturn = onReturnKey
         view.onArrowKey = onArrowKey
         view.onDismissed = onDismissed
+        view.onHardwareKey = onHardwareKey
+        view.onHardwareModifiers = onHardwareModifiers
 
         // Only act when the requested state changes; re-asserting it on every update
         // would bring back a keyboard the user just dismissed.
@@ -200,6 +301,7 @@ struct KeyboardFrameTracker: UIViewRepresentable {
             probe.translatesAutoresizingMaskIntoConstraints = false
             probe.onMove = { [weak self] in self?.report() }
             addSubview(probe)
+            observeKeyboard()
             NSLayoutConstraint.activate([
                 probe.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
                 probe.bottomAnchor.constraint(equalTo: keyboardLayoutGuide.bottomAnchor),
@@ -218,8 +320,48 @@ struct KeyboardFrameTracker: UIViewRepresentable {
             report()
         }
 
+        /// The guide can settle a little after the keyboard appears without the probe
+        /// being moved again, so the keyboard's own notifications trigger more readings.
+        private func observeKeyboard() {
+            let names = [UIResponder.keyboardWillShowNotification, UIResponder.keyboardDidShowNotification,
+                         UIResponder.keyboardWillChangeFrameNotification, UIResponder.keyboardDidChangeFrameNotification,
+                         UIResponder.keyboardDidHideNotification]
+            for name in names {
+                NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
+                                                       name: name, object: nil)
+            }
+        }
+
+        private func readNow() {
+            window?.setNeedsLayout()
+            window?.layoutIfNeeded()
+            setNeedsLayout()
+            layoutIfNeeded()
+            report()
+        }
+
+        @objc private func keyboardChanged(_ note: Notification) {
+            noteFrame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect) ?? .zero
+            for delay in [0.0, 0.1, 0.35] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.readNow()
+                }
+            }
+        }
+
+        /// The frame the keyboard's last notification announced (screen coordinates,
+        /// which are this full-screen view's own).
+        private var noteFrame = CGRect.zero
+
         private func report() {
-            let frame = probe.frame
+            var frame = keyboardLayoutGuide.layoutFrame
+            // When a floating keyboard appears the guide is some points too narrow until
+            // the keyboard is next touched (measured: 320 instead of 334), while the
+            // notification for the same keyboard already has the real width.
+            if frame.width < bounds.width - 1, noteFrame.width > frame.width,
+               abs(noteFrame.minX - frame.minX) < 1 {
+                frame.size.width = noteFrame.width
+            }
             guard frame != lastFrame else { return }
             lastFrame = frame
             // Layout can run inside a SwiftUI update; state must change after it.

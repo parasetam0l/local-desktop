@@ -16,7 +16,7 @@ struct AppSwitcherButton: View {
                 .foregroundStyle(.white)
                 .shadow(radius: 4)
         }
-        .sheet(isPresented: $showSheet) {
+        .adaptiveSheet(isPresented: $showSheet, padSize: CGSize(width: 440, height: 560)) {
             AppSwitcherView(session: session, isPresented: $showSheet)
         }
     }

@@ -1,3 +1,4 @@
+import GameController
 import SwiftUI
 
 struct SessionView: View {
@@ -13,6 +14,8 @@ struct SessionView: View {
     @State private var keyboardAutoShown = false
     /// Where the system keyboard is on screen (see `KeyboardFrameTracker`).
     @State private var keyboardFrame: CGRect?
+    /// Modifiers held down on a keyboard attached to this device.
+    @State private var hardwareModifiers: RDModifiers = []
     /// Modifiers armed for the next key; `lockedModifiers` stay armed afterwards.
     @State private var modifiers: RDModifiers = []
     @State private var lockedModifiers: RDModifiers = []
@@ -34,7 +37,7 @@ struct SessionView: View {
     /// Only while the key bar shows them can they be seen and turned off, so a hidden
     /// keyboard or a backgrounded app never leaves a key stuck down on the Mac.
     private var modifiersToHold: RDModifiers {
-        isConnected && keyboardVisible && scenePhase == .active ? modifiers : []
+        isConnected && keyboardVisible && scenePhase == .active ? modifiers.union(hardwareModifiers) : []
     }
 
     var body: some View {
@@ -129,8 +132,15 @@ struct SessionView: View {
                     onArrowKey: { key in
                         session.keyTap(key, modifiers: consumeModifiers())
                     },
+                    onHardwareKey: { code, down in
+                        // The key bar's armed modifiers apply to the key and are used up by it.
+                        let armed = down ? consumeModifiers() : []
+                        session.hardwareKey(code: code, down: down, modifiers: armed.union(hardwareModifiers))
+                    },
+                    onHardwareModifiers: { hardwareModifiers = $0 },
                     onDismissed: {
                         keyboardAutoShown = false
+                        hardwareModifiers = []
                         keyboardVisible = false
                     }
                 )
@@ -187,6 +197,14 @@ struct SessionView: View {
                 .padding(.top, 16)
                 .frame(maxHeight: .infinity, alignment: .top)
             }
+        }
+        .onAppear {
+            // With a keyboard attached there is no on-screen keyboard to cover the
+            // picture, so its keys go to the Mac from the start.
+            if GCKeyboard.coalesced != nil { keyboardVisible = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in
+            if isConnected { keyboardVisible = true }
         }
         .onChange(of: modifiersToHold) { _, held in
             session.setHeldModifiers(held)

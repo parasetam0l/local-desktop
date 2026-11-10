@@ -368,6 +368,18 @@ enum RDKey: UInt16 {
     case right = 124
     case key5 = 23
     case keyF = 3
+    case keyA = 0
+    case keyC = 8
+    case keyV = 9
+    case keyX = 7
+    case keyZ = 6
+    case keyW = 13
+    case grave = 50
+    case forwardDelete = 117
+    case f1 = 122, f2 = 120, f3 = 99, f4 = 118, f5 = 96, f6 = 97
+    case f7 = 98, f8 = 100, f9 = 101, f10 = 109, f11 = 103, f12 = 111
+
+    static let functionKeys: [RDKey] = [.f1, .f2, .f3, .f4, .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12]
     case capsLock = 57
 }
 

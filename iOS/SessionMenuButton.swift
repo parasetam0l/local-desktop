@@ -225,7 +225,7 @@ struct SessionMenuButton: View {
                 .foregroundStyle(.white)
                 .shadow(radius: 4)
         }
-        .sheet(isPresented: $showHardwareSheet) {
+        .adaptiveSheet(isPresented: $showHardwareSheet, padSize: CGSize(width: 400, height: 400)) {
             MacHardwareControlsSheet(session: session, isPresented: $showHardwareSheet)
         }
     }

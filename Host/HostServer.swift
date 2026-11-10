@@ -29,6 +29,11 @@ final class HostServer: ObservableObject {
     private(set) var hidesDock = false
     /// The display that was streamed before the sized mirror took over.
     private var displayBeforeSizedMirror: CGDirectDisplayID?
+    /// A size a client asked for while the lid was shut with no display to lay out.
+    private var pendingMirrorSize: RDMirrorSize?
+    private var mirrorSizeRetries = 0
+    /// Puts the desktop size and the Dock back a while after the last client left.
+    private var sessionSettingsReset: DispatchWorkItem?
     @Published var preset: RDQualityPreset = .high
     @Published var lastError: String?
     /// Why screen capture last failed; cleared once capture runs again.
@@ -132,21 +137,26 @@ final class HostServer: ObservableObject {
         }
 
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked")) { server, _ in
+            HostLog.write("screen locked | \(HostLog.displaySummary())")
             server.isHostLocked = true
             server.scheduleHostStateBroadcast()
         }
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsUnlocked")) { server, _ in
+            HostLog.write("screen unlocked | \(HostLog.displaySummary())")
             server.isHostLocked = false
             server.scheduleHostStateBroadcast()
         }
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.screensDidSleepNotification) { server, _ in
+            HostLog.write("screens did sleep | \(HostLog.displaySummary())")
             server.isDisplaySleeping = true
             server.lid.refresh()
             server.scheduleHostStateBroadcast()
         }
         observe(workspace, NSWorkspace.screensDidWakeNotification) { server, _ in
+            HostLog.write("screens did wake | \(HostLog.displaySummary())")
             server.isDisplaySleeping = false
+            server.applyPendingMirrorSize()
             // A missed unlock notification mustn't leave a false lock behind.
             server.isHostLocked = Self.readIsLocked()
             server.lid.refresh()
@@ -157,6 +167,8 @@ final class HostServer: ObservableObject {
         }
         // Displays came or went (lid opened, display plugged in); pick capture back up.
         observe(NotificationCenter.default, NSApplication.didChangeScreenParametersNotification) { server, _ in
+            HostLog.write("screens changed | \(HostLog.displaySummary())")
+            server.sizedMirror.mirrorReturnedDisplays()
             server.refreshDisplays()
             server.lid.refresh()
             server.scheduleHostStateBroadcast()
@@ -204,8 +216,16 @@ final class HostServer: ObservableObject {
         }
         isLidClosed = lid.isLidClosed
         hasExternalDisplay = lid.hasExternalDisplay
+        HostLog.write("lid closed=\(isLidClosed) external=\(hasExternalDisplay) headless=\(isHeadlessClosedLid) sessions=\(activeSessions.count) | \(HostLog.displaySummary())")
         scheduleHostStateBroadcast()
         updatePowerAssertions()
+        sizedMirror.mirrorReturnedDisplays()
+        // macOS can refuse to mirror a panel that only just came back; once more shortly
+        // after (it does nothing when the first try worked).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated { self?.sizedMirror.mirrorReturnedDisplays() }
+        }
+        applyPendingMirrorSize()
         guard !activeSessions.isEmpty, !ScreenStreamer.shared.isRunning, !isHeadlessClosedLid else { return }
         restartCapture()
     }
@@ -330,6 +350,8 @@ final class HostServer: ObservableObject {
         for session in sessions {
             session.close(sendingBye: RDByeReason.hostStopped)
         }
+        sessionSettingsReset?.cancel()
+        sessionSettingsReset = nil
         endSizedMirror()
         setHidesDock(false)
         lid.stop()
@@ -410,28 +432,70 @@ final class HostServer: ObservableObject {
     /// virtual display of that size), or goes back to the Mac's own layout with nil.
     func setSizedMirror(_ size: RDMirrorSize?) {
         let wanted = size.map(SizedMirror.clamped)
+        HostLog.write("size wanted=\(wanted?.label ?? "own") current=\(mirrorSize?.label ?? "own") headless=\(isHeadlessClosedLid) | \(HostLog.displaySummary())")
         guard wanted != mirrorSize else { return }
         guard let wanted else {
+            pendingMirrorSize = nil
+            mirrorSizeRetries = 0
             endSizedMirror()
             return
         }
-        // Pointless with the lid shut and no display: there is no desktop to lay out.
-        guard running, !activeSessions.isEmpty, !isHeadlessClosedLid else { return }
-        if mirrorSize == nil { displayBeforeSizedMirror = selectedDisplayID }
-        guard let id = sizedMirror.start(size: wanted) else {
-            // `start` removed any earlier virtual display, so the mode is off now.
-            endSizedMirror(force: true)
-            captureError = "Could not set up the \(wanted.label) display."
+        guard running, !activeSessions.isEmpty else { return }
+        // With the lid shut and no display there is no desktop to lay out yet; it is
+        // done as soon as a touch on the client wakes the Mac (or the lid opens).
+        guard !isHeadlessClosedLid else {
+            pendingMirrorSize = wanted
             return
         }
+        pendingMirrorSize = nil
+        if mirrorSize == nil { displayBeforeSizedMirror = selectedDisplayID }
+        guard let id = sizedMirror.start(size: wanted) else {
+            HostLog.write("size failed lid=\(isLidClosed) tries=\(mirrorSizeRetries) | \(HostLog.displaySummary())")
+            // Nothing may be left of an earlier virtual display, so the mode is off now.
+            endSizedMirror(force: true)
+            // With the lid shut the displays are still settling after a wake; the next
+            // lid, wake or screen event tries again, a few times at most.
+            if isLidClosed, mirrorSizeRetries < 3 {
+                mirrorSizeRetries += 1
+                pendingMirrorSize = wanted
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    MainActor.assumeIsolated { self?.applyPendingMirrorSize() }
+                }
+            } else {
+                captureError = "Could not set up the \(wanted.label) display."
+            }
+            return
+        }
+        mirrorSizeRetries = 0
+        HostLog.write("size started display=\(id) | \(HostLog.displaySummary())")
         mirrorSize = wanted
         selectedDisplayID = id
         refreshDisplays()
         restartCapture()
     }
 
+    /// The desktop size and the hidden Dock outlive the last client for a while: a client
+    /// that only dropped or went to the background comes back to the same desktop, without
+    /// the displays being rebuilt (which, with the lid shut, removes the only display and
+    /// locks the Mac). With the lid open the Mac's own screen is in use, so the wait is short.
+    private func scheduleSessionSettingsReset() {
+        sessionSettingsReset?.cancel()
+        guard mirrorSize != nil || hidesDock else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.activeSessions.isEmpty else { return }
+                self.sessionSettingsReset = nil
+                self.endSizedMirror()
+                self.setHidesDock(false)
+            }
+        }
+        sessionSettingsReset = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (isLidClosed ? 180 : 20), execute: work)
+    }
+
     private func endSizedMirror(force: Bool = false) {
         guard force || mirrorSize != nil else { return }
+        HostLog.write("size ended force=\(force) sessions=\(activeSessions.count)")
         sizedMirror.stop()
         mirrorSize = nil
         selectedDisplayID = displayBeforeSizedMirror
@@ -525,6 +589,9 @@ final class HostServer: ObservableObject {
     // MARK: Called by ClientSession
 
     func sessionDidAuthenticate(_ session: ClientSession) {
+        sessionSettingsReset?.cancel()
+        sessionSettingsReset = nil
+        HostLog.write("session started lid=\(isLidClosed) headless=\(isHeadlessClosedLid) | \(HostLog.displaySummary())")
         refreshDisplays()
         pendingSessions.removeAll { $0 === session }
         // Only a session needs the lid state, so nothing polls while no one is connected.
@@ -559,6 +626,7 @@ final class HostServer: ObservableObject {
     }
 
     func sessionDidEnd(_ session: ClientSession) {
+        HostLog.write("session ended, \(activeSessions.filter { $0 !== session }.count) left")
         pendingSessions.removeAll { $0 === session }
         activeSessions.removeAll { $0 === session }
         updateFrameGate()
@@ -566,8 +634,9 @@ final class HostServer: ObservableObject {
         if activeSessions.isEmpty {
             clientName = nil
             wakeRequestedWithClosedLid = false
-            endSizedMirror()
-            setHidesDock(false)
+            pendingMirrorSize = nil
+            mirrorSizeRetries = 0
+            scheduleSessionSettingsReset()
             lid.stop()
             power.release()
             ScreenStreamer.shared.stop()
@@ -603,6 +672,7 @@ final class HostServer: ObservableObject {
 
     func handleWakeDisplayRequest() {
         lid.refresh()
+        HostLog.write("wake request lid=\(isLidClosed) headless=\(isHeadlessClosedLid) locked=\(isHostLocked) sleeping=\(isDisplaySleeping) | \(HostLog.displaySummary())")
         updatePowerAssertions()
         // Wake requests come from the user's touches on the client, so try even with the lid
         // shut and no external display: the display often wakes then. Automatic wakes
@@ -615,6 +685,13 @@ final class HostServer: ObservableObject {
         isDisplaySleeping = false
         broadcastHostState()
         restartCapture()
+        applyPendingMirrorSize()
+    }
+
+    private func applyPendingMirrorSize() {
+        guard let size = pendingMirrorSize, !isHeadlessClosedLid, !activeSessions.isEmpty else { return }
+        pendingMirrorSize = nil
+        setSizedMirror(size)
     }
 
     func handleRefreshVideoRequest() {

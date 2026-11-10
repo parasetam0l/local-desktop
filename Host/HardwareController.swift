@@ -16,12 +16,18 @@ enum HardwareController {
     /// NSAppleScript isn't thread-safe; every script runs on this one queue.
     private static let scriptQueue = DispatchQueue(label: "rd.hardware.applescript", qos: .userInitiated)
 
+    /// The Mac's own panel: with Desktop Size on, the main display is a virtual one that
+    /// has no brightness.
+    private static var brightnessDisplay: CGDirectDisplayID {
+        SizedMirror.builtinDisplay() ?? CGMainDisplayID()
+    }
+
     static func getBrightness() -> Float {
         guard let handle = displayServicesHandle,
               let sym = dlsym(handle, "DisplayServicesGetBrightness") else { return 0.5 }
         let fn = unsafeBitCast(sym, to: GetBrightness.self)
         var brightness: Float = 0.5
-        _ = fn(CGMainDisplayID(), &brightness)
+        _ = fn(brightnessDisplay, &brightness)
         return max(0.0, min(1.0, brightness))
     }
 
@@ -30,7 +36,7 @@ enum HardwareController {
               let handle = displayServicesHandle,
               let sym = dlsym(handle, "DisplayServicesSetBrightness") else { return }
         let fn = unsafeBitCast(sym, to: SetBrightness.self)
-        _ = fn(CGMainDisplayID(), max(0.0, min(1.0, value)))
+        _ = fn(brightnessDisplay, max(0.0, min(1.0, value)))
     }
 
     private static func defaultOutputDeviceID() -> AudioObjectID? {

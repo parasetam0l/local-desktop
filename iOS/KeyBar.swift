@@ -44,11 +44,30 @@ struct KeyBar: View {
                 keyButton("pg↑", .pageUp)
                 keyButton("pg↓", .pageDown)
                 keyButton("caps", .capsLock)
+                Divider()
+                    .frame(height: 22)
+                keyButton("copy", .keyC, adding: .command)
+                keyButton("paste", .keyV, adding: .command)
+                keyButton("cut", .keyX, adding: .command)
+                keyButton("undo", .keyZ, adding: .command)
+                keyButton("redo", .keyZ, adding: [.command, .shift])
+                keyButton("select all", .keyA, adding: .command)
+                keyButton("⌘ tab", .tab, adding: .command)
+                keyButton("⌘ W", .keyW, adding: .command)
+                keyButton("⌦", .forwardDelete)
+                keyButton("`", .grave)
+                keyButton("~", .grave, adding: .shift)
+                Divider()
+                    .frame(height: 22)
+                ForEach(Array(RDKey.functionKeys.enumerated()), id: \.offset) { index, key in
+                    keyButton("F\(index + 1)", key)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
-        .background(.ultraThinMaterial)
+        // Solid: it sits over the Mac's picture, which would show through a material.
+        .background(Color(uiColor: .secondarySystemBackground))
     }
 
     private func toggle(_ modifier: RDModifiers) {

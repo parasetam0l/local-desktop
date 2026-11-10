@@ -689,6 +689,11 @@ final class ClientSession: ObservableObject {
         heldModifiers = modifiers
     }
 
+    /// A key of a keyboard attached to this device going down or up, by its Mac key code.
+    func hardwareKey(code: UInt16, down: Bool, modifiers: RDModifiers) {
+        sendJSON(.keyEvent, KeyEventMsg(code: code, down: down, flags: modifiers.union(heldModifiers).rawValue))
+    }
+
     func keyTap(_ key: RDKey, modifiers: RDModifiers = []) {
         let added = modifiers.subtracting(heldModifiers)
         let flags = modifiers.union(heldModifiers).rawValue
