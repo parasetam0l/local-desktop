@@ -35,6 +35,8 @@ struct AppSettings: Codable {
     var hideDock: Bool? = nil
     /// The keyboard opens when a tap lands in a text field on the Mac (on unless turned off).
     var autoKeyboard: Bool? = nil
+    /// Ids of the key bar's favourite keys; nil until the user changes the default set.
+    var favouriteKeys: [String]? = nil
 
     /// Pinch doesn't zoom, and a two-finger drag always scrolls the Mac.
     var isZoomLocked: Bool {

@@ -11,45 +11,33 @@ struct MacHardwareControlsSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Clean Custom Header
             HStack {
-                Text("Mac Hardware")
-                    .font(.headline.weight(.bold))
-                    .foregroundStyle(.primary)
-
+                Text("Brightness and volume")
+                    .font(.headline)
                 Spacer()
-
-                Button {
+                Button("Done") {
                     isPresented = false
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                        .background(Color.secondary.opacity(0.18), in: Circle())
                 }
-                .buttonStyle(.plain)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(SessionStyle.accent)
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 18)
             .padding(.top, 20)
-            .padding(.bottom, 12)
+            .padding(.bottom, 14)
 
             ScrollView {
-                VStack(spacing: 16) {
-                    // Brightness Control
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Label("Display Brightness", systemImage: "sun.max.fill")
-                                .font(.headline)
-                            Spacer()
+                VStack(alignment: .leading, spacing: 18) {
+                    PanelSection("Display") {
+                        PanelRow {
+                            Text("Brightness")
+                            Spacer(minLength: 12)
                             Text("\(Int(localBrightness * 100))%")
-                                .font(.subheadline.monospacedDigit().weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .foregroundStyle(SessionStyle.secondaryText)
                         }
-
-                        HStack(spacing: 12) {
+                        PanelRow {
                             Image(systemName: "sun.min")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(SessionStyle.secondaryText)
                             Slider(
                                 value: $localBrightness,
                                 in: 0...1,
@@ -61,32 +49,28 @@ struct MacHardwareControlsSheet: View {
                                 }
                             )
                             Image(systemName: "sun.max.fill")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(SessionStyle.secondaryText)
                         }
                     }
-                    .padding(16)
-                    .glassCard(cornerRadius: 16, opacity: 0.12)
 
-                    // Volume Control
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Label("System Volume", systemImage: session.hardwareControls.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                                .font(.headline)
-                            Spacer()
+                    PanelSection("Sound") {
+                        PanelRow {
+                            Text("Volume")
+                            Spacer(minLength: 12)
                             Text(session.hardwareControls.isMuted ? "Muted" : "\(Int(localVolume))%")
-                                .font(.subheadline.monospacedDigit().weight(.semibold))
-                                .foregroundStyle(session.hardwareControls.isMuted ? .red : .secondary)
+                                .monospacedDigit()
+                                .foregroundStyle(session.hardwareControls.isMuted ? SessionStyle.danger : SessionStyle.secondaryText)
                         }
-
-                        HStack(spacing: 12) {
+                        PanelRow {
                             Button {
                                 session.setMuted(!session.hardwareControls.isMuted)
                             } label: {
                                 Image(systemName: session.hardwareControls.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                                    .foregroundStyle(session.hardwareControls.isMuted ? .red : .primary)
-                                    .font(.title3)
-                                    .frame(width: 32, height: 32)
+                                    .foregroundStyle(session.hardwareControls.isMuted ? SessionStyle.danger : Color.white)
+                                    .frame(width: 28, height: 28)
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(session.hardwareControls.isMuted ? "Unmute" : "Mute")
 
                             Slider(
                                 value: $localVolume,
@@ -98,53 +82,29 @@ struct MacHardwareControlsSheet: View {
                                     }
                                 }
                             )
-
-                            Text("\(Int(localVolume))%")
-                                .font(.caption.monospacedDigit())
-                                .frame(width: 36, alignment: .trailing)
-                                .foregroundStyle(.secondary)
                         }
                     }
-                    .padding(16)
-                    .glassCard(cornerRadius: 16, opacity: 0.12)
 
-                    // Display & Power Actions
-                    VStack(spacing: 12) {
-                        Button {
+                    PanelSection("Screen and power") {
+                        PanelButtonRow(title: "Lock Mac screen", symbol: "lock.fill") {
                             session.lockHostScreen()
                             isPresented = false
-                        } label: {
-                            Label("Lock Mac Screen", systemImage: "lock.fill")
-                                .frame(maxWidth: .infinity)
                         }
-                        .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
-
-                        Button {
+                        PanelButtonRow(title: "Sleep Mac display", symbol: "moon.fill") {
                             session.sleepHostDisplay()
-                        } label: {
-                            Label("Sleep Mac Display", systemImage: "moon.fill")
-                                .frame(maxWidth: .infinity)
                         }
-                        .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
-
-                        Button {
+                        PanelButtonRow(title: "Wake Mac display", symbol: "sun.horizon.fill") {
                             session.wakeHostDisplay()
-                        } label: {
-                            Label("Wake Mac Display", systemImage: "sun.horizon.fill")
-                                .frame(maxWidth: .infinity)
                         }
-                        .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
                     }
-                    .padding(16)
-                    .glassCard(cornerRadius: 16, opacity: 0.12)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 20)
             }
         }
+        .sessionPage()
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
-        .presentationBackground(.ultraThinMaterial)
         .onAppear {
             localBrightness = session.hardwareControls.brightness
             localVolume = Double(session.hardwareControls.volume)

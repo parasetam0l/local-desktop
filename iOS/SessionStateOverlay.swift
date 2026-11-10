@@ -53,22 +53,17 @@ struct SessionStateOverlay: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 20) {
-                ZStack {
-                    Circle()
-                        .fill(Color.blue.opacity(0.18))
-                        .frame(width: 64, height: 64)
-                    ProgressView()
-                        .controlSize(.large)
-                        .tint(.white)
-                }
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+                    .frame(width: 52, height: 52)
 
                 VStack(spacing: 6) {
                     Text(session.hasConnectedOnce ? "Reconnecting" : "Connecting")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .font(.subheadline)
+                        .foregroundStyle(SessionStyle.secondaryText)
                     Text(session.displayName)
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(.white)
+                        .font(.headline)
                         .multilineTextAlignment(.center)
                 }
 
@@ -77,14 +72,14 @@ struct SessionStateOverlay: View {
                 } label: {
                     Text("Cancel")
                 }
-                .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
+                .buttonStyle(SessionButtonStyle(fullWidth: true))
                 .simultaneousGesture(TapGesture().onEnded {
                     onDismiss()
                 })
             }
-            .padding(28)
+            .padding(24)
             .frame(maxWidth: 300)
-            .glassCard(cornerRadius: 24, opacity: 0.15, shadowRadius: 24)
+            .stateCard()
         }
     }
 
@@ -94,51 +89,47 @@ struct SessionStateOverlay: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 20) {
-                ZStack {
-                    Circle()
-                        .fill(Color.red.opacity(0.18))
-                        .frame(width: 64, height: 64)
-                    Image(systemName: session.identityMismatchServerId != nil ? "exclamationmark.shield.fill" : "wifi.exclamationmark")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.red)
-                }
+                Image(systemName: session.identityMismatchServerId != nil ? "exclamationmark.shield.fill" : "wifi.exclamationmark")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(SessionStyle.danger)
+                    .frame(width: 52, height: 52)
+                    .background(SessionStyle.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                 VStack(spacing: 6) {
                     Text(message)
-                        .font(.headline.weight(.semibold))
+                        .font(.headline)
                         .multilineTextAlignment(.center)
-                        .foregroundStyle(.white)
 
                     if let countdown {
-                        Text("Reconnecting in \(countdown)s…")
+                        Text("Reconnecting in \(countdown) s")
                             .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(SessionStyle.secondaryText)
                     }
                 }
 
                 HStack(spacing: 12) {
                     if let staleServerId = session.identityMismatchServerId {
-                        Button("Forget & Pair Again") {
+                        Button("Forget and pair again") {
                             app.forgetHost(serverId: staleServerId)
                             session.pairAgain()
                         }
-                        .glassButton(variant: .primary, size: .regular)
+                        .buttonStyle(SessionButtonStyle(prominent: true))
                     } else {
-                        Button("Reconnect Now") {
+                        Button("Reconnect now") {
                             session.retryNow()
                         }
-                        .glassButton(variant: .primary, size: .regular)
+                        .buttonStyle(SessionButtonStyle(prominent: true))
                     }
 
                     Button("Close") {
                         onDismiss()
                     }
-                    .glassButton(variant: .secondary, size: .regular)
+                    .buttonStyle(SessionButtonStyle())
                 }
             }
-            .padding(28)
-            .frame(maxWidth: 320)
-            .glassCard(cornerRadius: 24, opacity: 0.15, shadowRadius: 24)
+            .padding(24)
+            .frame(maxWidth: 340)
+            .stateCard()
         }
     }
 
@@ -161,41 +152,39 @@ struct SessionStateOverlay: View {
         VStack(spacing: 14) {
             Image(systemName: "laptopcomputer.slash")
                 .font(.system(size: 34))
-                .foregroundStyle(.white.opacity(0.85))
-            Text("Mac Lid Is Closed")
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SessionStyle.secondaryText)
+            Text("Mac lid is closed")
+                .font(.headline)
             Text("The Mac's screen is asleep. Drag or tap to try waking it, or open the lid or connect an external display.")
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(SessionStyle.secondaryText)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(28)
+        .padding(24)
         .frame(maxWidth: 320)
-        .glassCard(cornerRadius: 24, opacity: 0.25, shadowRadius: 20)
+        .stateCard()
     }
 
     private var sleepingOverlay: some View {
         VStack(spacing: 14) {
             Image(systemName: "moon.stars.fill")
                 .font(.system(size: 36))
-                .foregroundStyle(.indigo)
-            Text("Mac Display is Sleeping")
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SessionStyle.accent)
+            Text("Mac display is sleeping")
+                .font(.headline)
             Text("Tap anywhere to wake the screen")
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(SessionStyle.secondaryText)
             Button {
                 session.wakeHostDisplay()
             } label: {
-                Label("Wake Display", systemImage: "sun.max.fill")
+                Label("Wake display", systemImage: "sun.max.fill")
             }
-            .glassButton(variant: .primary, size: .regular)
+            .buttonStyle(SessionButtonStyle(prominent: true))
         }
-        .padding(28)
-        .glassCard(cornerRadius: 24, opacity: 0.25, shadowRadius: 20)
+        .padding(24)
+        .stateCard()
         .contentShape(Rectangle())
         .onTapGesture {
             session.wakeHostDisplay()
@@ -207,12 +196,12 @@ struct SessionStateOverlay: View {
             ProgressView()
                 .controlSize(.large)
                 .tint(.white)
-            Text("Loading display…")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.white.opacity(0.8))
+            Text("Loading display")
+                .font(.subheadline)
+                .foregroundStyle(SessionStyle.secondaryText)
         }
         .padding(24)
-        .glassCard(cornerRadius: 20, opacity: 0.15, shadowRadius: 16)
+        .stateCard()
     }
 }
 
@@ -223,14 +212,22 @@ struct HostLockedBanner: View {
             Image(systemName: "lock.fill")
                 .font(.subheadline)
                 .foregroundStyle(.yellow)
-            Text("Mac is Locked")
-                .font(.subheadline.weight(.semibold))
+            Text("Mac is locked")
+                .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
-        .shadow(radius: 6)
+        .sessionSurface(Capsule())
+    }
+}
+
+private extension View {
+    /// The solid card the connection states sit on.
+    func stateCard() -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return foregroundStyle(.white)
+            .background(SessionStyle.panel, in: shape)
+            .overlay(shape.strokeBorder(SessionStyle.hairline, lineWidth: 0.5))
     }
 }

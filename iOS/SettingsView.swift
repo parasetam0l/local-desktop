@@ -6,130 +6,198 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
+    private static let pointerSpeeds: [(label: String, value: Double)] = [("Slow", 1.0), ("Normal", 1.5), ("Fast", 2.0)]
+
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Toggle("Auto-connect to latest connected Mac", isOn: $app.settings.autoConnect)
-                    Toggle("Reconnect automatically on drops", isOn: $app.settings.autoReconnect)
-                } header: {
-                    Text("Connection")
-                } footer: {
-                    Text("When enabled, the app will automatically connect to the most recently connected Mac as soon as it is detected on the network.")
+        VStack(spacing: 0) {
+            header
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    displaySection
+                    touchSection
+                    keyboardSection
+                    connectionSection
+                    trustedSection
+                    updatesSection
                 }
-
-                Section("Video & Streaming") {
-                    Picker("Default Quality", selection: $app.settings.qualityRaw) {
-                        ForEach(RDQualityPreset.allCases) { preset in
-                            Text(preset.label).tag(preset.rawValue)
-                        }
-                    }
-                    .onChange(of: app.settings.qualityRaw) {
-                        app.applyQualitySettings()
-                    }
-
-                    Picker("Default Desktop Size", selection: $app.settings.defaultMirrorSize) {
-                        Text("Mac's Own Size").tag(RDMirrorSize?.none)
-                        ForEach(RDMirrorSize.options, id: \.size) { option in
-                            Text("\(option.name) · \(option.size.label)").tag(RDMirrorSize?.some(option.size))
-                        }
-                    }
-
-                    Toggle("Hide the Mac's Dock during sessions",
-                           isOn: Binding(get: { app.settings.hideDock ?? false }, set: { app.settings.hideDock = $0 }))
-
-                    Picker("Video Codec", selection: $app.settings.codecRaw) {
-                        Text("HEVC / H.265 (Recommended)").tag(RDCodec.hevc.rawValue)
-                        Text("H.264").tag(RDCodec.h264.rawValue)
-                    }
-                    .onChange(of: app.settings.codecRaw) {
-                        app.applyQualitySettings()
-                    }
-                }
-
-                Section("Input") {
-                    Toggle("Start sessions in touchpad mode", isOn: $app.settings.defaultTouchpad)
-                    Toggle("Show remote Mac cursor", isOn: $app.settings.showRemoteCursor)
-                        .onChange(of: app.settings.showRemoteCursor) {
-                            app.applyQualitySettings()
-                        }
-                    Toggle("Show keyboard when tapping a text field",
-                           isOn: Binding(get: { app.settings.autoKeyboard ?? true }, set: { app.settings.autoKeyboard = $0 }))
-                    Toggle("One-finger drag scrolls in direct mode", isOn: $app.settings.isOneFingerScroll)
-                    Toggle("Lock zoom", isOn: $app.settings.isZoomLocked)
-                    Picker("Pointer Speed", selection: $app.settings.pointerSpeedMultiplier) {
-                        Text("Slow").tag(1.0)
-                        Text("Normal").tag(1.5)
-                        Text("Fast").tag(2.0)
-                    }
-                }
-
-                Section {
-                    if app.recents.isEmpty {
-                        Text("No Macs yet.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(app.recents) { recent in
-                            HStack {
-                                Text(recent.name)
-                                Spacer()
-                                if app.isPaired(recent.serverId) {
-                                    Image(systemName: "checkmark.seal.fill")
-                                        .foregroundStyle(.green)
-                                }
-                            }
-                        }
-                    }
-                    Button("Forget all trusted Macs", role: .destructive) {
-                        app.forgetAllHosts()
-                    }
-                } header: {
-                    Text("Trusted Macs")
-                } footer: {
-                    Text("Forgetting a Mac here only removes its pairing from this device. Revoke access on the Mac itself to block this device.")
-                }
-
-                Section {
-                    LabeledContent("Version", value: AppUpdater.currentVersion)
-                    if let version = updater.availableVersion {
-                        if let notes = updater.releaseNotesURL(for: version) {
-                            Link("What's New in \(version)", destination: notes)
-                        }
-                        Button("Install LocalDesktop \(version)") {
-                            // The main screen's banner then shows how to finish.
-                            guard let url = updater.beginInstall() else { return }
-                            dismiss()
-                            openURL(url) { accepted in
-                                if !accepted { updater.endInstall() }
-                            }
-                        }
-                    }
-                    Button {
-                        Task { await updater.check() }
-                    } label: {
-                        HStack {
-                            Text("Check for Updates")
-                            if updater.isChecking {
-                                Spacer()
-                                ProgressView()
-                            }
-                        }
-                    }
-                    .disabled(updater.isChecking)
-                } header: {
-                    Text("Updates")
-                } footer: {
-                    Text(updateStatus)
-                }
-            }
-            .navigationTitle("Settings")
-            .toolbar {
-                Button("Done") {
-                    dismiss()
-                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 20)
             }
         }
+        .onChange(of: app.settings.qualityRaw) {
+            app.applyQualitySettings()
+        }
+        .onChange(of: app.settings.codecRaw) {
+            app.applyQualitySettings()
+        }
+        .onChange(of: app.settings.showRemoteCursor) {
+            app.applyQualitySettings()
+        }
+        .sessionPage()
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private var header: some View {
+        HStack {
+            Text("Settings")
+                .font(.headline)
+            Spacer()
+            Button("Done") {
+                dismiss()
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(SessionStyle.accent)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 20)
+        .padding(.bottom, 14)
+    }
+
+    // MARK: Sections
+
+    private var displaySection: some View {
+        PanelSection("Display", footer: "Desktop size lays the Mac's desktop out at that size for each session, and the Mac's own screen shows the same layout.") {
+            PanelMenuRow(title: "Default quality", value: app.settings.preset.shortLabel) {
+                Picker("Default quality", selection: $app.settings.qualityRaw) {
+                    ForEach(RDQualityPreset.allCases) { preset in
+                        Text(preset.label).tag(preset.rawValue)
+                    }
+                }
+            }
+            PanelMenuRow(title: "Default desktop size", value: mirrorSizeLabel) {
+                Picker("Default desktop size", selection: $app.settings.defaultMirrorSize) {
+                    Text("Mac's own size").tag(RDMirrorSize?.none)
+                    ForEach(RDMirrorSize.options, id: \.size) { option in
+                        Text("\(option.name) · \(option.size.label)").tag(RDMirrorSize?.some(option.size))
+                    }
+                }
+            }
+            PanelMenuRow(title: "Video codec", value: app.settings.codec.label) {
+                Picker("Video codec", selection: $app.settings.codecRaw) {
+                    Text("HEVC / H.265 (recommended)").tag(RDCodec.hevc.rawValue)
+                    Text("H.264").tag(RDCodec.h264.rawValue)
+                }
+            }
+            PanelToggleRow(title: "Hide the Mac's Dock during sessions",
+                           isOn: Binding(get: { app.settings.hideDock ?? false }, set: { app.settings.hideDock = $0 }))
+        }
+    }
+
+    private var touchSection: some View {
+        PanelSection("Touch", footer: "Touchpad mode moves a pointer like a trackpad; direct touch clicks right where your finger is.") {
+            PanelToggleRow(title: "Start sessions in touchpad mode", isOn: $app.settings.defaultTouchpad)
+            PanelMenuRow(title: "Pointer speed", value: pointerSpeedLabel) {
+                Picker("Pointer speed", selection: $app.settings.pointerSpeedMultiplier) {
+                    ForEach(Self.pointerSpeeds, id: \.value) { speed in
+                        Text(speed.label).tag(speed.value)
+                    }
+                }
+            }
+            PanelToggleRow(title: "Show the Mac's cursor", isOn: $app.settings.showRemoteCursor)
+            PanelToggleRow(title: "One-finger drag scrolls in direct touch", isOn: $app.settings.isOneFingerScroll)
+            PanelToggleRow(title: "Lock zoom", isOn: $app.settings.isZoomLocked)
+        }
+    }
+
+    private var keyboardSection: some View {
+        PanelSection("Keyboard", footer: "The on-screen keyboard opens by itself when you tap a text field on the Mac.") {
+            PanelToggleRow(title: "Show keyboard for text fields",
+                           isOn: Binding(get: { app.settings.autoKeyboard ?? true }, set: { app.settings.autoKeyboard = $0 }))
+        }
+    }
+
+    private var connectionSection: some View {
+        PanelSection("Connection", footer: "Auto-connect joins the most recently used Mac as soon as it appears on the network.") {
+            PanelToggleRow(title: "Auto-connect to the last Mac", isOn: $app.settings.autoConnect)
+            PanelToggleRow(title: "Reconnect automatically after drops", isOn: $app.settings.autoReconnect)
+        }
+    }
+
+    private var trustedSection: some View {
+        PanelSection("Trusted Macs", footer: "Forgetting a Mac here only removes its pairing from this device. Revoke access on the Mac itself to block this device.") {
+            if app.recents.isEmpty {
+                PanelRow {
+                    Text("No Macs yet")
+                        .foregroundStyle(SessionStyle.secondaryText)
+                    Spacer()
+                }
+            } else {
+                ForEach(app.recents) { recent in
+                    PanelRow {
+                        Text(recent.name)
+                            .lineLimit(1)
+                        Spacer(minLength: 12)
+                        if app.isPaired(recent.serverId) {
+                            Text("Paired")
+                                .foregroundStyle(SessionStyle.secondaryText)
+                            Image(systemName: "checkmark.seal.fill")
+                                .foregroundStyle(SessionStyle.accent)
+                        }
+                    }
+                }
+            }
+            Button(role: .destructive) {
+                app.forgetAllHosts()
+            } label: {
+                PanelRow {
+                    Text("Forget all trusted Macs")
+                        .foregroundStyle(SessionStyle.danger)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var updatesSection: some View {
+        PanelSection("Updates", footer: updateStatus) {
+            PanelRow {
+                Text("Version")
+                Spacer(minLength: 12)
+                Text(AppUpdater.currentVersion)
+                    .foregroundStyle(SessionStyle.secondaryText)
+            }
+            if let version = updater.availableVersion {
+                if let notes = updater.releaseNotesURL(for: version) {
+                    PanelButtonRow(title: "What's new in \(version)", symbol: "arrow.up.right") {
+                        openURL(notes)
+                    }
+                }
+                PanelButtonRow(title: "Install LocalDesktop \(version)", symbol: "arrow.down.circle") {
+                    // The main screen's banner then shows how to finish.
+                    guard let url = updater.beginInstall() else { return }
+                    dismiss()
+                    openURL(url) { accepted in
+                        if !accepted { updater.endInstall() }
+                    }
+                }
+            }
+            Button {
+                Task { await updater.check() }
+            } label: {
+                PanelRow {
+                    Text("Check for updates")
+                    Spacer(minLength: 12)
+                    if updater.isChecking {
+                        ProgressView()
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(updater.isChecking)
+        }
+    }
+
+    private var mirrorSizeLabel: String {
+        guard let size = app.settings.defaultMirrorSize else { return "Mac's own" }
+        return RDMirrorSize.options.first { $0.size == size }?.name ?? size.label
+    }
+
+    private var pointerSpeedLabel: String {
+        Self.pointerSpeeds.first { $0.value == app.settings.pointerSpeedMultiplier }?.label ?? "Custom"
     }
 
     private var updateStatus: String {

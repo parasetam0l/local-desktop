@@ -57,8 +57,7 @@ struct DebugHUDView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
-        .shadow(radius: 6)
+        .sessionSurface(Capsule())
+        .environment(\.colorScheme, .dark)
     }
 }

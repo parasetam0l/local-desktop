@@ -18,27 +18,23 @@ struct PinSheet: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            ZStack {
-                Circle()
-                    .fill(Color.blue.opacity(0.18))
-                    .frame(width: 64, height: 64)
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.blue)
-            }
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 26))
+                .foregroundStyle(SessionStyle.accent)
+                .frame(width: 52, height: 52)
+                .background(SessionStyle.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             VStack(spacing: 6) {
                 Text("Enter PIN")
-                    .font(.title3.weight(.bold))
-                    .foregroundStyle(.white)
+                    .font(.headline)
                 Text("Set on \(serverName.isEmpty ? "your Mac" : serverName)")
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(SessionStyle.secondaryText)
                     .multilineTextAlignment(.center)
                 if !fingerprint.isEmpty {
                     Text("Fingerprint \(fingerprint)")
                         .font(.caption.monospaced())
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(SessionStyle.secondaryText)
                         .accessibilityHint("Should match the fingerprint in the Mac's LocalDesktop menu")
                 }
             }
@@ -47,7 +43,7 @@ struct PinSheet: View {
                 ForEach(0..<4, id: \.self) { index in
                     ZStack {
                         Circle()
-                            .stroke(Color.white.opacity(0.3), lineWidth: 1.5)
+                            .stroke(SessionStyle.hairline, lineWidth: 1.5)
                             .frame(width: 18, height: 18)
 
                         if index < pin.count {
@@ -81,27 +77,31 @@ struct PinSheet: View {
             if let errorText {
                 Text(errorText)
                     .font(.footnote.weight(.medium))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(SessionStyle.danger)
                     .multilineTextAlignment(.center)
             }
 
-            Toggle("Trust this device (skip PIN next time)", isOn: $trust)
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.85))
-                .tint(.blue)
-                .padding(.horizontal, 4)
+            Toggle("Trust this device and skip the PIN next time", isOn: $trust)
+                .font(.subheadline)
+                .padding(.horizontal, 14)
+                .frame(minHeight: 46)
+                .background(SessionStyle.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             if let onCancel {
                 Button("Cancel", role: .cancel) {
                     onCancel()
                 }
-                .glassButton(variant: .secondary, size: .regular, isFullWidth: true)
+                .buttonStyle(SessionButtonStyle(fullWidth: true))
                 .padding(.top, 4)
             }
         }
-        .padding(28)
-        .frame(maxWidth: 320)
-        .glassCard(cornerRadius: 24, opacity: 0.16, shadowRadius: 24)
+        .padding(24)
+        .frame(maxWidth: 340)
+        .background(SessionStyle.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(SessionStyle.hairline, lineWidth: 0.5))
+        .foregroundStyle(.white)
+        .tint(SessionStyle.accent)
+        .environment(\.colorScheme, .dark)
         .padding(24)
         .onAppear {
             focused = true

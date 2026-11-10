@@ -14,13 +14,11 @@ struct RepeatingScrollButton: View {
 
     var body: some View {
         Image(systemName: iconName)
-            .font(.title2)
-            .frame(width: 50, height: 50)
-            .background(.ultraThinMaterial, in: Circle())
-            .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 0.5))
+            .font(.system(size: 18, weight: .medium))
             .foregroundStyle(.white)
+            .frame(width: 44, height: 44)
+            .sessionSurface(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .opacity(isPressed ? 0.6 : 1.0)
-            .shadow(radius: 4)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .updating($isPressed) { _, state, _ in

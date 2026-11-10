@@ -22,6 +22,18 @@ struct SessionView: View {
     /// Pointer position in remote pixels while in touchpad mode (nil until first use).
     @State private var virtualCursor: CGPoint?
     @StateObject private var canvasController = CanvasController()
+    /// A short message at the top of the screen (see `SessionToast`).
+    @State private var toast: Toast?
+
+    private struct Toast: Equatable {
+        let symbol: String
+        let text: String
+    }
+
+    private var favouriteKeys: Binding<[String]> {
+        Binding(get: { app.settings.favouriteKeys ?? KeyBarKey.defaultFavourites },
+                set: { app.settings.favouriteKeys = $0 })
+    }
 
     /// Points of finger travel → points of Mac scrolling for two-finger touchpad scroll.
     private static let touchpadScrollSpeed = 1.5
@@ -82,7 +94,7 @@ struct SessionView: View {
                 )
 
                 if app.settings.showScrollHelpers {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 8) {
                         RepeatingScrollButton(iconName: "chevron.up") {
                             session.scroll(dx: 0, dy: 1)
                         }
@@ -90,7 +102,7 @@ struct SessionView: View {
                             session.scroll(dx: 0, dy: -1)
                         }
                     }
-                    .padding(.trailing, 24)
+                    .padding(.trailing, 12)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                 }
             }
@@ -106,7 +118,7 @@ struct SessionView: View {
                 // Sits on top of the keyboard wherever it is (docked, or floating on an
                 // iPad) and over the Mac's picture, so it never takes room from it.
                 if keyboardVisible, let frame = keyboardFrame {
-                    KeyBar(modifiers: $modifiers, locked: $lockedModifiers) { key, extra in
+                    KeyBar(modifiers: $modifiers, locked: $lockedModifiers, favourites: favouriteKeys) { key, extra in
                         session.keyTap(key, modifiers: consumeModifiers().union(extra))
                     }
                     .frame(width: frame.width)
@@ -147,41 +159,21 @@ struct SessionView: View {
                 .allowsHitTesting(false)
                 .frame(width: 1, height: 1)
 
-                HStack(spacing: 14) {
-                    SessionMenuButton(
-                        touchpadMode: $touchpadMode,
-                        app: app,
-                        session: session,
-                        displays: session.displays,
-                        selectedDisplayId: session.selectedDisplayId,
-                        sizedMirrorAvailable: session.sizedMirrorAvailable,
-                        mirrorSize: session.mirrorSize,
-                        blocksMacInput: session.blocksMacInput,
-                        hidesMacDock: session.hidesMacDock,
-                        canvasController: canvasController,
-                        onDismiss: onDismiss
-                    )
-
-                    AppSwitcherButton(session: session)
-
-                    Spacer()
-
-                    Button {
+                SessionControlBar(
+                    touchpadMode: $touchpadMode,
+                    keyboardVisible: $keyboardVisible,
+                    app: app,
+                    session: session,
+                    canvasController: canvasController,
+                    // Keeps clear of the key bar, which is drawn on top of the keyboard.
+                    bottomInset: keyboardVisible && keyboardFrame != nil ? KeyBar.height + 4 : 0,
+                    onKeyboardToggle: {
                         keyboardAutoShown = false
                         keyboardVisible.toggle()
-                    } label: {
-                        Image(systemName: keyboardVisible ? "keyboard.fill" : "keyboard")
-                            .font(.title2)
-                            .frame(width: 50, height: 50)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 0.5))
-                            .foregroundStyle(.white)
-                            .shadow(radius: 4)
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 4)
-                .frame(maxHeight: .infinity, alignment: .bottom)
+                    },
+                    onDisconnect: onDismiss
+                )
+                .zIndex(40)
 
                 // Top Overlays: Debug HUD & Mac Locked Banner
                 VStack(spacing: 8) {
@@ -193,9 +185,20 @@ struct SessionView: View {
                         HostLockedBanner()
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
+                    if let toast {
+                        SessionToast(symbol: toast.symbol, text: toast.text)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                 }
                 .padding(.top, 16)
                 .frame(maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+                .animation(.snappy(duration: 0.25), value: toast)
+                .task(id: toast) {
+                    guard toast != nil else { return }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    if !Task.isCancelled { toast = nil }
+                }
             }
         }
         .onAppear {
@@ -213,7 +216,9 @@ struct SessionView: View {
             // A tap landed in a text field on the Mac: bring the keyboard up. It goes away
             // again by itself only if it also came up by itself.
             if session.textFocusReport.editable {
-                if !keyboardVisible {
+                // Direct mode only: in touchpad mode a tap is a click wherever the pointer
+                // happens to be, and the keyboard coming up for it gets in the way.
+                if !keyboardVisible, !touchpadMode {
                     keyboardVisible = true
                     keyboardAutoShown = true
                 }
@@ -223,6 +228,9 @@ struct SessionView: View {
             }
         }
         .onChange(of: touchpadMode) { _, isTrackpad in
+            toast = isTrackpad
+                ? Toast(symbol: "rectangle.and.hand.point.up.left", text: "Touchpad mode")
+                : Toast(symbol: "hand.tap", text: "Direct touch mode")
             if isTrackpad {
                 if !app.settings.showRemoteCursor, let cursor = currentVirtualCursor() {
                     canvasController.canvas?.showCursor(at: cursor)
