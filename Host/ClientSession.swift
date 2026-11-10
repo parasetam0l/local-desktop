@@ -224,6 +224,10 @@ final class ClientSession {
         ScreenStreamer.shared.requestKeyframe()
     }
 
+    /// Whether this client wants to hear, after its clicks, if a text field has focus.
+    private var wantsTextFocusReports = false
+    private var textFocusCheck = 0
+
     func sendHostState(_ state: HostStateMsg) {
         guard phase == .active else { return }
         send(.hostState, json: state)
@@ -425,7 +429,7 @@ final class ClientSession {
             InputInjector.tickleUserActivity()
             handleInput(wire, payload: payload)
         case .requestApps, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay,
-             .setLocalInputBlock, .setSizedMirror:
+             .setLocalInputBlock, .setSizedMirror, .setHideDock, .setTextFocusReports:
             handleControl(wire, payload: payload)
         default:
             break
@@ -500,6 +504,15 @@ final class ClientSession {
             guard let msg = RDJSON.decode(MouseButtonMsg.self, from: payload), (0...1).contains(msg.button) else { return }
             heldButtons.remove(msg.button)
             InputInjector.buttonUp(msg.button)
+            if wantsTextFocusReports, msg.button == 0 {
+                textFocusCheck += 1
+                let check = textFocusCheck
+                TextFocusProbe.check { [weak self] editable in
+                    // Only the latest click's answer counts.
+                    guard let self, self.textFocusCheck == check, self.phase == .active else { return }
+                    self.send(.textFocus, json: RDTextFocusMsg(editable: editable))
+                }
+            }
 
         case .scroll:
             guard let msg = RDJSON.decode(ScrollMsg.self, from: payload) else { return }
@@ -579,6 +592,15 @@ final class ClientSession {
         case .selectDisplay:
             guard let msg = RDJSON.decode(RDSelectDisplayMsg.self, from: payload) else { return }
             server.setDisplay(msg.id)
+
+        case .setTextFocusReports:
+            guard let msg = RDJSON.decode(RDSetTextFocusReportsMsg.self, from: payload) else { return }
+            wantsTextFocusReports = msg.enabled
+
+        case .setHideDock:
+            guard let msg = RDJSON.decode(RDSetHideDockMsg.self, from: payload) else { return }
+            server.setHidesDock(msg.enabled)
+            sendHostState(server.hostStateMessage)
 
         case .setSizedMirror:
             guard let msg = RDJSON.decode(RDSetSizedMirrorMsg.self, from: payload) else { return }

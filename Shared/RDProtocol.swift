@@ -51,6 +51,9 @@ enum RDWire: UInt8 {
     case selectDisplay = 0x55
     case setLocalInputBlock = 0x56
     case setSizedMirror = 0x57
+    case setHideDock = 0x58
+    case textFocus = 0x59
+    case setTextFocusReports = 0x5A
     case bye = 0x60
 
     // App Switcher & Actions
@@ -303,6 +306,26 @@ struct HostStateMsg: Codable, Equatable {
     /// Whether a display other than the built-in one is active, i.e. a closed lid can
     /// still be used in clamshell mode (nil from older Macs, which don't say).
     var hasExternalDisplay: Bool? = nil
+    /// Whether the Mac hides its Dock for the connected clients (nil from Macs before
+    /// 1.2.13, or when this macOS can't).
+    var hidesDock: Bool? = nil
+}
+
+/// After a click from a client that asked for these reports: whether the Mac's keyboard
+/// focus is now in something to type into, so the client can show or hide its keyboard.
+struct RDTextFocusMsg: Codable {
+    let editable: Bool
+}
+
+/// Turns the `textFocus` reports on or off for this client (off until asked).
+struct RDSetTextFocusReportsMsg: Codable {
+    let enabled: Bool
+}
+
+/// Asks the Mac to hide its Dock (the Dock's own auto-hide) until the last client leaves,
+/// or to show it again. It applies to every client; answered with `hostState`.
+struct RDSetHideDockMsg: Codable {
+    let enabled: Bool
 }
 
 /// Turns the Mac's setting for blocking its own keyboard and trackpad during remote
@@ -344,6 +367,7 @@ enum RDKey: UInt16 {
     case left = 123
     case right = 124
     case key5 = 23
+    case keyF = 3
     case capsLock = 57
 }
 

@@ -31,6 +31,10 @@ struct AppSettings: Codable {
     var oneFingerScroll: Bool? = nil
     /// The desktop size sessions start with; nil is the Mac's own size.
     var defaultMirrorSize: RDMirrorSize? = nil
+    /// Sessions start with the Mac's Dock hidden. Optional so older settings decode.
+    var hideDock: Bool? = nil
+    /// The keyboard opens when a tap lands in a text field on the Mac (on unless turned off).
+    var autoKeyboard: Bool? = nil
 
     /// Pinch doesn't zoom, and a two-finger drag always scrolls the Mac.
     var isZoomLocked: Bool {
@@ -151,6 +155,8 @@ final class AppModel: ObservableObject {
         let newSession = ClientSession(deviceName: UIDevice.current.name)
         newSession.autoReconnect = settings.autoReconnect
         newSession.defaultMirrorSize = settings.defaultMirrorSize
+        newSession.defaultHideDock = settings.hideDock ?? false
+        newSession.autoKeyboard = settings.autoKeyboard ?? true
         session = newSession
 
         newSession.onConnected = { [weak self] connected in

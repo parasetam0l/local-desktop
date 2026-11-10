@@ -51,6 +51,17 @@ final class ClientSession: ObservableObject {
     /// The desktop size to ask for when a connection starts (from Settings), if any.
     var defaultMirrorSize: RDMirrorSize?
     private var appliedDefaultMirrorSize = false
+    /// Whether the Mac hides its Dock for this session (nil when it can't, or before 1.2.13).
+    @Published private(set) var hidesMacDock: Bool?
+    /// Whether to ask the Mac to hide its Dock when a connection starts (from Settings).
+    var defaultHideDock = false
+    private var appliedDefaultHideDock = false
+    /// Show the keyboard when a click lands in a text field on the Mac (from Settings).
+    var autoKeyboard = false
+    private var sentTextFocusPreference = false
+    /// The Mac's latest answer after a click: counts up with each one, with whether the
+    /// focus is in something to type into.
+    @Published private(set) var textFocusReport: (count: Int, editable: Bool) = (0, false)
     /// Whether the Mac blocks its own keyboard and trackpad during sessions (nil before 1.2.4).
     @Published private(set) var blocksMacInput: Bool?
     @Published var showDebugHUD = false
@@ -400,6 +411,8 @@ final class ClientSession: ObservableObject {
                 return
             }
             appliedDefaultMirrorSize = false
+            appliedDefaultHideDock = false
+            sentTextFocusPreference = false
             handleAuthOK(msg, attempt: attempt)
 
         case .authFailed:
@@ -428,6 +441,18 @@ final class ClientSession: ObservableObject {
             isHostLocked = msg.isLocked
             isDisplaySleeping = msg.isDisplaySleeping
             blocksMacInput = msg.blocksLocalInput
+            hidesMacDock = msg.hidesDock
+            if !sentTextFocusPreference {
+                sentTextFocusPreference = true
+                // Macs before 1.2.13 ignore this.
+                if autoKeyboard { sendJSON(.setTextFocusReports, RDSetTextFocusReportsMsg(enabled: true)) }
+            }
+            // The Settings default, asked for once per connection (the Mac shows its
+            // Dock again when its last client leaves).
+            if !appliedDefaultHideDock, msg.hidesDock != nil {
+                appliedDefaultHideDock = true
+                if defaultHideDock { setHidesMacDock(true) }
+            }
             isLidClosed = msg.isLidClosed ?? false
             // Macs before this protocol version don't report it; assume a display rather
             // than showing a false "lid closed" warning to them.
@@ -436,6 +461,10 @@ final class ClientSession: ObservableObject {
         case .runningApps:
             guard let msg = RDJSON.decode(RDRunningAppsMsg.self, from: payload) else { break }
             runningApps = msg.apps
+
+        case .textFocus:
+            guard autoKeyboard, let msg = RDJSON.decode(RDTextFocusMsg.self, from: payload) else { break }
+            textFocusReport = (textFocusReport.count + 1, msg.editable)
 
         case .hardwareControlsState:
             guard let msg = RDJSON.decode(RDHardwareControls.self, from: payload) else { break }
@@ -791,6 +820,13 @@ final class ClientSession: ObservableObject {
     func setSizedMirror(_ size: RDMirrorSize?) {
         guard phase == .connected, sizedMirrorAvailable, size != mirrorSize else { return }
         sendJSON(.setSizedMirror, RDSetSizedMirrorMsg(size: size))
+    }
+
+    /// Hides the Mac's Dock for the session or shows it again; the Mac confirms with `hostState`.
+    func setHidesMacDock(_ on: Bool) {
+        guard phase == .connected, hidesMacDock != nil, on != hidesMacDock else { return }
+        hidesMacDock = on
+        sendJSON(.setHideDock, RDSetHideDockMsg(enabled: on))
     }
 
     /// Changes the Mac's setting for blocking its own keyboard and trackpad; the Mac

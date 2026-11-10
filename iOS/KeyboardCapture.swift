@@ -180,3 +180,66 @@ struct KeyboardCapture: UIViewRepresentable {
     }
 }
 
+
+/// Reports where the system keyboard is, in this view's own coordinates, including a
+/// floating or undocked iPad keyboard (which the keyboard notifications don't describe).
+/// With no keyboard up the frame is an empty strip at the bottom edge.
+struct KeyboardFrameTracker: UIViewRepresentable {
+    var onChange: (CGRect) -> Void
+
+    final class TrackerView: UIView {
+        var onChange: ((CGRect) -> Void)?
+        private let probe = ProbeView()
+        private var lastFrame = CGRect.null
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+            keyboardLayoutGuide.followsUndockedKeyboard = true
+            probe.isHidden = true
+            probe.translatesAutoresizingMaskIntoConstraints = false
+            probe.onMove = { [weak self] in self?.report() }
+            addSubview(probe)
+            NSLayoutConstraint.activate([
+                probe.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
+                probe.bottomAnchor.constraint(equalTo: keyboardLayoutGuide.bottomAnchor),
+                probe.leadingAnchor.constraint(equalTo: keyboardLayoutGuide.leadingAnchor),
+                probe.trailingAnchor.constraint(equalTo: keyboardLayoutGuide.trailingAnchor)
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is not supported")
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            report()
+        }
+
+        private func report() {
+            let frame = probe.frame
+            guard frame != lastFrame else { return }
+            lastFrame = frame
+            // Layout can run inside a SwiftUI update; state must change after it.
+            DispatchQueue.main.async { [weak self] in self?.onChange?(frame) }
+        }
+    }
+
+    /// Follows the keyboard guide; dragging a floating keyboard only moves it, which
+    /// doesn't lay the parent out again, hence the observers.
+    final class ProbeView: UIView {
+        var onMove: (() -> Void)?
+        override var center: CGPoint { didSet { onMove?() } }
+        override var bounds: CGRect { didSet { onMove?() } }
+    }
+
+    func makeUIView(context: Context) -> TrackerView {
+        TrackerView()
+    }
+
+    func updateUIView(_ view: TrackerView, context: Context) {
+        view.onChange = onChange
+    }
+}

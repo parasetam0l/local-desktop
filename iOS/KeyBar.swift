@@ -32,6 +32,8 @@ struct KeyBar: View {
                 keyButton("⇧ enter", .returnKey, adding: .shift)
                 keyButton("⌘ space", .space, adding: .command)
                 keyButton("⌘ ⇧ 5", .key5, adding: [.command, .shift])
+                // Leaves (or enters) a Mac app's full screen, where the green button is hidden.
+                keyButton("full screen", .keyF, adding: [.control, .command])
                 keyButton("⌫", .delete)
                 keyButton("←", .left)
                 keyButton("↑", .up)

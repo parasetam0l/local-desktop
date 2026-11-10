@@ -10,6 +10,7 @@ struct SessionMenuButton: View {
     let sizedMirrorAvailable: Bool
     let mirrorSize: RDMirrorSize?
     let blocksMacInput: Bool?
+    let hidesMacDock: Bool?
     @ObservedObject var canvasController: CanvasController
     let onDismiss: () -> Void
     @State private var showHardwareSheet = false
@@ -25,6 +26,12 @@ struct SessionMenuButton: View {
             if let blocksMacInput {
                 Toggle(isOn: Binding(get: { blocksMacInput }, set: { session.setBlocksMacInput($0) })) {
                     Label("Block Mac's Keyboard & Trackpad", systemImage: "lock.display")
+                }
+            }
+
+            if let hidesMacDock {
+                Toggle(isOn: Binding(get: { hidesMacDock }, set: { session.setHidesMacDock($0) })) {
+                    Label("Hide Mac's Dock", systemImage: "dock.arrow.down.rectangle")
                 }
             }
 

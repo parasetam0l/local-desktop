@@ -35,6 +35,9 @@ struct SettingsView: View {
                         }
                     }
 
+                    Toggle("Hide the Mac's Dock during sessions",
+                           isOn: Binding(get: { app.settings.hideDock ?? false }, set: { app.settings.hideDock = $0 }))
+
                     Picker("Video Codec", selection: $app.settings.codecRaw) {
                         Text("HEVC / H.265 (Recommended)").tag(RDCodec.hevc.rawValue)
                         Text("H.264").tag(RDCodec.h264.rawValue)
@@ -50,6 +53,8 @@ struct SettingsView: View {
                         .onChange(of: app.settings.showRemoteCursor) {
                             app.applyQualitySettings()
                         }
+                    Toggle("Show keyboard when tapping a text field",
+                           isOn: Binding(get: { app.settings.autoKeyboard ?? true }, set: { app.settings.autoKeyboard = $0 }))
                     Toggle("One-finger drag scrolls in direct mode", isOn: $app.settings.isOneFingerScroll)
                     Toggle("Lock zoom", isOn: $app.settings.isZoomLocked)
                     Picker("Pointer Speed", selection: $app.settings.pointerSpeedMultiplier) {

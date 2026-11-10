@@ -9,6 +9,10 @@ struct SessionView: View {
 
     @State private var touchpadMode: Bool
     @State private var keyboardVisible = false
+    /// The keyboard came up by itself for a text field, so it may also go away by itself.
+    @State private var keyboardAutoShown = false
+    /// Where the system keyboard is on screen (see `KeyboardFrameTracker`).
+    @State private var keyboardFrame: CGRect?
     /// Modifiers armed for the next key; `lockedModifiers` stay armed afterwards.
     @State private var modifiers: RDModifiers = []
     @State private var lockedModifiers: RDModifiers = []
@@ -92,6 +96,25 @@ struct SessionView: View {
                 .zIndex(isConnected ? 0 : 100)
 
             if isConnected {
+                KeyboardFrameTracker { keyboardFrame = $0 }
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+
+                // Sits on top of the keyboard wherever it is (docked, or floating on an
+                // iPad) and over the Mac's picture, so it never takes room from it.
+                if keyboardVisible, let frame = keyboardFrame {
+                    KeyBar(modifiers: $modifiers, locked: $lockedModifiers) { key, extra in
+                        session.keyTap(key, modifiers: consumeModifiers().union(extra))
+                    }
+                    .frame(width: frame.width)
+                    .clipShape(RoundedRectangle(cornerRadius: frame.minX > 1 ? 12 : 0))
+                    .alignmentGuide(.top) { $0[.bottom] }
+                    .offset(x: frame.minX, y: frame.minY)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .ignoresSafeArea()
+                    .zIndex(50)
+                }
+
                 KeyboardCapture(
                     isActive: keyboardVisible,
                     onText: { text in
@@ -107,6 +130,7 @@ struct SessionView: View {
                         session.keyTap(key, modifiers: consumeModifiers())
                     },
                     onDismissed: {
+                        keyboardAutoShown = false
                         keyboardVisible = false
                     }
                 )
@@ -123,6 +147,7 @@ struct SessionView: View {
                         sizedMirrorAvailable: session.sizedMirrorAvailable,
                         mirrorSize: session.mirrorSize,
                         blocksMacInput: session.blocksMacInput,
+                        hidesMacDock: session.hidesMacDock,
                         canvasController: canvasController,
                         onDismiss: onDismiss
                     )
@@ -132,6 +157,7 @@ struct SessionView: View {
                     Spacer()
 
                     Button {
+                        keyboardAutoShown = false
                         keyboardVisible.toggle()
                     } label: {
                         Image(systemName: keyboardVisible ? "keyboard.fill" : "keyboard")
@@ -162,16 +188,21 @@ struct SessionView: View {
                 .frame(maxHeight: .infinity, alignment: .top)
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if isConnected && keyboardVisible {
-                KeyBar(modifiers: $modifiers, locked: $lockedModifiers) { key, extra in
-                    session.keyTap(key, modifiers: consumeModifiers().union(extra))
-                }
-                .background(.ultraThinMaterial)
-            }
-        }
         .onChange(of: modifiersToHold) { _, held in
             session.setHeldModifiers(held)
+        }
+        .onChange(of: session.textFocusReport.count) {
+            // A tap landed in a text field on the Mac: bring the keyboard up. It goes away
+            // again by itself only if it also came up by itself.
+            if session.textFocusReport.editable {
+                if !keyboardVisible {
+                    keyboardVisible = true
+                    keyboardAutoShown = true
+                }
+            } else if keyboardAutoShown, keyboardVisible {
+                keyboardVisible = false
+                keyboardAutoShown = false
+            }
         }
         .onChange(of: touchpadMode) { _, isTrackpad in
             if isTrackpad {

@@ -25,6 +25,8 @@ final class HostServer: ObservableObject {
         didSet { if mirrorSize != oldValue { broadcastDisplays() } }
     }
     private let sizedMirror = SizedMirror()
+    /// Whether a client asked for the Dock to be hidden; ends with the last session.
+    private(set) var hidesDock = false
     /// The display that was streamed before the sized mirror took over.
     private var displayBeforeSizedMirror: CGDirectDisplayID?
     @Published var preset: RDQualityPreset = .high
@@ -228,6 +230,8 @@ final class HostServer: ObservableObject {
     /// Starts sharing at launch when everything it needs is in place. After a crash
     /// relaunch, sharing is only restored if the user hadn't stopped it.
     func autoStartIfNeeded(afterCrash: Bool) {
+        // A host that crashed or was killed mid-session left the Dock hidden.
+        DockHider.restore()
         refreshPermissions()
         let wanted = UserDefaults.standard.object(forKey: Self.sharingWantedKey) as? Bool ?? true
         guard !afterCrash || wanted else { return }
@@ -327,6 +331,7 @@ final class HostServer: ObservableObject {
             session.close(sendingBye: RDByeReason.hostStopped)
         }
         endSizedMirror()
+        setHidesDock(false)
         lid.stop()
         power.release()
         hostStateBroadcastWorkItem?.cancel()
@@ -562,6 +567,7 @@ final class HostServer: ObservableObject {
             clientName = nil
             wakeRequestedWithClosedLid = false
             endSizedMirror()
+            setHidesDock(false)
             lid.stop()
             power.release()
             ScreenStreamer.shared.stop()
@@ -633,7 +639,16 @@ final class HostServer: ObservableObject {
                      isDisplaySleeping: isDisplaySleeping,
                      blocksLocalInput: blocksLocalInput,
                      isLidClosed: isLidClosed,
-                     hasExternalDisplay: hasExternalDisplay)
+                     hasExternalDisplay: hasExternalDisplay,
+                     hidesDock: DockHider.isAvailable ? hidesDock : nil)
+    }
+
+    /// Hides the Dock for the connected clients or shows it again, and tells every client.
+    func setHidesDock(_ on: Bool) {
+        guard DockHider.isAvailable, on != hidesDock, !on || !activeSessions.isEmpty else { return }
+        hidesDock = on
+        if on { DockHider.hide() } else { DockHider.restore() }
+        scheduleHostStateBroadcast()
     }
 
     /// Changes the setting, from the menu or a client, and tells every client.
