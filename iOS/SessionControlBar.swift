@@ -166,9 +166,31 @@ struct SessionControlBar: View {
                 barButton("xmark", "Disconnect", tint: SessionStyle.danger) {
                     confirmDisconnect = true
                 }
-                .confirmationDialog("Disconnect from \(session.serverName.isEmpty ? "the Mac" : session.serverName)?",
-                                    isPresented: $confirmDisconnect, titleVisibility: .visible) {
-                    Button("Disconnect", role: .destructive, action: onDisconnect)
+                .popover(isPresented: $confirmDisconnect) {
+                    VStack(spacing: 12) {
+                        VStack(spacing: 4) {
+                            Text("Disconnect?")
+                                .font(.headline)
+                            Text("Ends the session with \(session.serverName.isEmpty ? "the Mac" : session.serverName).")
+                                .font(.footnote)
+                                .foregroundStyle(SessionStyle.secondaryText)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Button("Disconnect") {
+                            confirmDisconnect = false
+                            onDisconnect()
+                        }
+                        .buttonStyle(SessionButtonStyle(destructive: true, fullWidth: true))
+                        Button("Cancel") {
+                            confirmDisconnect = false
+                        }
+                        .buttonStyle(SessionButtonStyle(fullWidth: true))
+                    }
+                    .padding(16)
+                    .frame(width: 260)
+                    .sessionPage()
+                    .presentationCompactAdaptation(.popover)
                 }
             }
             .padding(Self.barPadding)
