@@ -23,7 +23,7 @@ struct AppSwitcherView: View {
                     session.triggerSystemAction(.showDesktop)
                     isPresented = false
                 } label: {
-                    Label("Show desktop", systemImage: "macwindow.on.rectangle")
+                    Label("Desktop", systemImage: "macwindow.on.rectangle")
                 }
                 .buttonStyle(SessionButtonStyle(compact: true))
 
@@ -35,16 +35,18 @@ struct AppSwitcherView: View {
                 }
                 .buttonStyle(SessionButtonStyle(compact: true))
 
-                Spacer()
-
                 Button {
-                    session.requestRunningApps()
+                    session.keyTap(.space, modifiers: .command)
+                    isPresented = false
                 } label: {
-                    Image(systemName: "arrow.clockwise")
+                    Label("Spotlight", systemImage: "magnifyingglass")
                 }
                 .buttonStyle(SessionButtonStyle(compact: true))
-                .accessibilityLabel("Refresh")
+
+                Spacer(minLength: 0)
             }
+            // One line each, so the buttons share a height.
+            .lineLimit(1)
             .padding(.horizontal, 16)
             .padding(.bottom, 10)
 
@@ -92,6 +94,15 @@ struct AppSwitcherView: View {
             Text("Mac apps")
                 .font(.headline)
             Spacer()
+            Button {
+                session.requestRunningApps()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(SessionStyle.accent)
+            .accessibilityLabel("Refresh")
+            .padding(.trailing, 14)
             Button("Done") {
                 isPresented = false
             }
