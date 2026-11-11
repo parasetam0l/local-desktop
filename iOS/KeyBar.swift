@@ -14,6 +14,9 @@ struct KeyBar: View {
     @Binding var locked: RDModifiers
     /// Ids of the keys on the favourites page, in the order they were added.
     @Binding var favourites: [String]
+    /// The Mac's Caps Lock as it last reported it; lights the caps key like a keyboard's
+    /// light (nil from Macs that don't say, leaving a plain key).
+    var capsLockOn: Bool? = nil
     /// Sends a key; the second argument holds modifiers the button itself adds (e.g. ⌘ for "⌘ space").
     var onKeyTap: (RDKey, RDModifiers) -> Void
     /// Puts the keyboard (and this bar) away.
@@ -224,6 +227,7 @@ struct KeyBar: View {
 
     private func keyButton(_ key: KeyBarKey) -> some View {
         let isFavourite = favourites.contains(key.id)
+        let isLit = key.key == .capsLock && capsLockOn == true
         return Button {
             onKeyTap(key.key, key.adding)
         } label: {
@@ -232,10 +236,12 @@ struct KeyBar: View {
                 .padding(.horizontal, 11)
                 .frame(minWidth: 34)
                 .frame(height: 34)
-                .background(SessionStyle.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(isLit ? SessionStyle.accent : SessionStyle.raised,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityValue(key.key == .capsLock && capsLockOn != nil ? (isLit ? "on" : "off") : "")
         .contextMenu {
             Button {
                 if isFavourite {

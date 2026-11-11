@@ -507,7 +507,7 @@ enum InputInjector {
         [54, 55, 56, 58, 59, 60, 61, 62].contains(code)
     }
 
-    private static var isCapsLockOn: Bool {
+    static var isCapsLockOn: Bool {
         guard let hidSystem else { return false }
         var isOn = false
         return IOHIDGetModifierLockState(hidSystem, Int32(kIOHIDCapsLockState), &isOn) == KERN_SUCCESS && isOn

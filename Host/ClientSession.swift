@@ -543,6 +543,7 @@ final class ClientSession {
             InputInjector.key(code: CGKeyCode(msg.code),
                               down: msg.down,
                               flags: InputInjector.flags(RDModifiers(rawValue: msg.flags)))
+            if msg.down, msg.code == RDKey.capsLock.rawValue { server.capsLockMayHaveChanged() }
 
         case .textEvent:
             guard let msg = RDJSON.decode(TextMsg.self, from: payload) else { return }

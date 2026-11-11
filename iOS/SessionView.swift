@@ -154,7 +154,8 @@ struct SessionView: View {
                 // Sits on top of the keyboard wherever it is (docked, or floating on an
                 // iPad) and over the Mac's picture, so it never takes room from it.
                 if keyboardVisible, let frame = keyboardFrame {
-                    KeyBar(modifiers: $modifiers, locked: $lockedModifiers, favourites: favouriteKeys) { key, extra in
+                    KeyBar(modifiers: $modifiers, locked: $lockedModifiers, favourites: favouriteKeys,
+                           capsLockOn: session.macCapsLock) { key, extra in
                         session.keyTap(key, modifiers: consumeModifiers().union(extra))
                     } onHideKeyboard: {
                         keyboardAutoShown = false

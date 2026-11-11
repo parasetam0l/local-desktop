@@ -23,6 +23,15 @@ final class HostStateTests: XCTestCase {
         XCTAssertEqual(decoded, state)
     }
 
+    func testCapsLockIsOptionalAndRoundTrips() throws {
+        let legacy = Data(#"{"isLocked":false,"isDisplaySleeping":false}"#.utf8)
+        XCTAssertNil(try XCTUnwrap(RDJSON.decode(HostStateMsg.self, from: legacy)).capsLock)
+        let state = HostStateMsg(isLocked: false, isDisplaySleeping: false, capsLock: true)
+        let decoded = try XCTUnwrap(RDJSON.decode(HostStateMsg.self, from: RDJSON.encode(state)))
+        XCTAssertEqual(decoded.capsLock, true)
+        XCTAssertNotEqual(decoded, HostStateMsg(isLocked: false, isDisplaySleeping: false, capsLock: false))
+    }
+
     func testLidFieldsAreOptionalOnTheWire() throws {
         let state = HostStateMsg(isLocked: false, isDisplaySleeping: false)
         let json = String(decoding: RDJSON.encode(state), as: UTF8.self)

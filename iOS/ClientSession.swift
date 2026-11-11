@@ -37,6 +37,8 @@ final class ClientSession: ObservableObject {
     @Published private(set) var identityMismatchServerId: String?
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
+    /// The Mac's Caps Lock, for the key bar's caps light (nil from Macs that don't say).
+    @Published private(set) var macCapsLock: Bool?
     /// Whether the Mac's lid is shut, and whether an external display keeps it usable
     /// (nil fields from older Macs decode to "lid open, display exists").
     @Published private(set) var isLidClosed = false
@@ -492,6 +494,7 @@ final class ClientSession: ObservableObject {
             isDisplaySleeping = msg.isDisplaySleeping
             blocksMacInput = msg.blocksLocalInput
             hidesMacDock = msg.hidesDock
+            macCapsLock = msg.capsLock
             macWindowActions = msg.windowActions ?? false
             if !sentTextFocusPreference {
                 sentTextFocusPreference = true

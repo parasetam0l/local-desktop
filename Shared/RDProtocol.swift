@@ -316,6 +316,9 @@ struct HostStateMsg: Codable, Equatable {
     var hidesDock: Bool? = nil
     /// Whether the Mac takes the `window…` system actions (nil from Macs before 1.2.16).
     var windowActions: Bool? = nil
+    /// Whether the Mac's Caps Lock is on, so the key bar's caps key can light up like the
+    /// keyboard's own light (nil from older Macs, which don't say).
+    var capsLock: Bool? = nil
 }
 
 /// After a click from a client that asked for these reports: whether the Mac's keyboard

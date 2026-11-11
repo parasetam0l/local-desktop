@@ -80,6 +80,7 @@ final class HostServer: ObservableObject {
     /// Coalesces the bursts of host-state notifications macOS emits around sleep/wake and
     /// lock/unlock into a single send; remembers what was last sent so it isn't repeated.
     private var hostStateBroadcastWorkItem: DispatchWorkItem?
+    private var capsLockTimer: Timer?
     private var lastBroadcastHostState: HostStateMsg?
     private static let hostStateDebounce: TimeInterval = 0.5
 
@@ -364,6 +365,7 @@ final class HostServer: ObservableObject {
         endSizedMirror()
         setHidesDock(false)
         lid.stop()
+        stopCapsLockWatch()
         power.release()
         hostStateBroadcastWorkItem?.cancel()
         hostStateBroadcastWorkItem = nil
@@ -648,6 +650,7 @@ final class HostServer: ObservableObject {
         pendingSessions.removeAll { $0 === session }
         // Only a session needs the lid state, so nothing polls while no one is connected.
         lid.start()
+        startCapsLockWatch()
         if !activeSessions.contains(where: { $0 === session }) {
             activeSessions.append(session)
         }
@@ -691,6 +694,7 @@ final class HostServer: ObservableObject {
             mirrorSizeRetries = 0
             scheduleSessionSettingsReset(leftOnPurpose: session.leftOnPurpose)
             lid.stop()
+            stopCapsLockWatch()
             power.release()
             ScreenStreamer.shared.stop()
             hostStateBroadcastWorkItem?.cancel()
@@ -771,7 +775,28 @@ final class HostServer: ObservableObject {
                      isLidClosed: isLidClosed,
                      hasExternalDisplay: hasExternalDisplay,
                      hidesDock: DockHider.isAvailable ? hidesDock : nil,
-                     windowActions: true)
+                     windowActions: true,
+                     capsLock: InputInjector.isCapsLockOn)
+    }
+
+    /// Caps Lock can change on the Mac's own keyboard too, and macOS posts nothing for it,
+    /// so its state is read twice a second while a device is connected.
+    private func startCapsLockWatch() {
+        guard capsLockTimer == nil else { return }
+        capsLockTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.capsLockMayHaveChanged() }
+        }
+    }
+
+    private func stopCapsLockWatch() {
+        capsLockTimer?.invalidate()
+        capsLockTimer = nil
+    }
+
+    /// Tells the clients at once when Caps Lock flipped, without the usual debounce.
+    func capsLockMayHaveChanged() {
+        guard let last = lastBroadcastHostState, last.capsLock != InputInjector.isCapsLockOn else { return }
+        broadcastHostState()
     }
 
     /// Hides the Dock for the connected clients or shows it again, and tells every client.
