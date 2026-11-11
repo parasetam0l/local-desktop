@@ -183,9 +183,6 @@ struct SessionControlBar: View {
                                  canvasController: canvasController, isPresented: $showPanel,
                                  onDisconnect: onDisconnect)
                 }
-                barButton(hideSymbol, "Hide session controls") {
-                    collapsed = true
-                }
                 barButton("xmark", "Disconnect", tint: SessionStyle.danger) {
                     confirmDisconnect = true
                 }
@@ -214,6 +211,9 @@ struct SessionControlBar: View {
                     .frame(width: 260)
                     .sessionPage()
                     .presentationCompactAdaptation(.popover)
+                }
+                barButton(hideSymbol, "Hide session controls") {
+                    collapsed = true
                 }
             }
             .padding(Self.barPadding)
