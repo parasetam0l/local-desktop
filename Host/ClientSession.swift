@@ -27,6 +27,20 @@ final class ClientSession {
     private static let maxPINAttemptsPerConnection = 5
 
     private let connection: NWConnection
+    /// The QUIC connection this session's stream belongs to (nil over TCP). Video moves
+    /// to its datagrams once the client sends `videoDatagrams`.
+    private let quicGroup: NWConnectionGroup?
+    private var videoKey: SymmetricKey?
+    private var datagramFlow: NWConnection?
+    private var packetizer: RDVideoPacketizer?
+    private var clientMaxDatagramSize = RDVideoDatagram.defaultMaxSize
+    /// Set once the datagram flow is ready; never cleared, since the client numbers
+    /// stream frames by their position on the stream.
+    private var videoOverDatagrams = false
+    /// Unconfirmed datagram frames older than this are counted lost and stop braking.
+    private static let datagramLossTimeout: TimeInterval = 0.3
+    /// Datagram frames lost since the last `delivery` log line.
+    private var deliveryLost = 0
     private weak var server: HostServer?
     /// The peer's IP, used to cap unauthenticated connections per address.
     let remoteAddress: String
@@ -83,12 +97,18 @@ final class ClientSession {
         return ProcessInfo.processInfo.systemUptime - oldestSentAt < Self.maxUnackedAge
     }
 
-    init(connection: NWConnection, server: HostServer, remoteAddress: String) {
+    init(connection: NWConnection, server: HostServer, remoteAddress: String,
+         quicGroup: NWConnectionGroup? = nil, initialData: Data = Data()) {
         self.connection = connection
+        self.initialData = initialData
+        self.quicGroup = quicGroup
         self.server = server
         self.remoteAddress = remoteAddress
         reader.maxPayload = RDService.maxHandshakePayload
     }
+
+    /// First bytes read off a QUIC stream before the session took it (`QUICAcceptor`).
+    private var initialData: Data
 
     func start() {
         phaseStartedAt = Date()
@@ -103,7 +123,18 @@ final class ClientSession {
                 self?.handleState(state)
             }
         }
-        connection.start(queue: .main)
+        if connection.state == .setup {
+            connection.start(queue: .main)
+        } else {
+            // A QUIC stream is handed over once it is already running (see HostServer),
+            // with the bytes that showed it is the client's control stream.
+            handleState(connection.state)
+            if !initialData.isEmpty, phase != .closed {
+                reader.append(initialData)
+                initialData = Data()
+                processFrames()
+            }
+        }
     }
 
     /// Ends the session. With a reason, an active client is sent `bye` first so it
@@ -124,12 +155,18 @@ final class ClientSession {
     private func closeAfterFlush() {
         guard phase != .closed else { return }
         let connection = self.connection
+        let group = quicGroup
         connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
-                        completion: .contentProcessed { _ in connection.cancel() })
+                        completion: .contentProcessed { _ in
+            connection.cancel()
+            // Give the FIN a moment to leave before the whole QUIC connection closes.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { group?.cancel() }
+        })
         finish(reason: nil, cancelConnection: false)
         // Don't wait forever on a client that stopped reading.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             connection.cancel()
+            group?.cancel()
         }
     }
 
@@ -175,8 +212,11 @@ final class ClientSession {
         InputInjector.release(buttons: heldButtons, keys: heldKeys)
         heldButtons.removeAll()
         heldKeys.removeAll()
+        datagramFlow?.cancel()
+        datagramFlow = nil
         if cancelConnection {
             connection.cancel()
+            quicGroup?.cancel()
         }
         server?.sessionDidEnd(self)
     }
@@ -233,6 +273,7 @@ final class ClientSession {
             return
         }
 
+        expireLostDatagramFrames()
         guard canSendFrame else {
             deliveryLog.held += 1
             needsKeyframeRecovery = true
@@ -243,7 +284,97 @@ final class ClientSession {
         if isKeyframe {
             needsKeyframeRecovery = false
         }
-        send(.frame, RDFrameCodec.pack(width: width, height: height, codec: codec, data: data))
+        let payload = RDFrameCodec.pack(width: width, height: height, codec: codec, data: data)
+        if videoOverDatagrams {
+            sendVideoDatagrams(payload, isKeyframe: isKeyframe)
+        } else {
+            send(.frame, payload)
+        }
+    }
+
+    // MARK: Video datagrams (QUIC)
+
+    /// The client asked for video as datagrams: open this connection's datagram flow
+    /// and switch once it is ready. Until then frames keep going on the stream.
+    private func startVideoDatagrams(maxSize: Int) {
+        guard let quicGroup, datagramFlow == nil, let videoKey,
+              let identity = QUICIdentityStore.loadOrCreate(),
+              let options = RDQUIC.serverDatagramFlowOptions(identity: identity),
+              let flow = NWConnection(from: quicGroup, using: options) else { return }
+        clientMaxDatagramSize = max(RDVideoDatagram.minPieceBody + RDVideoDatagram.overhead, maxSize)
+        packetizer = RDVideoPacketizer(key: videoKey)
+        datagramFlow = flow
+        flow.stateUpdateHandler = { [weak self, weak flow] state in
+            MainActor.assumeIsolated {
+                guard let self, let flow, self.datagramFlow === flow else { return }
+                switch state {
+                case .ready:
+                    self.videoOverDatagrams = true
+                    HostLog.write("video datagrams for \(self.peerDisplayName): up to \(self.maxDatagramSize) bytes")
+                case .failed(let error) where self.videoOverDatagrams:
+                    // The QUIC connection itself is gone; the stream ends with it.
+                    self.finish(reason: "datagram flow: \(error.localizedDescription)")
+                case .failed(let error):
+                    // Never came up: video simply stays on the stream.
+                    HostLog.write("video datagrams for \(self.peerDisplayName) unavailable: \(error)")
+                    self.datagramFlow = nil
+                default:
+                    break
+                }
+            }
+        }
+        flow.start(queue: .main)
+    }
+
+    private var maxDatagramSize: Int {
+        let reported = datagramFlow?.maximumDatagramSize ?? 0
+        return min(clientMaxDatagramSize, RDVideoDatagram.defaultMaxSize,
+                   reported > 0 ? reported : RDVideoDatagram.defaultMaxSize)
+    }
+
+    /// Numbers the frame like a stream frame (same counter, same gate) and sends its pieces.
+    private func sendVideoDatagrams(_ payload: Data, isKeyframe: Bool) {
+        guard phase != .closed, let flow = datagramFlow, let packetizer else { return }
+        framesSent &+= 1
+        let number = framesSent
+        frameSentAt[Int(number % 32)] = ProcessInfo.processInfo.systemUptime
+        guard let datagrams = packetizer.datagrams(frame: number, payload: payload, isKeyframe: isKeyframe,
+                                                   maxDatagramSize: maxDatagramSize) else {
+            // Too large to send; the client sees a gap and asks for a keyframe.
+            server?.updateFrameGate()
+            return
+        }
+        outgoingFrames += 1
+        server?.updateFrameGate()
+        flow.batch {
+            for (index, datagram) in datagrams.enumerated() {
+                let isLast = index == datagrams.count - 1
+                flow.send(content: datagram, completion: isLast ? .contentProcessed { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, self.phase != .closed else { return }
+                        self.outgoingFrames = max(0, self.outgoingFrames - 1)
+                        self.server?.updateFrameGate()
+                    }
+                } : .idempotent)
+            }
+        }
+    }
+
+    /// A lost datagram frame is never acked on its own; once it is old enough, count it
+    /// lost so the in-flight brake doesn't wait for it forever.
+    private func expireLostDatagramFrames() {
+        guard videoOverDatagrams else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        var expired = false
+        while framesSent != framesAcked, framesSent &- framesAcked < 32,
+              now - frameSentAt[Int((framesAcked &+ 1) % 32)] > Self.datagramLossTimeout {
+            framesAcked &+= 1
+            deliveryLost += 1
+            expired = true
+        }
+        if expired {
+            server?.updateFrameGate()
+        }
     }
 
     /// Asks for an IDR, at most twice a second per client, so one slow client can't
@@ -259,10 +390,12 @@ final class ClientSession {
         let elapsed = now - deliveryLog.start
         guard elapsed >= 5 else { return }
         let log = deliveryLog
-        HostLog.write(String(format: "delivery %@: %.0f fps, %.0f/%.0f/%.0f ms min/avg/max, %d held back, bitrate ×%.2f",
-                             peerDisplayName, Double(log.acked) / elapsed, log.min * 1000,
-                             log.total / Double(log.sent) * 1000, log.max * 1000, log.held, bitrateFactor))
+        let transport = videoOverDatagrams ? "QUIC datagrams" : (quicGroup != nil ? "QUIC stream" : "TCP")
+        HostLog.write(String(format: "delivery %@ (%@): %.0f fps, %.0f/%.0f/%.0f ms min/avg/max, %d held back, %d lost, bitrate ×%.2f",
+                             peerDisplayName, transport, Double(log.acked) / elapsed, log.min * 1000,
+                             log.total / Double(log.sent) * 1000, log.max * 1000, log.held, deliveryLost, bitrateFactor))
         deliveryLog = (now, 0, 0, 0, 1, 0, 0)
+        deliveryLost = 0
     }
 
     private func requestRecoveryKeyframe() {
@@ -433,6 +566,7 @@ final class ClientSession {
         let keys = response.keys
         sendCipher = RDCipher(key: keys.serverToClient)
         receiveCipher = RDCipher(key: keys.clientToServer)
+        videoKey = keys.videoDatagrams
         phase = .waitingAuth
         phaseStartedAt = Date()
     }
@@ -481,7 +615,7 @@ final class ClientSession {
 
     private func handleActive(_ wire: RDWire, payload: Data) {
         switch wire {
-        case .setQuality, .wakeDisplay, .requestKeyframe, .ping, .networkStats, .frameAck, .bye:
+        case .setQuality, .wakeDisplay, .requestKeyframe, .ping, .networkStats, .frameAck, .videoDatagrams, .transportNote, .bye:
             handleSessionMessage(wire, payload: payload)
         case .mouseMoveAbs, .mouseMoveRel, .mouseDown, .mouseUp, .scroll, .keyEvent, .textEvent:
             InputInjector.tickleUserActivity()
@@ -525,9 +659,13 @@ final class ClientSession {
             // Only counts that move forward and don't pass what was sent.
             let advance = count &- framesAcked
             guard advance > 0, advance <= framesSent &- framesAcked else { return }
+            if videoOverDatagrams {
+                // The ack is the highest frame received; numbers it skipped were lost.
+                deliveryLost += Int(advance) - 1
+            }
             if framesSent &- count < 32 {
                 let delay = ProcessInfo.processInfo.systemUptime - frameSentAt[Int(count % 32)]
-                logDelivery(delay: delay, frames: Int(advance))
+                logDelivery(delay: delay, frames: videoOverDatagrams ? 1 : Int(advance))
                 if let factor = congestion.add(delay: delay, factor: bitrateFactor) {
                     bitrateFactor = factor
                     server?.updateBitrate()
@@ -549,6 +687,14 @@ final class ClientSession {
                 bitrateFactor = min(1.25, bitrateFactor + 0.05)
             }
             server?.updateBitrate()
+
+        case .transportNote:
+            guard let msg = RDJSON.decode(TransportNoteMsg.self, from: payload) else { return }
+            HostLog.write("QUIC: \(peerDisplayName) \(msg.quicFallback.prefix(1000))")
+
+        case .videoDatagrams:
+            guard let msg = RDJSON.decode(VideoDatagramsMsg.self, from: payload) else { return }
+            startVideoDatagrams(maxSize: msg.maxSize)
 
         case .bye:
             leftOnPurpose = RDJSON.decode(ByeMsg.self, from: payload)?.reason == RDByeReason.userDisconnect

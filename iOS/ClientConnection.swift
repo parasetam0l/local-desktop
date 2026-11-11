@@ -19,6 +19,10 @@ struct ServerIdentity: Sendable {
 /// the caller: `ready` is reported once, and the handshake simply restarts on TCP.
 /// Both transports are byte streams, so everything above `connection` is shared.
 ///
+/// QUIC runs as a connection group: the control stream carries the protocol, and
+/// once authenticated the client offers `videoDatagrams`; the host then sends video
+/// as datagrams (`RDVideoDatagram`), rebuilt here by `RDVideoReassembler`.
+///
 /// Everything mutable is confined to `queue`, and the callbacks run there too, so
 /// none of this touches main-actor state. `ClientSession` hops events to the main
 /// actor; video payloads go straight to the decode pipeline.
@@ -40,11 +44,31 @@ final class ClientConnection: @unchecked Sendable {
     struct Stats {
         var bytes = 0
         var frames = 0
+        /// Video frames lost or discarded on the datagram path.
+        var lost = 0
     }
 
     private let queue: DispatchQueue
-    private var connection: NWConnection
+    /// The control stream (TCP, or a QUIC stream once the QUIC group is ready).
+    private var connection: NWConnection?
     private let tcpEndpoint: NWEndpoint
+    private var quicEndpoint: NWEndpoint?
+    /// Resolves a Bonjour service to an address before QUIC: a connection group
+    /// traps (crashes) when given a service endpoint instead of host and port.
+    private var quicResolver: NWConnection?
+    private var group: NWConnectionGroup?
+    private var datagramFlow: NWConnection?
+    private var videoKey: SymmetricKey?
+    private var reassembler: RDVideoReassembler?
+    private var isAuthenticated = false
+    private var offeredDatagrams = false
+    private var lastLossKeyframeRequest: TimeInterval = 0
+    /// QUIC attempt events with their time since `start`, for the fallback reason.
+    private var quicStartedAt: TimeInterval = 0
+    private var quicTrace: [String] = []
+    /// Why this attempt left QUIC; sent to the host after `authOK` (`transportNote`).
+    private var quicFallbackReason: String?
+    private var streamRetried = false
     /// The transport currently in use.
     private var transport: RDTransport
     private var reportedReady = false
@@ -78,9 +102,10 @@ final class ClientConnection: @unchecked Sendable {
         self.onEvent = onEvent
         self.onVideoFrame = onVideoFrame
         tcpEndpoint = endpoint
-        if let quicEndpoint {
+        self.quicEndpoint = quicEndpoint
+        if quicEndpoint != nil {
             transport = .quic
-            connection = NWConnection(to: quicEndpoint, using: RDQUIC.clientParameters(verifyQueue: queue))
+            connection = nil
         } else {
             transport = .tcp
             connection = NWConnection(to: endpoint, using: Self.makeParameters())
@@ -106,20 +131,152 @@ final class ClientConnection: @unchecked Sendable {
 
     func start() {
         queue.async {
-            self.startCurrentConnection()
-            guard self.transport == .quic else { return }
-            let quic = self.connection
-            self.queue.asyncAfter(deadline: .now() + RDQUIC.fallbackDelay) { [weak self] in
-                guard let self, self.connection === quic, quic.state != .ready else { return }
-                self.fallBackToTCP()
-            }
+            guard self.transport == .quic else { return self.startCurrentConnection() }
+            self.quicStartedAt = ProcessInfo.processInfo.systemUptime
+            self.startQUICGroup()
+            self.armFallbackTimer(extended: false)
         }
     }
 
+    /// QUIC gets `RDQUIC.fallbackDelay` to finish its handshake (the group becomes
+    /// ready); once it has, the control stream gets the same again before TCP takes over.
+    private func armFallbackTimer(extended: Bool) {
+        queue.asyncAfter(deadline: .now() + RDQUIC.fallbackDelay) { [weak self] in
+            guard let self, self.transport == .quic, self.connection?.state != .ready else { return }
+            if !extended, self.group?.state == .ready {
+                self.trace("timer: handshake done, waiting for the stream")
+                return self.armFallbackTimer(extended: true)
+            }
+            self.fallBackToTCP("not ready in time (group \(self.group.map { "\($0.state)" } ?? "none"), "
+                               + "stream \(self.connection.map { "\($0.state)" } ?? "none"))")
+        }
+    }
+
+    private func sendTransportNote(_ note: String) {
+        write(.transportNote, RDJSON.encode(TransportNoteMsg(quicFallback: String(note.prefix(1000)))), then: nil)
+    }
+
+    private func trace(_ event: String) {
+        guard transport == .quic else { return }
+        let ms = Int((ProcessInfo.processInfo.systemUptime - quicStartedAt) * 1000)
+        quicTrace.append("\(event) @\(ms)ms")
+        ClientLog.write("quic: \(event) @\(ms)ms")
+    }
+
+    private func startQUICGroup() {
+        guard let quicEndpoint else { return }
+        if case .service = quicEndpoint {
+            return resolveQUICService(quicEndpoint)
+        }
+        let group = NWConnectionGroup(with: NWMultiplexGroup(to: quicEndpoint),
+                                      using: RDQUIC.clientParameters(verifyQueue: queue))
+        self.group = group
+        group.stateUpdateHandler = { [weak self, weak group] state in
+            guard let self, let group, self.group === group, !self.isFinished else { return }
+            self.trace("group \(state)")
+            switch state {
+            case .ready:
+                self.openQUICFlows(group)
+            case .failed(let error):
+                if self.canFallBack { return self.fallBackToTCP("group failed: \(error)") }
+                self.finish(.failed(error.localizedDescription))
+            case .cancelled:
+                if self.canFallBack { return self.fallBackToTCP("group cancelled") }
+                self.finish(.closed)
+            default:
+                // `.waiting` shows up briefly even on loopback; the fallback timer decides.
+                break
+            }
+        }
+        // A group doesn't start without these handlers. The host opens no streams, and
+        // video datagrams arrive on the datagram flow (NWConnection(from: group)), not here.
+        group.newConnectionHandler = { $0.cancel() }
+        group.setReceiveHandler(maximumMessageSize: 65_535, rejectOversizedMessages: true) { _, _, _ in }
+        group.start(queue: queue)
+    }
+
+    /// Opens the control stream and the datagram flow on a ready QUIC connection.
+    /// A plain UDP connection resolves the service without any handshake; its address
+    /// (with the service's port, which QUIC shares) is then dialled as a group.
+    private func resolveQUICService(_ service: NWEndpoint) {
+        let params = NWParameters.udp
+        if let ip = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+            ip.version = .v4
+        }
+        let resolver = NWConnection(to: service, using: params)
+        quicResolver = resolver
+        resolver.stateUpdateHandler = { [weak self, weak resolver] state in
+            guard let self, let resolver, self.quicResolver === resolver,
+                  self.transport == .quic, !self.isFinished else { return }
+            switch state {
+            case .ready:
+                let remote = resolver.currentPath?.remoteEndpoint
+                self.quicResolver = nil
+                resolver.cancel()
+                guard case .hostPort? = remote else {
+                    return self.fallBackToTCP("service resolved to \(String(describing: remote))")
+                }
+                self.trace("resolved \(remote!)")
+                self.quicEndpoint = remote
+                self.startQUICGroup()
+            case .failed(let error), .waiting(let error):
+                self.quicResolver = nil
+                resolver.cancel()
+                self.fallBackToTCP("service resolve: \(error)")
+            default:
+                break
+            }
+        }
+        resolver.start(queue: queue)
+    }
+
+    private func openQUICFlows(_ group: NWConnectionGroup) {
+        guard connection == nil else { return }
+        guard openControlStream(group) else { return }
+        guard let flow = NWConnection(from: group, using: RDQUIC.clientDatagramFlowOptions(verifyQueue: queue)) else { return }
+        datagramFlow = flow
+        flow.stateUpdateHandler = { [weak self, weak flow] state in
+            guard let self, let flow, self.datagramFlow === flow else { return }
+            self.trace("datagram flow \(state)")
+            guard case .ready = state else { return }
+            self.receiveDatagram(on: flow)
+            self.offerDatagramsIfReady()
+        }
+        flow.start(queue: queue)
+    }
+
+    /// Extracts the control stream. No options: the stream inherits the group's QUIC
+    /// options and parameters (fresh stream options failed with ENETDOWN on Wi-Fi).
+    private func openControlStream(_ group: NWConnectionGroup) -> Bool {
+        guard let stream = group.extract() else {
+            if canFallBack { fallBackToTCP("no stream from the group") }
+            return false
+        }
+        connection = stream
+        startCurrentConnection()
+        return true
+    }
+
+    /// A control stream that fails before `serverHello` while its QUIC connection is
+    /// still up is replaced once with a new stream on the same connection.
+    private func retryControlStream(after error: NWError) -> Bool {
+        guard transport == .quic, canFallBack, !streamRetried, let group, group.state == .ready else { return false }
+        streamRetried = true
+        trace("stream failed (\(error)), retrying")
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+        ephemeralKey = nil
+        reader = RDFrameReader()
+        reader.maxPayload = RDService.maxHandshakePayload
+        return openControlStream(group)
+    }
+
     private func startCurrentConnection() {
-        let current = connection
+        guard let current = connection else { return }
         current.stateUpdateHandler = { [weak self, weak current] state in
             guard let self, let current, self.connection === current else { return }
+            self.trace("stream \(state)")
             self.handleState(state)
         }
         current.start(queue: queue)
@@ -132,11 +289,20 @@ final class ClientConnection: @unchecked Sendable {
     }
 
     /// Drops the QUIC attempt and restarts the same attempt over TCP from scratch.
-    private func fallBackToTCP() {
+    private func fallBackToTCP(_ reason: String) {
         guard canFallBack else { return }
-        let quic = connection
-        quic.stateUpdateHandler = nil
-        quic.cancel()
+        quicFallbackReason = ([reason] + quicTrace).joined(separator: "; ")
+        quicResolver?.stateUpdateHandler = nil
+        quicResolver?.cancel()
+        quicResolver = nil
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        datagramFlow?.stateUpdateHandler = nil
+        datagramFlow?.cancel()
+        datagramFlow = nil
+        group?.stateUpdateHandler = nil
+        group?.cancel()
+        group = nil
         transport = .tcp
         ephemeralKey = nil
         reader = RDFrameReader()
@@ -161,10 +327,17 @@ final class ClientConnection: @unchecked Sendable {
         queue.async {
             guard !self.isFinished else { return }
             let connection = self.connection
-            self.write(wire, payload) { connection.cancel() }
+            let group = self.group
+            self.write(wire, payload) {
+                connection?.cancel()
+                group?.cancel()
+            }
             self.isFinished = true
             // Don't hang on to a connection whose peer stopped reading.
-            self.queue.asyncAfter(deadline: .now() + 2) { connection.cancel() }
+            self.queue.asyncAfter(deadline: .now() + 2) {
+                connection?.cancel()
+                group?.cancel()
+            }
         }
     }
 
@@ -193,7 +366,7 @@ final class ClientConnection: @unchecked Sendable {
         } else {
             frame = RDFrame.pack(wire, payload: payload)
         }
-        connection.send(content: frame, completion: .contentProcessed { _ in completion?() })
+        connection?.send(content: frame, completion: .contentProcessed { _ in completion?() })
     }
 
     private func handleState(_ state: NWConnection.State) {
@@ -207,13 +380,16 @@ final class ClientConnection: @unchecked Sendable {
             sendHello()
             receive()
         case .failed(let error):
-            if canFallBack { return fallBackToTCP() }
+            if retryControlStream(after: error) { return }
+            if canFallBack { return fallBackToTCP("stream failed: \(error)") }
             finish(.failed(error.localizedDescription))
         case .cancelled:
-            if canFallBack { return fallBackToTCP() }
+            if canFallBack { return fallBackToTCP("stream cancelled") }
             finish(.closed)
         case .waiting(let error):
-            if canFallBack { return fallBackToTCP() }
+            // An extracted QUIC stream (like its group) can pass through `waiting`
+            // before it is ready; the fallback timer decides, not this state.
+            if transport == .quic { return }
             if case .posix(let code) = error, code == .ECONNREFUSED || code == .EHOSTUNREACH || code == .ENETUNREACH {
                 finish(.failed(error.localizedDescription))
             }
@@ -225,7 +401,7 @@ final class ClientConnection: @unchecked Sendable {
     /// The remote endpoint as a TCP address, which is what a reconnect dials: over QUIC
     /// the UDP port may differ, so it's swapped for the TCP one when that's known.
     private func reportedRemoteEndpoint() -> NWEndpoint? {
-        let remote = connection.currentPath?.remoteEndpoint
+        let remote = connection?.currentPath?.remoteEndpoint
         guard transport == .quic else { return remote }
         if case .hostPort(let host, _)? = remote, case .hostPort(_, let tcpPort) = tcpEndpoint {
             return .hostPort(host: host, port: tcpPort)
@@ -236,8 +412,12 @@ final class ClientConnection: @unchecked Sendable {
 
     private func finish(_ event: Event?) {
         guard !isFinished else { return }
+        ClientLog.write("connection finished (\(transport)): \(event.map { "\($0)" } ?? "cancelled by app")")
         isFinished = true
-        connection.cancel()
+        quicResolver?.cancel()
+        connection?.cancel()
+        datagramFlow?.cancel()
+        group?.cancel()
         if let event {
             onEvent(event)
         }
@@ -251,12 +431,12 @@ final class ClientConnection: @unchecked Sendable {
     }
 
     private func receive() {
-        let current = connection
+        guard let current = connection else { return }
         current.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] chunk, _, isComplete, error in
             // A dropped QUIC attempt may still deliver a last callback; ignore it.
             guard let self, !self.isFinished, self.connection === current else { return }
             if let error {
-                if self.canFallBack { return self.fallBackToTCP() }
+                if self.canFallBack { return self.fallBackToTCP("receive failed: \(error)") }
                 self.finish(.failed(error.localizedDescription))
                 return
             }
@@ -265,7 +445,7 @@ final class ClientConnection: @unchecked Sendable {
                 self.processFrames()
             }
             if isComplete {
-                if self.canFallBack { return self.fallBackToTCP() }
+                if self.canFallBack { return self.fallBackToTCP("host closed the stream before serverHello") }
                 self.finish(.closed)
                 return
             }
@@ -315,10 +495,21 @@ final class ClientConnection: @unchecked Sendable {
             case .frame:
                 // Confirmed on arrival, before decoding: the host paces itself on what
                 // reached the device, not on what it handed to its own network stack.
+                // Stream frames are numbered by their position on the stream.
                 framesReceived &+= 1
-                let count = framesReceived
-                write(.frameAck, Data([UInt8(count >> 24), UInt8(count >> 16 & 0xFF),
-                                       UInt8(count >> 8 & 0xFF), UInt8(count & 0xFF)]), then: nil)
+                let number = framesReceived
+                if var assembler = reassembler {
+                    // Datagrams took over; a stream frame older than one they delivered
+                    // can't be decoded in order.
+                    let fresh = assembler.noteStreamFrame(number)
+                    reassembler = assembler
+                    guard fresh else {
+                        countLost(1)
+                        requestLossKeyframe()
+                        continue
+                    }
+                }
+                sendFrameAck(number)
                 onVideoFrame(plain)
             case .serverHello:
                 finish(.failed("Protocol error: repeated handshake"))
@@ -332,6 +523,23 @@ final class ClientConnection: @unchecked Sendable {
                     reader.maxPayload = RDService.maxPayload
                 }
                 onEvent(.message(wire, plain))
+                if wire == .authOK {
+                    isAuthenticated = true
+                    offerDatagramsIfReady()
+                    if let reason = quicFallbackReason {
+                        quicFallbackReason = nil
+                        sendTransportNote("fell back to TCP: \(reason)")
+                    } else if transport == .quic {
+                        // Video stays on the stream if the datagram flow never comes up;
+                        // say why, so the host log shows it.
+                        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                            guard let self, !self.isFinished, !self.offeredDatagrams else { return }
+                            let flow = self.datagramFlow.map { "\($0.state)" } ?? "none"
+                            self.sendTransportNote("no video datagrams (flow \(flow)): "
+                                                   + self.quicTrace.joined(separator: "; "))
+                        }
+                    }
+                }
             }
         }
     }
@@ -360,12 +568,93 @@ final class ClientConnection: @unchecked Sendable {
             return
         }
         ephemeralKey = nil
+        videoKey = keys.videoDatagrams
         sendCipher = RDCipher(key: keys.clientToServer)
         receiveCipher = RDCipher(key: keys.serverToClient)
         onEvent(.serverHello(ServerIdentity(serverId: msg.serverId,
                                             serverName: msg.serverName,
                                             identityKey: msg.identityKey,
                                             transcript: transcript)))
+    }
+
+    // MARK: Video datagrams
+
+    /// After `authOK` on QUIC with a ready datagram flow: tell the host to send video
+    /// as datagrams. Frames delivered on the stream so far set where numbering resumes.
+    private func offerDatagramsIfReady() {
+        guard !offeredDatagrams, isAuthenticated, let flow = datagramFlow, flow.state == .ready,
+              let videoKey else { return }
+        offeredDatagrams = true
+        reassembler = RDVideoReassembler(key: videoKey, lastFrame: framesReceived)
+        let reported = flow.maximumDatagramSize
+        let maxSize = min(RDVideoDatagram.defaultMaxSize, reported > 0 ? reported : RDVideoDatagram.defaultMaxSize)
+        write(.videoDatagrams, RDJSON.encode(VideoDatagramsMsg(maxSize: maxSize)), then: nil)
+    }
+
+    private func receiveDatagram(on flow: NWConnection) {
+        flow.receiveMessage { [weak self, weak flow] content, _, _, error in
+            guard let self, let flow, !self.isFinished, self.datagramFlow === flow else { return }
+            if let content, !content.isEmpty {
+                self.handleDatagram(content)
+            }
+            if let error {
+                ClientLog.write("datagram receive error: \(error)")
+            } else {
+                self.receiveDatagram(on: flow)
+            }
+        }
+    }
+
+    private func handleDatagram(_ datagram: Data) {
+        guard var assembler = reassembler else { return }
+        let output = assembler.receive(datagram)
+        reassembler = assembler
+        datagramLog.datagrams += 1
+        datagramLog.frames += output.frames.count
+        datagramLog.dropped += output.dropped
+        if output.needsKeyframe { datagramLog.keyframeRequests += 1 }
+        let now = ProcessInfo.processInfo.systemUptime
+        if datagramLog.datagrams == 1 || now - datagramLog.loggedAt >= 1 {
+            datagramLog.loggedAt = now
+            ClientLog.write("datagrams: \(datagramLog.datagrams) in, \(datagramLog.frames) frames, "
+                            + "\(datagramLog.dropped) dropped, \(datagramLog.keyframeRequests) keyframe requests")
+        }
+        countStats(bytes: datagram.count, isVideo: false)
+        if output.dropped > 0 {
+            countLost(output.dropped)
+        }
+        // Confirmed on arrival, before decoding, like stream frames.
+        if let acked = output.acked {
+            sendFrameAck(acked)
+        }
+        for frame in output.frames {
+            countStats(bytes: 0, isVideo: true)
+            onVideoFrame(frame)
+        }
+        if output.needsKeyframe {
+            requestLossKeyframe()
+        }
+    }
+
+    private var datagramLog = (datagrams: 0, frames: 0, dropped: 0, keyframeRequests: 0, loggedAt: 0.0)
+
+    private func sendFrameAck(_ number: UInt32) {
+        write(.frameAck, Data([UInt8(number >> 24), UInt8(number >> 16 & 0xFF),
+                               UInt8(number >> 8 & 0xFF), UInt8(number & 0xFF)]), then: nil)
+    }
+
+    /// Asks for a keyframe after a loss, at most twice a second (the host limits too).
+    private func requestLossKeyframe() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastLossKeyframeRequest > 0.5 else { return }
+        lastLossKeyframeRequest = now
+        write(.requestKeyframe, RDJSON.encode(RequestKeyframeMsg(reason: "loss")), then: nil)
+    }
+
+    private func countLost(_ frames: Int) {
+        statsLock.lock()
+        stats.lost += frames
+        statsLock.unlock()
     }
 
     private func countStats(bytes: Int, isVideo: Bool) {

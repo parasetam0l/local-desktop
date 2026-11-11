@@ -65,6 +65,8 @@ final class VideoPipeline: @unchecked Sendable {
     // Confined to `queue`.
     private let decoder = VideoDecoder()
     private var reportedSize: CGSize = .zero
+    private var loggedFirstDecode = false
+    private var loggedDecodeErrors = 0
 
     private let statsLock = NSLock()
     private var decodedFrames = 0
@@ -90,6 +92,8 @@ final class VideoPipeline: @unchecked Sendable {
         queue.async {
             self.decoder.reset()
             self.reportedSize = .zero
+            self.loggedFirstDecode = false
+            self.loggedDecodeErrors = 0
         }
     }
 
@@ -108,6 +112,10 @@ final class VideoPipeline: @unchecked Sendable {
         let size = CGSize(width: width, height: height)
         decoder.decode(annexB: data, codec: codec) { sample in
             let elapsedMs = (CACurrentMediaTime() - start) * 1000.0
+            if !loggedFirstDecode {
+                loggedFirstDecode = true
+                ClientLog.write("first frame decoded \(width)x\(height) \(codec)")
+            }
             statsLock.lock()
             decodedFrames += 1
             lastDecodeMs = elapsedMs
@@ -127,6 +135,10 @@ final class VideoPipeline: @unchecked Sendable {
                 requestKeyframe()
             }
         } onError: {
+            if self.loggedDecodeErrors < 20 {
+                self.loggedDecodeErrors += 1
+                ClientLog.write("decode error (\(data.count) bytes, \(codec))")
+            }
             self.statsLock.lock()
             self.droppedFrames += 1
             self.statsLock.unlock()

@@ -33,23 +33,53 @@ enum RDQUIC {
 
     /// Client parameters: accepts any server certificate (see the type's note).
     static func clientParameters(verifyQueue: DispatchQueue) -> NWParameters {
+        parameters(clientOptions(verifyQueue: verifyQueue))
+    }
+
+    /// The client's datagram flow: the group's own QUIC options plus `isDatagram`. Fresh
+    /// options (no verify block, different transport settings) made iOS try a separate
+    /// path, which failed over Wi-Fi with "Network is down" (loopback still worked).
+    static func clientDatagramFlowOptions(verifyQueue: DispatchQueue) -> NWProtocolQUIC.Options {
+        let options = clientOptions(verifyQueue: verifyQueue)
+        options.isDatagram = true
+        return options
+    }
+
+    private static func clientOptions(verifyQueue: DispatchQueue) -> NWProtocolQUIC.Options {
         let options = makeOptions()
+        // As tested with the host's group listener (0 kept the host's group from becoming ready).
+        options.initialMaxStreamsBidirectional = 1
         sec_protocol_options_set_verify_block(options.securityProtocolOptions, { _, _, complete in
             // Trust comes from our handshake on top, never from this certificate.
             complete(true)
         }, verifyQueue)
-        return parameters(options)
+        return options
     }
 
     /// Host parameters: presents `identity` (a self-signed certificate).
     static func serverParameters(identity: SecIdentity) -> NWParameters? {
+        serverOptions(identity: identity).map(parameters)
+    }
+
+    /// The host's datagram flow: the listener's QUIC options plus `isDatagram` (see
+    /// `clientDatagramFlowOptions`).
+    static func serverDatagramFlowOptions(identity: SecIdentity) -> NWProtocolQUIC.Options? {
+        guard let options = serverOptions(identity: identity) else { return nil }
+        options.isDatagram = true
+        return options
+    }
+
+    private static func serverOptions(identity: SecIdentity) -> NWProtocolQUIC.Options? {
         guard let secIdentity = sec_identity_create(identity) else { return nil }
         let options = makeOptions()
         sec_protocol_options_set_local_identity(options.securityProtocolOptions, secIdentity)
-        // One stream per connection: the control stream that carries the whole protocol.
-        options.initialMaxStreamsBidirectional = 1
+        // The control stream that carries the whole protocol. A connection group client
+        // (`NWMultiplexGroup`) holds stream 0 open without using it and opens its own
+        // next, and may replace a control stream that failed once; the host takes the
+        // first stream that becomes ready.
+        options.initialMaxStreamsBidirectional = 3
         options.initialMaxStreamsUnidirectional = 0
-        return parameters(options)
+        return options
     }
 
     private static func makeOptions() -> NWProtocolQUIC.Options {
@@ -62,6 +92,8 @@ enum RDQUIC {
         options.initialMaxData = 32 << 20
         options.initialMaxStreamDataBidirectionalLocal = 16 << 20
         options.initialMaxStreamDataBidirectionalRemote = 16 << 20
+        // Enables QUIC datagrams (RFC 9221) for video (`RDVideoDatagram`).
+        options.maxDatagramFrameSize = 65_535
         return options
     }
 

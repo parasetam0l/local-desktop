@@ -32,7 +32,9 @@ newer message types don't break older peers.
 | 0x06 | authFailed            | S → C 🔒  | `{reason, kind?, retryAfter?}` — kind: `incorrectPin`, `lockedOut`, `busy`, `untrusted`, `tooManyAttempts`, `unsupportedVersion` |
 | 0x10 | frame                 | S → C 🔒  | binary (see above) |
 | 0x11 | requestKeyframe       | C → S 🔒  | `{reason?}` |
-| 0x12 | frameAck              | C → S 🔒  | binary `[count u32]` big-endian: the `frame` messages received on this connection so far, sent on receipt of each. A host that has seen one holds new frames while the oldest unconfirmed one is 120 ms old or 8 are unconfirmed, and sets the bitrate from the delivery times instead of `networkStats` (from 1.2.29) |
+| 0x12 | frameAck              | C → S 🔒  | binary `[frame u32]` big-endian: the highest video frame number received, sent on receipt of each frame. The host numbers every video frame it sends on a connection from 1, on the stream and as datagrams alike, so over the stream alone this is the count of `frame` messages received; with datagrams, numbers it skips were lost (frames completed but discarded while waiting for a keyframe are still acked). A host that has seen one holds new frames while the oldest unconfirmed one is 120 ms old or 8 are unconfirmed, and sets the bitrate from the delivery times instead of `networkStats` (from 1.2.29) |
+| 0x13 | videoDatagrams        | C → S 🔒  | `{maxSize}` — QUIC only, after `authOK`: send video as datagrams (see Transports); `maxSize` is the largest datagram the client's connection accepts. The host switches once its datagram flow is ready and doesn't switch back; until then frames stay on the stream. Hosts that don't know it keep using the stream (from 1.2.29) |
+| 0x14 | transportNote         | C → S 🔒  | `{quicFallback}` — a note for the host's log, sent after `authOK`: by a client that tried QUIC and fell back to TCP ("fell back to TCP: …"), or by a QUIC client whose datagram flow didn't come up within 2 s ("no video datagrams …"), with the reason and timed QUIC events (at most 1,000 characters), for the host's log only (from 1.2.29) |
 | 0x20 | mouseMoveAbs          | both 🔒   | `{x, y}` — frame pixel space; the host echoes the resulting cursor position |
 | 0x21 | mouseMoveRel          | C → S 🔒  | `{dx, dy}` — screen points |
 | 0x22 | mouseDown             | C → S 🔒  | `{button}` (0 left, 1 right) |
@@ -138,11 +140,13 @@ From 1.2.29 the Mac listens on two transports that carry exactly the same byte s
   hosts reached without TXT information (recent hosts, a typed address) use only this.
 - **QUIC** on UDP, same port number when free (else `qport`), ALPN `localdesktop/1`.
   The whole protocol runs over **one client-opened bidirectional stream**; the Mac allows
-  one stream per QUIC connection and treats it like a TCP connection. No datagrams yet.
+  stream per QUIC connection (the first to become ready; a connection-group client also
+  announces a stream it never uses) and treats it like a TCP connection.
 
 A client that sees `quic=1` tries QUIC first and falls back to TCP, starting the attempt
 over (new `hello`, new ephemeral key), when QUIC isn't ready within about 1 s or fails
-before `serverHello`. After `serverHello` there is no fallback: a failure ends the
+before `serverHello` (the 1 s becomes 2 s when the QUIC handshake finished but the
+stream isn't ready yet). After `serverHello` there is no fallback: a failure ends the
 connection as it would on TCP. A Bonjour service whose `qport` differs is reached over TCP.
 
 **TLS carries no trust.** QUIC requires TLS 1.3, so the Mac presents a self-signed P-256
@@ -150,3 +154,31 @@ certificate (made once, kept in `~/Library/Application Support/localdesktop.host
 and the client accepts any certificate. Authentication and confidentiality come only from
 the handshake above (identity-key signature, PIN pairing, device signature) and its
 session keys, exactly as over TCP; TLS is an extra, unauthenticated layer.
+
+### Video datagrams (QUIC, from 1.2.29)
+
+QUIC connections enable datagrams (RFC 9221, max frame size 65,535). After `authOK` a
+client with a ready datagram flow sends `videoDatagrams {maxSize}`; the host then sends
+each `frame` payload (what the `frame` message would carry) as datagrams instead, while
+every other message stays on the stream. Each datagram is one piece:
+
+```
+[frame u32][piece u16][count u16][flags u8] | ChaCha20-Poly1305(piece) | tag (16)
+```
+
+big-endian; `flags` bit 0 = keyframe. Pieces are sized so a datagram fits the smaller
+of the host's reported maximum datagram size and `maxSize` (1,200 bytes if unknown).
+The header is the AEAD's associated data. The key is
+`HKDF-SHA256(shared secret, salt: transcript, info: "rd-v2 video datagrams server->client")`,
+and the nonce is explicit: `[0x01][0 0 0][frame u32][piece u16][0 0]` (the stream
+cipher's implicit counter can't survive loss or reordering).
+
+The client rebuilds frames and hands them to the decoder complete and in order:
+anything at or below the highest completed frame (old, duplicate, replayed) is ignored;
+a frame still incomplete when a newer one completes is dropped; after a drop, P-frames
+are discarded until the next keyframe and the client sends `requestKeyframe
+{reason: "loss"}` (at most twice a second). A stream frame that arrives after a newer
+datagram frame (around the switch) is treated the same way. Lost and discarded frames
+count into `networkStats.droppedFrames`. On the host, an unconfirmed datagram frame
+older than 300 ms counts as lost so the in-flight limit doesn't wait for it, and the
+5-second `delivery` log line shows the transport and lost frames.

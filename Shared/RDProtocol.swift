@@ -26,9 +26,16 @@ enum RDWire: UInt8 {
     // Video
     case frame = 0x10
     case requestKeyframe = 0x11
-    /// Client → host: `[count u32]` big-endian, the video frames received on this
-    /// connection so far, sent for every frame (clients from 1.2.29).
+    /// Client → host: `[frame u32]` big-endian, the highest video frame number received
+    /// (frames are numbered from 1 per connection; over the stream alone that is the
+    /// count received), sent for every frame (clients from 1.2.29).
     case frameAck = 0x12
+    /// Client → host, QUIC only, after `authOK`: `{maxSize}`, the client takes video as
+    /// datagrams (`RDVideoDatagram`) from now on (from 1.2.29).
+    case videoDatagrams = 0x13
+    /// Client → host, after `authOK`: `{quicFallback}`, why this connection left QUIC
+    /// for TCP, for the host's log (from 1.2.29).
+    case transportNote = 0x14
 
     // Mouse
     case mouseMoveAbs = 0x20
@@ -290,6 +297,16 @@ struct NetworkStatsMsg: Codable {
     var decodeMs: Double
     var fps: Double
     var droppedFrames: Int
+}
+
+struct TransportNoteMsg: Codable {
+    /// The client's reason and QUIC event trace, at most 1,000 characters.
+    var quicFallback: String
+}
+
+struct VideoDatagramsMsg: Codable {
+    /// The largest datagram the client's QUIC connection accepts.
+    var maxSize: Int
 }
 
 struct RequestKeyframeMsg: Codable {

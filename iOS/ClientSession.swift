@@ -194,6 +194,7 @@ final class ClientSession: ObservableObject {
     ///   on UDP and the attempt falls back to TCP within `RDQUIC.fallbackDelay`.
     func connect(to target: NWEndpoint, fallbackName: String? = nil, expectedServerId: String? = nil,
                  quic: RDQUICAdvert? = nil, retryWhileWaking: Bool = false) {
+        ClientLog.write("connect to \(target) quic=\(String(describing: quic))")
         userInitiatedDisconnect = false
         tearDownConnection()
         stopPing()
@@ -264,6 +265,7 @@ final class ClientSession: ObservableObject {
     }
 
     func disconnect() {
+        ClientLog.write("disconnect (user)")
         userInitiatedDisconnect = true
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
@@ -329,6 +331,7 @@ final class ClientSession: ObservableObject {
     }
 
     private func fail(_ reason: String, allowReconnect: Bool = true) {
+        ClientLog.write("session failed: \(reason) (reconnect \(allowReconnect))")
         guard !isDead else { return }
         tearDownConnection()
         stopPing()
@@ -682,7 +685,7 @@ final class ClientSession: ObservableObject {
         sendJSON(.networkStats, NetworkStatsMsg(rttMs: lastRTT,
                                                 decodeMs: decoded.decodeMs,
                                                 fps: fps,
-                                                droppedFrames: decoded.dropped))
+                                                droppedFrames: decoded.dropped + network.lost))
     }
 
     // MARK: Clipboard

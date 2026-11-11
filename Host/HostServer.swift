@@ -112,6 +112,15 @@ final class HostServer: ObservableObject {
     private var quicListener: NWListener?
     /// The UDP port QUIC listens on, once its listener is ready.
     private var quicPort: UInt16?
+    /// Incoming QUIC connections, kept until they close (a session cancels its own).
+    private lazy var quicAcceptor = QUICAcceptor(
+        queue: .main,
+        log: { HostLog.write($0) },
+        onStream: { [weak self] stream, group, firstBytes in
+            MainActor.assumeIsolated {
+                self?.accept(stream, transport: .quic, group: group, initialData: firstBytes)
+            }
+        })
     /// Connections still performing the handshake.
     private var pendingSessions: [ClientSession] = []
     /// All authenticated, streaming sessions.
@@ -376,6 +385,7 @@ final class HostServer: ObservableObject {
         quicListener?.cancel()
         quicListener = nil
         quicPort = nil
+        quicAcceptor.cancelAll()
         ScreenStreamer.shared.stop()
         updateFrameGate()
         running = false
@@ -646,9 +656,10 @@ final class HostServer: ObservableObject {
             HostLog.write("QUIC: listener unavailable; TCP only")
             return
         }
-        newListener.newConnectionHandler = { [weak self] stream in
+        newListener.newConnectionGroupHandler = { [weak self] group in
             MainActor.assumeIsolated {
-                self?.accept(stream, transport: .quic)
+                guard let self, self.running else { return group.cancel() }
+                self.quicAcceptor.accept(group)
             }
         }
         newListener.stateUpdateHandler = { [weak self, weak newListener] state in
@@ -677,9 +688,11 @@ final class HostServer: ObservableObject {
         newListener.start(queue: .main)
     }
 
-    private func accept(_ connection: NWConnection, transport: RDTransport) {
+    private func accept(_ connection: NWConnection, transport: RDTransport, group: NWConnectionGroup? = nil,
+                        initialData: Data = Data()) {
         guard running else {
             connection.cancel()
+            group?.cancel()
             return
         }
         // One address can't occupy every pre-authentication slot (each may wait up to
@@ -692,9 +705,11 @@ final class HostServer: ObservableObject {
         }
         guard pendingSessions.count < Self.maxPendingSessions else {
             connection.cancel()
+            group?.cancel()
             return
         }
-        let session = ClientSession(connection: connection, server: self, remoteAddress: address)
+        let session = ClientSession(connection: connection, server: self, remoteAddress: address, quicGroup: group,
+                                    initialData: initialData)
         HostLog.write("session from \(address) over \(transport == .quic ? "QUIC" : "TCP")")
         pendingSessions.append(session)
         session.start()

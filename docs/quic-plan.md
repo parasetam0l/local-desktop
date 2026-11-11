@@ -1,6 +1,11 @@
 # Plan: video over QUIC datagrams
 
-Status: proposal, not started. Builds on 1.2.29's frame acks (`frameAck`).
+Status: phases 1-2 done. Builds on 1.2.29's frame acks (`frameAck`).
+
+Found while testing phase 2: Network.framework reports the UDP payload size (1,472 on
+Wi-Fi) as the flow's `maximumDatagramSize`; datagrams that size never arrived, so pieces
+are capped at 1,200 bytes. On iPadOS 17 the client's datagram flow fails with ENETDOWN,
+so that iPad keeps video on the QUIC stream (the Mac logs the client's `transportNote`).
 
 ## Why
 

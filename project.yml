@@ -118,10 +118,13 @@ targets:
       - Shared/RDCrypto.swift
       - Shared/RDSecureChannel.swift
       - Shared/RDTransport.swift
+      - Shared/RDVideoDatagrams.swift
       - Host/PINSecurity.swift
+      - Host/QUICAcceptor.swift
       - Host/LocalInputBlocker.swift
       - Host/CongestionEstimator.swift
       - iOS/ClientConnection.swift
+      - iOS/ClientLog.swift
       - iOS/AppUpdater.swift
 schemes:
   LocalDesktopHost:

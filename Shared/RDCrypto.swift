@@ -40,6 +40,8 @@ enum RDHandshake {
     struct SessionKeys {
         let clientToServer: SymmetricKey
         let serverToClient: SymmetricKey
+        /// Seals video datagrams host → client (QUIC only, `RDVideoDatagram`).
+        let videoDatagrams: SymmetricKey
     }
 
     static func transcriptHash(clientKey: Data,
@@ -71,7 +73,8 @@ enum RDHandshake {
                                            outputByteCount: 32)
         }
         return SessionKeys(clientToServer: derive("rd-v2 client->server"),
-                           serverToClient: derive("rd-v2 server->client"))
+                           serverToClient: derive("rd-v2 server->client"),
+                           videoDatagrams: derive("rd-v2 video datagrams server->client"))
     }
 
     /// Bytes the host signs with its identity key.

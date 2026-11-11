@@ -7,6 +7,8 @@ import CryptoKit
 /// bookkeeping of the real `ClientSession` (host) is left out.
 private final class LoopbackHost: @unchecked Sendable {
     let identity = Curve25519.Signing.PrivateKey()
+    /// The QUIC listener's TLS identity, reused for its datagram flows like the real host.
+    private var tlsIdentity: SecIdentity?
     let queue = DispatchQueue(label: "test.host")
     let pin = "1234"
     /// Corrupts the serverHello signature, as an impostor without the key would.
@@ -28,6 +30,16 @@ private final class LoopbackHost: @unchecked Sendable {
 
     private var listener: NWListener!
     private var connection: NWConnection?
+    /// QUIC mode: the connection's group, its datagram flow, and the video key.
+    private var group: NWConnectionGroup?
+    private var quicAcceptor: QUICAcceptor?
+    private var datagramFlow: NWConnection?
+    private var videoKey: SymmetricKey?
+    private var framesSent: UInt32 = 0
+    /// Answers `videoDatagrams` by sending `datagramFrames` as datagrams, in this order.
+    var sendDatagramVideo = false
+    /// (number, payload, keyframe); pieces of each frame are sent in reverse order.
+    var datagramFrames: [(UInt32, Data, Bool)] = []
     private var reader = RDFrameReader()
     private var sendCipher: RDCipher?
     private var receiveCipher: RDCipher?
@@ -43,6 +55,7 @@ private final class LoopbackHost: @unchecked Sendable {
             let key = P256.Signing.PrivateKey()
             let certificate = try RDSelfSignedIdentity.makeCertificate(for: key)
             let identity = try XCTUnwrap(RDSelfSignedIdentity.identity(key: key, certificate: certificate))
+            tlsIdentity = identity
             listener = try NWListener(using: try XCTUnwrap(RDQUIC.serverParameters(identity: identity)), on: .any)
         } else {
             listener = try NWListener(using: .tcp, on: .any)
@@ -51,50 +64,93 @@ private final class LoopbackHost: @unchecked Sendable {
         listener.stateUpdateHandler = { state in
             if case .ready = state { ready.signal() }
         }
-        listener.newConnectionHandler = { [self] connection in
-            self.connection = connection
-            reader = RDFrameReader()
-            reader.maxPayload = RDService.maxHandshakePayload
-            sendCipher = nil
-            receiveCipher = nil
-            connection.start(queue: queue)
-            receive()
+        if quic {
+            // The production acceptance code (as HostServer uses it), on the test queue.
+            let acceptor = QUICAcceptor(queue: queue, log: { print($0) }, onStream: { [self] stream, group, firstBytes in
+                self.group = group
+                adopt(stream)
+                consume(firstBytes)
+                receive()
+            })
+            quicAcceptor = acceptor
+            listener.newConnectionGroupHandler = { group in acceptor.accept(group) }
+        } else {
+            listener.newConnectionHandler = { [self] connection in
+                adopt(connection)
+                connection.start(queue: queue)
+                receive()
+            }
         }
         listener.start(queue: queue)
         _ = ready.wait(timeout: .now() + 5)
         return listener.port!.rawValue
     }
 
+    private func adopt(_ connection: NWConnection) {
+        self.connection = connection
+        reader = RDFrameReader()
+        reader.maxPayload = RDService.maxHandshakePayload
+        sendCipher = nil
+        receiveCipher = nil
+        framesSent = 0
+    }
+
     func stop() {
         connection?.cancel()
+        datagramFlow?.cancel()
+        quicAcceptor?.cancelAll()
         listener.cancel()
+    }
+
+    private func startDatagramVideo(maxSize: Int) {
+        guard sendDatagramVideo, let group, let videoKey,
+              let tlsIdentity, let options = RDQUIC.serverDatagramFlowOptions(identity: tlsIdentity),
+              let flow = NWConnection(from: group, using: options) else { return }
+        datagramFlow = flow
+        let packetizer = RDVideoPacketizer(key: videoKey)
+        flow.stateUpdateHandler = { [self] state in
+            guard case .ready = state else { return }
+            for (number, payload, keyframe) in datagramFrames {
+                let pieces = packetizer.datagrams(frame: number, payload: payload, isKeyframe: keyframe,
+                                                  maxDatagramSize: min(maxSize, 1200))!
+                for piece in pieces.reversed() {
+                    flow.send(content: piece, completion: .idempotent)
+                }
+            }
+        }
+        flow.start(queue: queue)
     }
 
     private func receive() {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [self] data, _, isComplete, error in
             if let data {
-                reader.append(data)
-                while let frame = try? reader.nextFrame() {
-                    if let wire = frame.wire {
-                        receivedLock.lock()
-                        _received.append(wire)
-                        receivedLock.unlock()
-                    }
-                    var payload = frame.body
-                    if receiveCipher != nil {
-                        guard let plain = try? receiveCipher?.open(header: frame.header, body: frame.body) else {
-                            connection?.cancel()
-                            return
-                        }
-                        payload = plain
-                    }
-                    if let wire = frame.wire {
-                        handle(wire, payload)
-                    }
-                }
+                consume(data)
             }
             if error == nil, !isComplete {
                 receive()
+            }
+        }
+    }
+
+    /// Feeds bytes to the frame reader and handles every complete message.
+    private func consume(_ data: Data) {
+        reader.append(data)
+        while let frame = try? reader.nextFrame() {
+            if let wire = frame.wire {
+                receivedLock.lock()
+                _received.append(wire)
+                receivedLock.unlock()
+            }
+            var payload = frame.body
+            if receiveCipher != nil {
+                guard let plain = try? receiveCipher?.open(header: frame.header, body: frame.body) else {
+                    connection?.cancel()
+                    return
+                }
+                payload = plain
+            }
+            if let wire = frame.wire {
+                handle(wire, payload)
             }
         }
     }
@@ -121,6 +177,7 @@ private final class LoopbackHost: @unchecked Sendable {
             write(RDFrame.pack(.serverHello, payload: RDJSON.encode(response.serverHello)))
             sendCipher = RDCipher(key: response.keys.serverToClient)
             receiveCipher = RDCipher(key: response.keys.clientToServer)
+            videoKey = response.keys.videoDatagrams
 
         case .authPin:
             let msg = RDJSON.decode(AuthPinMsg.self, from: payload)!
@@ -146,6 +203,9 @@ private final class LoopbackHost: @unchecked Sendable {
         case .ping:
             write(seal(.pong, RDJSON.decode(PingMsg.self, from: payload)!))
 
+        case .videoDatagrams:
+            startDatagramVideo(maxSize: RDJSON.decode(VideoDatagramsMsg.self, from: payload)!.maxSize)
+
         default:
             break
         }
@@ -155,6 +215,7 @@ private final class LoopbackHost: @unchecked Sendable {
         var burst = seal(.authOK, AuthOKMsg(serverName: "Loopback Mac", trusted: trusted, macAddress: nil))
         burst.append(try! sendCipher!.seal(.runningApps, largeMessage))
         burst.append(try! sendCipher!.seal(.frame, RDFrameCodec.pack(width: 2, height: 2, codec: .hevc, data: Data([0, 0, 0, 1, 0x26]))))
+        framesSent = 1
         write(burst)
     }
 
@@ -333,6 +394,40 @@ final class LoopbackTests: XCTestCase {
         XCTAssertTrue(host.received.isEmpty)
     }
 
+    /// Video moves to datagrams after authOK: a multi-piece keyframe (pieces reversed)
+    /// arrives whole, a frame after a gap is discarded and a keyframe requested, and
+    /// the next keyframe resumes. Frame 1 came on the stream, so numbering goes on at 2.
+    func testVideoOverQUICDatagrams() throws {
+        let quicHost = LoopbackHost()
+        quicHost.sendDatagramVideo = true
+        let big = Data((0..<6000).map { UInt8($0 % 251) })
+        let keyframe = RDFrameCodec.pack(width: 64, height: 64, codec: .hevc, data: big)
+        let resume = RDFrameCodec.pack(width: 64, height: 64, codec: .hevc, data: Data(big.prefix(2500)))
+        quicHost.datagramFrames = [(2, keyframe, true),
+                                   (4, RDFrameCodec.pack(width: 64, height: 64, codec: .hevc, data: Data([1, 2, 3])), false),
+                                   (5, resume, true)]
+        let quicPort = try quicHost.start(quic: true)
+        defer { quicHost.stop() }
+
+        let (connection, log) = connect(quicPort: quicPort)
+        wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
+        connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
+        wait(for: [log.expectation("stream frame + 2 datagram frames") { log.snapshot.video.count >= 3 }], timeout: 5)
+        let video = log.snapshot.video
+        XCTAssertEqual(video.count, 3)
+        XCTAssertEqual(video[1], keyframe)
+        XCTAssertEqual(video[2], resume)
+        XCTAssertTrue(quicHost.received.contains(.videoDatagrams))
+        let deadline = Date().addingTimeInterval(5)
+        while !quicHost.received.contains(.requestKeyframe), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(quicHost.received.contains(.requestKeyframe))
+        XCTAssertGreaterThanOrEqual(connection.drainStats().lost, 2)
+        XCTAssertNil(log.failure)
+        connection.cancel()
+    }
+
     /// A host that advertises QUIC but doesn't answer on UDP: the attempt moves to TCP
     /// on its own, without a failure event.
     func testFallsBackToTCPWhenQUICDoesNotAnswer() {
@@ -340,6 +435,13 @@ final class LoopbackTests: XCTestCase {
         wait(for: [log.expectation("serverHello over TCP") { log.serverIdentity != nil }], timeout: 5)
         XCTAssertNil(log.failure)
         XCTAssertEqual(host.received.first, .hello)
+        // After authOK the client tells the host why it left QUIC.
+        connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
+        let deadline = Date().addingTimeInterval(5)
+        while !host.received.contains(.transportNote), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(host.received.contains(.transportNote))
         connection.cancel()
     }
 
