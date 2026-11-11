@@ -40,6 +40,16 @@ final class TrackpadTextView: UITextView, UITextViewDelegate {
         self.smartQuotesType = .no
         self.smartDashesType = .no
         self.smartInsertDeleteType = .no
+        // Nothing typed here stays in the field, so the keyboard has nothing to suggest:
+        // without these it makes room for a suggestion strip at every key and takes it
+        // back, which shows as a band across the top of a floating keyboard.
+        self.inlinePredictionType = .no
+        self.inputAssistantItem.leadingBarButtonGroups = []
+        self.inputAssistantItem.trailingBarButtonGroups = []
+        if #available(iOS 18.0, *) {
+            self.writingToolsBehavior = .none
+            self.mathExpressionCompletionType = .no
+        }
         self.keyboardType = .default
         self.returnKeyType = .default
         self.textColor = .clear
