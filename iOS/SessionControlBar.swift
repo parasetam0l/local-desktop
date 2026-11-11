@@ -234,8 +234,11 @@ struct SessionControlBar: View {
                         .foregroundStyle(.white)
                         .frame(width: isVertical ? Self.handleThickness : Self.handleLength,
                                height: isVertical ? Self.handleLength : Self.handleThickness)
-                        .sessionSurface(Capsule())
-                        .opacity(0.7)
+                        // Solid accent with a light edge, so it stands out on any desktop.
+                        .background(SessionStyle.accent, in: Capsule())
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.45), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.45), radius: 4, y: 1)
+                        .opacity(0.85)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Show session controls")
