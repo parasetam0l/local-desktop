@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// The session's floating controls: one bar with the frequent actions, which shrinks to
-/// a small handle when it hasn't been used for a few seconds so it covers almost none
-/// of the Mac's picture. It can be dragged to any edge of the screen and stays there.
+/// a small handle when it hasn't been used for a few seconds, or at once with its hide
+/// button, so it covers almost none of the Mac's picture. It can be dragged to any edge of the screen and stays there.
 struct SessionControlBar: View {
     @Binding var touchpadMode: Bool
     @Binding var keyboardVisible: Bool
@@ -32,7 +32,7 @@ struct SessionControlBar: View {
     private static let barPadding: CGFloat = 5
     private static let barSpacing: CGFloat = 2
     /// One more with a Mac that can act on its windows.
-    private var buttonCount: CGFloat { session.macWindowActions ? 6 : 5 }
+    private var buttonCount: CGFloat { session.macWindowActions ? 7 : 6 }
     private static let handleLength: CGFloat = 44
     private static let handleThickness: CGFloat = 22
     private static let margin: CGFloat = 8
@@ -40,6 +40,15 @@ struct SessionControlBar: View {
     private var edge: Edge { Edge(rawValue: edgeRaw) ?? .bottom }
     private var isVertical: Bool { edge == .leading || edge == .trailing }
     private var isPresenting: Bool { showApps || showPanel || showWindow || confirmDisconnect }
+    /// The hide button's chevron points at the edge the bar shrinks toward.
+    private var hideSymbol: String {
+        switch edge {
+        case .bottom: return "chevron.down"
+        case .top: return "chevron.up"
+        case .leading: return "chevron.left"
+        case .trailing: return "chevron.right"
+        }
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -173,6 +182,9 @@ struct SessionControlBar: View {
                     SessionPanel(touchpadMode: $touchpadMode, app: app, session: session,
                                  canvasController: canvasController, isPresented: $showPanel,
                                  onDisconnect: onDisconnect)
+                }
+                barButton(hideSymbol, "Hide session controls") {
+                    collapsed = true
                 }
                 barButton("xmark", "Disconnect", tint: SessionStyle.danger) {
                     confirmDisconnect = true
