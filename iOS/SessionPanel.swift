@@ -20,12 +20,14 @@ struct SessionPanel: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    displaySection
+                    // Most used first: touch, then the Mac's desktop; the stream's
+                    // settings, rarely changed, last.
                     touchSection
                     macSection
                     if canvasController.isPiPSupported {
                         pictureInPictureSection
                     }
+                    streamSection
                     Button(role: .destructive) {
                         isPresented = false
                         onDisconnect()
@@ -74,21 +76,9 @@ struct SessionPanel: View {
 
     // MARK: Sections
 
-    private var displaySection: some View {
-        PanelSection("Display", footer: session.sizedMirrorAvailable && session.mirrorSize != nil
+    private var macSection: some View {
+        PanelSection("Mac", footer: session.sizedMirrorAvailable && session.mirrorSize != nil
                      ? "The Mac's own screen shows the same layout while a desktop size is on." : nil) {
-            // Empty with a Mac older than 1.2.1, which doesn't send its displays.
-            if session.displays.count > 1 {
-                let current = session.displays.first { $0.id == session.selectedDisplayId }
-                PanelMenuRow(title: "Screen", value: current?.name ?? "Choose") {
-                    ForEach(session.displays) { display in
-                        checkButton("\(display.name) · \(display.resolution)",
-                                    isOn: display.id == session.selectedDisplayId) {
-                            session.selectDisplay(display.id)
-                        }
-                    }
-                }
-            }
             if session.sizedMirrorAvailable {
                 PanelMenuRow(title: "Desktop size", value: session.mirrorSize?.label ?? "Mac's own") {
                     checkButton("Mac's own size", isOn: session.mirrorSize == nil) {
@@ -108,6 +98,38 @@ struct SessionPanel: View {
                     }
                 }
             }
+            // Empty with a Mac older than 1.2.1, which doesn't send its displays.
+            if session.displays.count > 1 {
+                let current = session.displays.first { $0.id == session.selectedDisplayId }
+                PanelMenuRow(title: "Screen", value: current?.name ?? "Choose") {
+                    ForEach(session.displays) { display in
+                        checkButton("\(display.name) · \(display.resolution)",
+                                    isOn: display.id == session.selectedDisplayId) {
+                            session.selectDisplay(display.id)
+                        }
+                    }
+                }
+            }
+            if let hidesMacDock = session.hidesMacDock {
+                PanelToggleRow(title: "Hide Mac's Dock",
+                               isOn: Binding(get: { hidesMacDock }, set: { session.setHidesMacDock($0) }))
+            }
+            PanelToggleRow(title: "Share clipboard", isOn: $session.sharesClipboard)
+            PanelButtonRow(title: "Brightness and volume", symbol: "chevron.right") {
+                showHardwareSheet = true
+            }
+            .adaptiveSheet(isPresented: $showHardwareSheet, padSize: CGSize(width: 400, height: 400)) {
+                MacHardwareControlsSheet(session: session, isPresented: $showHardwareSheet)
+            }
+            if let blocksMacInput = session.blocksMacInput {
+                PanelToggleRow(title: "Block Mac's keyboard and trackpad",
+                               isOn: Binding(get: { blocksMacInput }, set: { session.setBlocksMacInput($0) }))
+            }
+        }
+    }
+
+    private var streamSection: some View {
+        PanelSection("Stream") {
             PanelMenuRow(title: "Quality", value: app.settings.preset.shortLabel) {
                 ForEach(RDQualityPreset.allCases) { preset in
                     checkButton(preset.label, isOn: app.settings.qualityRaw == preset.rawValue) {
@@ -124,16 +146,12 @@ struct SessionPanel: View {
                     }
                 }
             }
-            if let hidesMacDock = session.hidesMacDock {
-                PanelToggleRow(title: "Hide Mac's Dock",
-                               isOn: Binding(get: { hidesMacDock }, set: { session.setHidesMacDock($0) }))
+            PanelButtonRow(title: "Refresh picture", symbol: "arrow.triangle.2.circlepath") {
+                session.requestKeyframe(reason: "user_refresh")
             }
             PanelToggleRow(title: "Performance readout",
                            isOn: Binding(get: { session.showDebugHUD },
                                          set: { on in withAnimation { session.showDebugHUD = on } }))
-            PanelButtonRow(title: "Refresh picture", symbol: "arrow.triangle.2.circlepath") {
-                session.requestKeyframe(reason: "user_refresh")
-            }
         }
     }
 
@@ -173,22 +191,6 @@ struct SessionPanel: View {
             }
             .adaptiveSheet(isPresented: $showGestures, padSize: CGSize(width: 400, height: 560)) {
                 GestureGuideView(app: app, isPresented: $showGestures)
-            }
-        }
-    }
-
-    private var macSection: some View {
-        PanelSection("Mac") {
-            PanelButtonRow(title: "Brightness and volume", symbol: "chevron.right") {
-                showHardwareSheet = true
-            }
-            .adaptiveSheet(isPresented: $showHardwareSheet, padSize: CGSize(width: 400, height: 400)) {
-                MacHardwareControlsSheet(session: session, isPresented: $showHardwareSheet)
-            }
-            PanelToggleRow(title: "Share clipboard", isOn: $session.sharesClipboard)
-            if let blocksMacInput = session.blocksMacInput {
-                PanelToggleRow(title: "Block Mac's keyboard and trackpad",
-                               isOn: Binding(get: { blocksMacInput }, set: { session.setBlocksMacInput($0) }))
             }
         }
     }
