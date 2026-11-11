@@ -684,10 +684,12 @@ final class ClientSession: ObservableObject {
         syncedClipboardChangeCount = changeCount
         // Nothing to share: don't touch the contents, so iOS doesn't ask.
         guard pasteboard.hasStrings || pasteboard.hasURLs || pasteboard.hasImages else { return }
-        // Every read of the contents can show iOS's paste prompt, so read them once:
-        // `items` hands over all of the first item's types in one go.
-        guard let item = pasteboard.items.first else { return }
-        switch Self.clipboardContent(item, order: pasteboard.types) {
+        // iOS shows its paste prompt for every type whose contents are read, and `items`
+        // reads them all (text from Safari carries 3-4), so pick the one type to share
+        // from the list of types, which doesn't ask, and read only that.
+        guard let identifier = Self.clipboardType(in: pasteboard.types),
+              let value = pasteboard.value(forPasteboardType: identifier) else { return }
+        switch Self.clipboardContent(value, identifier: identifier) {
         case .text(let text)?:
             guard let payload = RDClipboardMsg.payload(for: text) else { return }
             send(.clipboard, payload)
@@ -710,28 +712,35 @@ final class ClientSession: ObservableObject {
     /// Plain text (a URL as its string) or an image from one clipboard item, whichever
     /// type the copying app put first. An image goes as it was copied when that is PNG or
     /// JPEG and not too large, else as PNG, or JPEG when PNG is too large.
-    private static func clipboardContent(_ item: [String: Any], order: [String]) -> ClipboardContent? {
-        let identifiers = order + item.keys.filter { !order.contains($0) }
-        for identifier in identifiers {
-            guard let value = item[identifier], let type = UTType(identifier) else { continue }
-            if type.conforms(to: .image) {
-                if let data = value as? Data {
-                    if (type.conforms(to: .png) || type.conforms(to: .jpeg)), data.count <= RDClipboardImage.maxSize,
-                       UIImage(data: data) != nil {
-                        return .image(data)
-                    }
-                    if let image = UIImage(data: data), let encoded = encoded(image) { return .image(encoded) }
-                } else if let image = value as? UIImage, let encoded = encoded(image) {
-                    return .image(encoded)
+    static func clipboardType(in identifiers: [String]) -> String? {
+        identifiers.first { identifier in
+            guard let type = UTType(identifier) else { return false }
+            return type.conforms(to: .image) || type.conforms(to: .url) || type.conforms(to: .plainText)
+        }
+    }
+
+    private static func clipboardContent(_ value: Any, identifier: String) -> ClipboardContent? {
+        guard let type = UTType(identifier) else { return nil }
+        if type.conforms(to: .image) {
+            if let data = value as? Data {
+                if (type.conforms(to: .png) || type.conforms(to: .jpeg)), data.count <= RDClipboardImage.maxSize,
+                   UIImage(data: data) != nil {
+                    return .image(data)
                 }
-            } else if type.conforms(to: .url) {
-                if let url = value as? URL { return .text(url.absoluteString) }
-                if let text = value as? String, !text.isEmpty { return .text(text) }
-            } else if type.conforms(to: .plainText) {
-                if let text = value as? String, !text.isEmpty { return .text(text) }
-                if let data = value as? Data, let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                    return .text(text)
-                }
+                if let image = UIImage(data: data), let encoded = encoded(image) { return .image(encoded) }
+            } else if let image = value as? UIImage, let encoded = encoded(image) {
+                return .image(encoded)
+            }
+        } else if type.conforms(to: .url) {
+            if let url = value as? URL { return .text(url.absoluteString) }
+            if let text = value as? String, !text.isEmpty { return .text(text) }
+            if let data = value as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
+                return .text(url.absoluteString)
+            }
+        } else if type.conforms(to: .plainText) {
+            if let text = value as? String, !text.isEmpty { return .text(text) }
+            if let data = value as? Data, let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                return .text(text)
             }
         }
         return nil
