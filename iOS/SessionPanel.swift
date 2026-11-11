@@ -185,6 +185,7 @@ struct SessionPanel: View {
             .adaptiveSheet(isPresented: $showHardwareSheet, padSize: CGSize(width: 400, height: 400)) {
                 MacHardwareControlsSheet(session: session, isPresented: $showHardwareSheet)
             }
+            PanelToggleRow(title: "Share clipboard", isOn: $session.sharesClipboard)
             if let blocksMacInput = session.blocksMacInput {
                 PanelToggleRow(title: "Block Mac's keyboard and trackpad",
                                isOn: Binding(get: { blocksMacInput }, set: { session.setBlocksMacInput($0) }))

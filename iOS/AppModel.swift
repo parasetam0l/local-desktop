@@ -40,6 +40,8 @@ struct AppSettings: Codable {
     var hideDock: Bool? = nil
     /// The keyboard opens when a tap lands in a text field on the Mac (on unless turned off).
     var autoKeyboard: Bool? = nil
+    /// Sessions share the clipboard with the Mac (off unless turned on).
+    var shareClipboard: Bool? = nil
     /// Ids of the key bar's favourite keys; nil until the user changes the default set.
     var favouriteKeys: [String]? = nil
 
@@ -201,6 +203,7 @@ final class AppModel: ObservableObject {
         newSession.setDesktopSize(settings.defaultDesktopSize, byUser: false)
         newSession.defaultHideDock = settings.hideDock ?? false
         newSession.autoKeyboard = settings.autoKeyboard ?? true
+        newSession.sharesClipboard = settings.shareClipboard ?? false
         session = newSession
 
         newSession.onConnected = { [weak self] connected in

@@ -17,6 +17,8 @@ struct LocalDesktopClientApp: App {
             switch scenePhase {
             case .active:
                 OrientationLock.apply(app.settings.lockedOrientation)
+                // Text copied in another app while this one was away.
+                app.session?.syncClipboardToMac()
                 Task { await updater.checkIfDue() }
             case .background:
                 updater.endInstall()

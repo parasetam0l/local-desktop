@@ -111,6 +111,10 @@ final class HostServer: ObservableObject {
     private var pendingSessions: [ClientSession] = []
     /// All authenticated, streaming sessions.
     private(set) var activeSessions: [ClientSession] = []
+    /// Shares the clipboard with the sessions that turned it on.
+    private(set) lazy var clipboard = ClipboardSync { [weak self] in
+        self?.activeSessions.filter { $0.sharesClipboard } ?? []
+    }
     /// When capture last retried after losing its display.
     private var lastDisplayLossRetry = Date.distantPast
 
@@ -354,6 +358,7 @@ final class HostServer: ObservableObject {
         for session in sessions {
             session.close(sendingBye: RDByeReason.hostStopped)
         }
+        clipboard.update()
         sessionSettingsReset?.cancel()
         sessionSettingsReset = nil
         endSizedMirror()
@@ -676,6 +681,7 @@ final class HostServer: ObservableObject {
         HostLog.write("session ended, \(activeSessions.filter { $0 !== session }.count) left")
         pendingSessions.removeAll { $0 === session }
         activeSessions.removeAll { $0 === session }
+        clipboard.update()
         updateFrameGate()
         updateLocalInputBlocking()
         if activeSessions.isEmpty {

@@ -309,6 +309,83 @@ final class DisplayMessageTests: XCTestCase {
     }
 }
 
+final class ClipboardMessageTests: XCTestCase {
+    func testClipboardMessagesRoundTripWithTheDocumentedKeys() throws {
+        let sharing = RDJSON.encode(RDSetClipboardSharingMsg(enabled: true))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: sharing) as? [String: Bool], ["enabled": true])
+        XCTAssertEqual(RDJSON.decode(RDSetClipboardSharingMsg.self, from: sharing)?.enabled, true)
+
+        let text = "Grüße \"quoted\"\nline two 🙂"
+        let payload = try XCTUnwrap(RDClipboardMsg.payload(for: text))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: payload) as? [String: String], ["text": text])
+        XCTAssertEqual(RDJSON.decode(RDClipboardMsg.self, from: payload)?.text, text)
+
+        let frame = RDFrame.pack(.clipboard, payload: payload)
+        var reader = RDFrameReader()
+        reader.append(frame)
+        let read = try XCTUnwrap(try reader.nextFrame())
+        XCTAssertEqual(read.wire, .clipboard)
+        XCTAssertEqual(read.body, payload)
+    }
+
+    func testClipboardPayloadSkipsEmptyAndOversizedText() {
+        XCTAssertNil(RDClipboardMsg.payload(for: ""))
+        XCTAssertNil(RDClipboardMsg.payload(for: String(repeating: "a", count: RDClipboardMsg.maxPayload + 1)))
+        // Fits as UTF-8 but not once JSON escapes it.
+        XCTAssertNil(RDClipboardMsg.payload(for: String(repeating: "\"", count: RDClipboardMsg.maxPayload / 2 + 1)))
+        let large = String(repeating: "a", count: RDClipboardMsg.maxPayload - 100)
+        XCTAssertNotNil(RDClipboardMsg.payload(for: large))
+    }
+
+    func testClipboardImageRoundTripsInPieces() throws {
+        var png = Data([0x89, 0x50, 0x4E, 0x47])
+        png += Data((0..<(RDClipboardImage.chunkSize * 2 + 1000)).map { UInt8(truncatingIfNeeded: $0) })
+        XCTAssertTrue(RDClipboardImage.isPNG(png))
+        XCTAssertFalse(RDClipboardImage.isPNG(Data([0xFF, 0xD8, 0xFF, 0xE0])))
+        let chunks = try XCTUnwrap(RDClipboardImage.chunks(of: png, id: 7))
+        XCTAssertEqual(chunks.count, 3)
+        // Each piece fits the host's limit on client messages.
+        XCTAssertTrue(chunks.allSatisfy { $0.count <= RDClipboardMsg.maxPayload })
+
+        var assembler = RDClipboardImageAssembler()
+        XCTAssertNil(assembler.add(chunks[0]))
+        XCTAssertNil(assembler.add(chunks[1]))
+        XCTAssertEqual(assembler.add(chunks[2]), png)
+
+        // A missing piece drops the image; the next image still comes through.
+        XCTAssertNil(assembler.add(chunks[0]))
+        XCTAssertNil(assembler.add(chunks[2]))
+        let small = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
+        let single = try XCTUnwrap(RDClipboardImage.chunks(of: small, id: 8))
+        XCTAssertEqual(single.count, 1)
+        XCTAssertEqual(assembler.add(single[0]), small)
+
+        // A piece of another image in the middle drops both.
+        XCTAssertNil(assembler.add(chunks[0]))
+        XCTAssertNil(assembler.add(try XCTUnwrap(RDClipboardImage.chunks(of: png, id: 9))[1]))
+        XCTAssertNil(assembler.add(chunks[1]))
+        XCTAssertNil(assembler.add(Data([1, 2])))
+    }
+
+    func testClipboardImageSkipsEmptyAndOversizedImages() {
+        XCTAssertNil(RDClipboardImage.chunks(of: Data(), id: 1))
+        XCTAssertNil(RDClipboardImage.chunks(of: Data(count: RDClipboardImage.maxSize + 1), id: 1))
+        XCTAssertEqual(RDClipboardImage.chunks(of: Data(count: RDClipboardImage.maxSize), id: 1)?.count,
+                       RDClipboardImage.maxSize / RDClipboardImage.chunkSize)
+    }
+
+    func testUnknownMessageTypeIsReadAndLeftForTheCallerToIgnore() throws {
+        // How an older peer sees a newer message: the frame is consumed with no wire type.
+        var stream = RDFrame.header(.clipboard, length: 3) + Data("abc".utf8)
+        stream[stream.startIndex + 4] = 0xEE
+        stream += RDFrame.pack(.ping, payload: Data())
+        var reader = RDFrameReader()
+        reader.append(stream)
+        XCTAssertNil(try XCTUnwrap(try reader.nextFrame()).wire)
+        XCTAssertEqual(try XCTUnwrap(try reader.nextFrame()).wire, .ping)
+    }
+}
+
 final class PINSecurityTests: XCTestCase {
     func testFormat() {
         XCTAssertTrue(PINHasher.isValidFormat("0429"))

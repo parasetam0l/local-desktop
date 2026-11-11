@@ -230,6 +230,16 @@ final class ClientSession {
     /// Whether this client wants to hear, after its clicks, if a text field has focus.
     private var wantsTextFocusReports = false
     private var textFocusCheck = 0
+    /// Whether this client turned clipboard sharing on.
+    private(set) var sharesClipboard = false
+
+    private var clipboardImage = RDClipboardImageAssembler()
+
+    /// Sends an encoded `clipboard` or a `clipboardImage` piece (see `ClipboardSync`).
+    func sendClipboard(_ wire: RDWire, _ payload: Data) {
+        guard phase == .active, sharesClipboard else { return }
+        send(wire, payload)
+    }
 
     func sendHostState(_ state: HostStateMsg) {
         guard phase == .active else { return }
@@ -432,7 +442,8 @@ final class ClientSession {
             InputInjector.tickleUserActivity()
             handleInput(wire, payload: payload)
         case .requestApps, .requestFrontWindow, .activateApp, .systemAction, .getHardwareControls, .setHardwareControls, .selectDisplay,
-             .setLocalInputBlock, .setSizedMirror, .setHideDock, .setTextFocusReports:
+             .setLocalInputBlock, .setSizedMirror, .setHideDock, .setTextFocusReports,
+             .setClipboardSharing, .clipboard, .clipboardImage:
             handleControl(wire, payload: payload)
         default:
             break
@@ -611,6 +622,20 @@ final class ClientSession {
         case .setTextFocusReports:
             guard let msg = RDJSON.decode(RDSetTextFocusReportsMsg.self, from: payload) else { return }
             wantsTextFocusReports = msg.enabled
+
+        case .setClipboardSharing:
+            guard let msg = RDJSON.decode(RDSetClipboardSharingMsg.self, from: payload) else { return }
+            sharesClipboard = msg.enabled
+            if !sharesClipboard { clipboardImage.reset() }
+            server.clipboard.update()
+
+        case .clipboard:
+            guard sharesClipboard, let msg = RDJSON.decode(RDClipboardMsg.self, from: payload) else { return }
+            server.clipboard.receive(.text(msg.text), from: self)
+
+        case .clipboardImage:
+            guard sharesClipboard, let png = clipboardImage.add(payload) else { return }
+            server.clipboard.receive(.image(png), from: self)
 
         case .setHideDock:
             guard let msg = RDJSON.decode(RDSetHideDockMsg.self, from: payload) else { return }

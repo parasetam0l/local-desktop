@@ -16,6 +16,7 @@ struct SettingsView: View {
                     displaySection
                     touchSection
                     keyboardSection
+                    clipboardSection
                     connectionSection
                     trustedSection
                     updatesSection
@@ -120,6 +121,13 @@ struct SettingsView: View {
         PanelSection("Keyboard", footer: "In direct touch mode the on-screen keyboard opens by itself when you tap a text field on the Mac.") {
             PanelToggleRow(title: "Show keyboard for text fields",
                            isOn: Binding(get: { app.settings.autoKeyboard ?? true }, set: { app.settings.autoKeyboard = $0 }))
+        }
+    }
+
+    private var clipboardSection: some View {
+        PanelSection("Clipboard", footer: "Text and images copied on the Mac or on this device during a session goes to the other one's clipboard. What was already copied before a session isn't shared. iOS may ask before the Mac gets text you copied here.") {
+            PanelToggleRow(title: "Share clipboard",
+                           isOn: Binding(get: { app.settings.shareClipboard ?? false }, set: { app.settings.shareClipboard = $0 }))
         }
     }
 

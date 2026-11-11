@@ -54,6 +54,9 @@ enum RDWire: UInt8 {
     case setHideDock = 0x58
     case textFocus = 0x59
     case setTextFocusReports = 0x5A
+    case setClipboardSharing = 0x5B
+    case clipboard = 0x5C
+    case clipboardImage = 0x5D
     case bye = 0x60
 
     // App Switcher & Actions
@@ -324,6 +327,102 @@ struct RDTextFocusMsg: Codable {
 /// Turns the `textFocus` reports on or off for this client (off until asked).
 struct RDSetTextFocusReportsMsg: Codable {
     let enabled: Bool
+}
+
+/// Turns clipboard sharing on or off for this client (off until asked; from 1.2.20). Only while
+/// it is on does the Mac send this client its clipboard changes and take the client's clipboard.
+struct RDSetClipboardSharingMsg: Codable {
+    let enabled: Bool
+}
+
+/// Plain text copied on one side during a session, to put on the other side's clipboard (from 1.2.20).
+struct RDClipboardMsg: Codable {
+    let text: String
+
+    /// Largest encoded `clipboard` body either side sends (the host's limit for client messages).
+    static let maxPayload = 1024 * 1024
+
+    /// The encoded body for `text`, or nil when it is empty or too large to share.
+    static func payload(for text: String) -> Data? {
+        guard !text.isEmpty, text.utf8.count <= maxPayload else { return nil }
+        let data = RDJSON.encode(RDClipboardMsg(text: text))
+        guard !data.isEmpty, data.count <= maxPayload else { return nil }
+        return data
+    }
+}
+
+/// An image copied on one side during a session, sent as PNG (JPEG for a photo copied as JPEG,
+/// or one too large as PNG) in binary pieces small enough
+/// for the host's 1 MB limit on client messages (from 1.2.20). Each piece is
+/// `[id u32][index u16][count u16][image bytes]`, big-endian; the pieces of one image share
+/// an id and are sent back to back, in order.
+enum RDClipboardImage {
+    static let headerLength = 8
+    static let chunkSize = 512 * 1024
+    /// Larger images aren't shared.
+    static let maxSize = 20 * 1024 * 1024
+
+    /// Whether `data` starts with the PNG signature (otherwise it is JPEG).
+    static func isPNG(_ data: Data) -> Bool {
+        data.starts(with: [0x89, 0x50, 0x4E, 0x47])
+    }
+
+    /// The pieces to send for `png`, or nil when it is empty or larger than `maxSize`.
+    static func chunks(of png: Data, id: UInt32) -> [Data]? {
+        guard !png.isEmpty, png.count <= maxSize else { return nil }
+        let count = (png.count + chunkSize - 1) / chunkSize
+        return (0..<count).map { index in
+            let start = png.startIndex + index * chunkSize
+            let end = min(start + chunkSize, png.endIndex)
+            var chunk = Data(capacity: headerLength + end - start)
+            chunk.appendBE32(id)
+            chunk.appendBE16(UInt16(index))
+            chunk.appendBE16(UInt16(count))
+            chunk.append(png[start..<end])
+            return chunk
+        }
+    }
+}
+
+/// Puts the pieces of a `clipboardImage` back together. A piece that doesn't follow the
+/// previous one drops the image being assembled; a first piece starts a new one.
+struct RDClipboardImageAssembler {
+    private var id: UInt32 = 0
+    private var nextIndex = 0
+    private var count = 0
+    private var data = Data()
+
+    /// The whole PNG once its last piece arrives, otherwise nil.
+    mutating func add(_ chunk: Data) -> Data? {
+        let maxCount = (RDClipboardImage.maxSize + RDClipboardImage.chunkSize - 1) / RDClipboardImage.chunkSize
+        guard chunk.count > RDClipboardImage.headerLength else { reset(); return nil }
+        let chunkId = chunk.be32(at: 0)
+        let index = Int(chunk.be16(at: 4))
+        let chunkCount = Int(chunk.be16(at: 6))
+        guard chunkCount > 0, chunkCount <= maxCount, index < chunkCount else { reset(); return nil }
+        if index == 0 {
+            reset()
+            id = chunkId
+            count = chunkCount
+        } else if chunkId != id || index != nextIndex || chunkCount != count {
+            reset()
+            return nil
+        }
+        data.append(chunk[(chunk.startIndex + RDClipboardImage.headerLength)...])
+        guard data.count <= RDClipboardImage.maxSize else { reset(); return nil }
+        nextIndex = index + 1
+        guard nextIndex == count else { return nil }
+        let png = data
+        reset()
+        return png
+    }
+
+    mutating func reset() {
+        id = 0
+        nextIndex = 0
+        count = 0
+        data = Data()
+    }
 }
 
 /// Asks the Mac to hide its Dock (the Dock's own auto-hide) until the last client leaves,
