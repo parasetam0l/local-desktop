@@ -79,6 +79,10 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         scrollPan.minimumNumberOfTouches = 2
         scrollPan.maximumNumberOfTouches = 2
         twoFingerTap.require(toFail: scrollPan)
+        // A hold is a right click (or a drag), never also a click when the finger lifts:
+        // that click would clear the selection the right click is meant for. The long
+        // press fails as soon as a short tap lifts, so taps aren't held up.
+        tap.require(toFail: longPress)
 
         for gesture in [tap, twoFingerTap, longPress, tapAndDrag, scrollPan] {
             addGestureRecognizer(gesture)
@@ -407,7 +411,7 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
             guard let start = holdStart else { return }
             if !holdIsDragging {
                 // A resting finger wobbles a little; only real travel starts the drag.
-                guard hypot(screen.x - start.screen.x, screen.y - start.screen.y) > 6 else { return }
+                guard hypot(screen.x - start.screen.x, screen.y - start.screen.y) > 10 else { return }
                 holdIsDragging = true
                 isScrollEnabled = false
                 dragEvent?(.began(start.remote))

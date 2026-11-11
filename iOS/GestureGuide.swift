@@ -20,7 +20,7 @@ struct GestureHint: Identifiable {
         } else if oneFingerScroll {
             hints = [
                 GestureHint(symbol: "hand.tap", gesture: "Tap", result: "Click right there"),
-                GestureHint(symbol: "hand.tap", gesture: "Two-finger tap", result: "Right click"),
+                GestureHint(symbol: "hand.tap", gesture: "Touch and hold without moving, or two-finger tap", result: "Right click"),
                 GestureHint(symbol: "arrow.up.and.down", gesture: "Drag", result: "Scroll"),
                 GestureHint(symbol: "hand.draw", gesture: "Touch and hold, then drag", result: "Drag with the mouse button down"),
             ]
