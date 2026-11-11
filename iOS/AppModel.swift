@@ -29,8 +29,11 @@ struct AppSettings: Codable {
     /// Optional so settings saved before it existed still decode.
     var zoomLocked: Bool? = nil
     var oneFingerScroll: Bool? = nil
-    /// The desktop size sessions start with; nil is the Mac's own size.
+    /// The desktop size sessions start with, when it is one of the standard sizes.
     var defaultMirrorSize: RDMirrorSize? = nil
+    /// The desktop size sessions start with, when it follows this device's screen: a
+    /// percentage of the picture's area. Both nil is the Mac's own size.
+    var defaultDeviceSizePercent: Int? = nil
     /// Sessions start with the Mac's Dock hidden. Optional so older settings decode.
     var hideDock: Bool? = nil
     /// The keyboard opens when a tap lands in a text field on the Mac (on unless turned off).
@@ -49,6 +52,24 @@ struct AppSettings: Codable {
     var isOneFingerScroll: Bool {
         get { oneFingerScroll ?? false }
         set { oneFingerScroll = newValue }
+    }
+
+    /// The desktop size sessions start with.
+    var defaultDesktopSize: DesktopSizeChoice {
+        get {
+            if let percent = defaultDeviceSizePercent { return .device(percent: percent) }
+            if let size = defaultMirrorSize { return .standard(size) }
+            return .macOwn
+        }
+        set {
+            defaultDeviceSizePercent = nil
+            defaultMirrorSize = nil
+            switch newValue {
+            case .macOwn: break
+            case .device(let percent): defaultDeviceSizePercent = percent
+            case .standard(let size): defaultMirrorSize = size
+            }
+        }
     }
 
     var preset: RDQualityPreset { RDQualityPreset.from(qualityRaw) }
@@ -88,6 +109,16 @@ final class AppModel: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "rd.settings"),
            let saved = try? JSONDecoder().decode(AppSettings.self, from: data) {
             settings = saved
+            // Before 1.2.17 the device's own size was saved as a fixed size (its whole
+            // screen, landscape); now it follows the picture's area and the rotation.
+            if let size = saved.defaultMirrorSize {
+                let screen = UIScreen.main.bounds.size
+                let wasDevice = size.width == Int(max(screen.width, screen.height))
+                    && size.height == Int(min(screen.width, screen.height))
+                if wasDevice || !DesktopSizeChoice.standardSizes.contains(size) {
+                    settings.defaultDesktopSize = DesktopSizeChoice.deviceOptions[DesktopSizeChoice.ownSizeIndex].choice
+                }
+            }
         } else {
             settings = AppSettings()
         }
@@ -156,7 +187,7 @@ final class AppModel: ObservableObject {
         session?.disconnect()
         let newSession = ClientSession(deviceName: UIDevice.current.name)
         newSession.autoReconnect = settings.autoReconnect
-        newSession.defaultMirrorSize = settings.defaultMirrorSize
+        newSession.setDesktopSize(settings.defaultDesktopSize, byUser: false)
         newSession.defaultHideDock = settings.hideDock ?? false
         newSession.autoKeyboard = settings.autoKeyboard ?? true
         session = newSession
@@ -315,25 +346,64 @@ final class AppModel: ObservableObject {
     }
 }
 
-extension RDMirrorSize {
-    /// Desktop sizes to offer: this device's own screen (landscape, in points) and the
-    /// usual 4:3 iPad sizes around it.
-    @MainActor static let options: [(name: String, size: RDMirrorSize)] = {
-        let bounds = UIScreen.main.bounds
-        let device = RDMirrorSize(width: Int(max(bounds.width, bounds.height)),
-                                  height: Int(min(bounds.width, bounds.height)))
-        var sizes: [(name: String, size: RDMirrorSize)] = [
-            ("Larger Text", RDMirrorSize(width: 1024, height: 768)),
-            ("Medium", RDMirrorSize(width: 1112, height: 834)),
-            ("More Space", RDMirrorSize(width: 1366, height: 1024)),
-            ("Most Space", RDMirrorSize(width: 1600, height: 1200))
-        ]
-        let deviceName = UIDevice.current.userInterfaceIdiom == .pad ? "This iPad" : "This iPhone"
-        if let index = sizes.firstIndex(where: { $0.size == device }) {
-            sizes[index].name = deviceName
-        } else {
-            sizes.insert((deviceName, device), at: 0)
+/// How a session's desktop size is chosen.
+enum DesktopSizeChoice: Hashable {
+    /// The Mac's own layout.
+    case macOwn
+    /// The room the Mac's picture has on this device, at a percentage of its size. It
+    /// follows the rotation, so the picture fills the screen either way up.
+    case device(percent: Int)
+    /// One of `standardSizes`, turned to lie the way the device is held.
+    case standard(RDMirrorSize)
+
+    /// The size to ask the Mac for with `area` points of room for the picture. Nil is
+    /// the Mac's own size; ask only once `area` is known.
+    func size(for area: CGSize) -> RDMirrorSize? {
+        switch self {
+        case .macOwn: return nil
+        case .device(let percent): return RDMirrorSize.filling(area, percent: percent)
+        case .standard(let size): return size.oriented(like: area)
         }
-        return sizes
-    }()
+    }
+
+    @MainActor private static var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+    @MainActor static var deviceName: String { isPad ? "This iPad" : "This iPhone" }
+    @MainActor static var fillsDeviceTitle: String { isPad ? "Fills this iPad" : "Fills this iPhone" }
+
+    /// Sizes that fill this device's screen. A Mac desktop the size of an iPhone's
+    /// screen is too small to use (and for macOS to draw sharply), so an iPhone's start
+    /// at one and a half times its screen.
+    @MainActor static var deviceOptions: [(name: String, choice: DesktopSizeChoice)] {
+        isPad
+            ? [("Larger Text", .device(percent: 85)), ("Same Size", .device(percent: 100)),
+               ("More Space", .device(percent: 125)), ("Most Space", .device(percent: 150))]
+            : [("Larger Text", .device(percent: 150)), ("Medium", .device(percent: 175)),
+               ("More Space", .device(percent: 200))]
+    }
+    /// Where `deviceOptions` has the size closest to the device's own.
+    @MainActor static var ownSizeIndex: Int { isPad ? 1 : 0 }
+
+    /// The usual 4:3 sizes, for a desktop that should not depend on the device.
+    static let standardSizes = [
+        RDMirrorSize(width: 1024, height: 768), RDMirrorSize(width: 1112, height: 834),
+        RDMirrorSize(width: 1366, height: 1024), RDMirrorSize(width: 1600, height: 1200),
+    ]
+
+    /// The name of a choice in a menu's value column.
+    @MainActor var name: String {
+        switch self {
+        case .macOwn: return "Mac's own"
+        case .device: return Self.deviceOptions.first { $0.choice == self }?.name ?? Self.deviceName
+        case .standard(let size): return size.label
+        }
+    }
+
+    /// The room a session's picture gets right now: the window without its safe areas.
+    /// A session measures its own; this is for showing sizes outside one.
+    @MainActor static var currentPictureArea: CGSize {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)
+        guard let window else { return UIScreen.main.bounds.size }
+        return window.bounds.inset(by: window.safeAreaInsets).size
+    }
 }

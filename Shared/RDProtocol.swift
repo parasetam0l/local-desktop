@@ -532,6 +532,32 @@ struct RDMirrorSize: Codable, Equatable, Hashable {
     var label: String { "\(width)×\(height)" }
 }
 
+extension RDMirrorSize {
+    /// macOS draws a desktop with a shorter side than this without Retina, at twice the
+    /// size asked for (seen on macOS 27 with 393 and 480 points; 558 is fine).
+    static let shortestSide = 540
+    static let longestSide = 2732
+
+    /// Lying the way `area` does: taller than wide in portrait, wider than tall otherwise.
+    func oriented(like area: CGSize) -> RDMirrorSize {
+        (area.height > area.width) == (height > width) ? self : RDMirrorSize(width: height, height: width)
+    }
+
+    /// A desktop with the proportions of `area` (the room the picture has on the device,
+    /// in points) at `percent` of its size, so the picture fills that room without bars.
+    /// The scale gives way where the limits above need it; nil when `area` is empty.
+    static func filling(_ area: CGSize, percent: Int) -> RDMirrorSize? {
+        let short = Double(min(area.width, area.height))
+        let long = Double(max(area.width, area.height))
+        guard short >= 1 else { return nil }
+        var scale = Double(percent) / 100
+        scale = max(scale, Double(shortestSide) / short)
+        scale = min(scale, Double(longestSide) / long)
+        return RDMirrorSize(width: Int((Double(area.width) * scale).rounded()),
+                            height: Int((Double(area.height) * scale).rounded()))
+    }
+}
+
 /// Asks the host to lay the desktop out at `size` (the Mac's own screen mirrors it for
 /// the session), or to go back to the Mac's own layout when `size` is nil. Like
 /// `selectDisplay` it applies to every connected client.

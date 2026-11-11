@@ -274,6 +274,34 @@ final class DisplayMessageTests: XCTestCase {
         XCTAssertNil(off.size)
     }
 
+    func testDesktopSizeFillsThePictureAreaEitherWayUp() {
+        // An iPad 11" without its safe areas: the same proportions at any scale, and
+        // transposed when it is held upright.
+        XCTAssertEqual(RDMirrorSize.filling(CGSize(width: 1180, height: 776), percent: 100),
+                       RDMirrorSize(width: 1180, height: 776))
+        XCTAssertEqual(RDMirrorSize.filling(CGSize(width: 1180, height: 776), percent: 125),
+                       RDMirrorSize(width: 1475, height: 970))
+        XCTAssertEqual(RDMirrorSize.filling(CGSize(width: 820, height: 1136), percent: 100),
+                       RDMirrorSize(width: 820, height: 1136))
+        // An iPhone: one and a half times its 734×372 landscape area.
+        XCTAssertEqual(RDMirrorSize.filling(CGSize(width: 734, height: 372), percent: 150),
+                       RDMirrorSize(width: 1101, height: 558))
+        // Too small for macOS to draw sharply: scaled up until the shorter side fits.
+        let small = RDMirrorSize.filling(CGSize(width: 393, height: 759), percent: 100)
+        XCTAssertEqual(small, RDMirrorSize(width: 540, height: 1043))
+        // Too large: scaled down until the longer side fits.
+        let large = RDMirrorSize.filling(CGSize(width: 1376, height: 988), percent: 300)
+        XCTAssertEqual(large, RDMirrorSize(width: 2732, height: 1962))
+        XCTAssertNil(RDMirrorSize.filling(.zero, percent: 100))
+    }
+
+    func testStandardDesktopSizeTurnsWithTheDevice() {
+        let size = RDMirrorSize(width: 1024, height: 768)
+        XCTAssertEqual(size.oriented(like: CGSize(width: 1180, height: 776)), size)
+        XCTAssertEqual(size.oriented(like: CGSize(width: 820, height: 1136)), RDMirrorSize(width: 768, height: 1024))
+        XCTAssertEqual(RDMirrorSize(width: 768, height: 1024).oriented(like: CGSize(width: 1180, height: 776)), size)
+    }
+
     func testSelectionIsOptional() {
         let data = Data(#"{"displays":[]}"#.utf8)
         XCTAssertEqual(RDJSON.decode(RDDisplaysMsg.self, from: data), RDDisplaysMsg(displays: [], selectedId: nil))

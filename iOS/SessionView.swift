@@ -71,6 +71,18 @@ struct SessionView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
+            // The room the Mac's picture has: the screen without its safe areas, whether
+            // the keyboard is up or not. A desktop size that fills the device is made
+            // from it, and follows it when the device is turned.
+            GeometryReader { proxy in
+                Color.clear
+                    .onChange(of: proxy.size, initial: true) { _, size in
+                        session.pictureArea = size
+                    }
+            }
+            .ignoresSafeArea(.keyboard)
+            .allowsHitTesting(false)
+
             // Kept alive across reconnects so the last frame and PiP survive a drop.
             if session.hasConnectedOnce {
                 ZoomableCanvas(

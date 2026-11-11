@@ -92,14 +92,18 @@ struct SessionPanel: View {
             if session.sizedMirrorAvailable {
                 PanelMenuRow(title: "Desktop size", value: session.mirrorSize?.label ?? "Mac's own") {
                     checkButton("Mac's own size", isOn: session.mirrorSize == nil) {
-                        session.setSizedMirror(nil)
+                        session.setDesktopSize(.macOwn)
                     }
-                    Section {
-                        ForEach(RDMirrorSize.options, id: \.size) { option in
-                            checkButton("\(option.name) · \(option.size.label)",
-                                        isOn: option.size == session.mirrorSize) {
-                                session.setSizedMirror(option.size)
-                            }
+                    // Sizes as they are for the way the device is held now; the choice
+                    // follows when it is turned.
+                    Section(DesktopSizeChoice.fillsDeviceTitle) {
+                        ForEach(DesktopSizeChoice.deviceOptions, id: \.choice) { option in
+                            desktopSizeButton(option.choice, name: option.name)
+                        }
+                    }
+                    Section("Standard sizes") {
+                        ForEach(DesktopSizeChoice.standardSizes, id: \.self) { size in
+                            desktopSizeButton(.standard(size), name: nil)
                         }
                     }
                 }
@@ -194,6 +198,15 @@ struct SessionPanel: View {
                 canvasController.togglePiP()
             }
             PanelToggleRow(title: "Start when leaving the app", isOn: $canvasController.isAutoPiPEnabled)
+        }
+    }
+
+    @ViewBuilder
+    private func desktopSizeButton(_ choice: DesktopSizeChoice, name: String?) -> some View {
+        if let size = choice.size(for: session.pictureArea) {
+            checkButton(name.map { "\($0) · \(size.label)" } ?? size.label, isOn: size == session.mirrorSize) {
+                session.setDesktopSize(choice)
+            }
         }
     }
 

@@ -57,7 +57,7 @@ struct SettingsView: View {
     // MARK: Sections
 
     private var displaySection: some View {
-        PanelSection("Display", footer: "Desktop size lays the Mac's desktop out at that size for each session, and the Mac's own screen shows the same layout.") {
+        PanelSection("Display", footer: "Desktop size lays the Mac's desktop out at that size for each session, and the Mac's own screen shows the same layout. A size that fills the screen follows it when you turn the device.") {
             PanelMenuRow(title: "Default quality", value: app.settings.preset.shortLabel) {
                 Picker("Default quality", selection: $app.settings.qualityRaw) {
                     ForEach(RDQualityPreset.allCases) { preset in
@@ -65,11 +65,18 @@ struct SettingsView: View {
                     }
                 }
             }
-            PanelMenuRow(title: "Default desktop size", value: mirrorSizeLabel) {
-                Picker("Default desktop size", selection: $app.settings.defaultMirrorSize) {
-                    Text("Mac's own size").tag(RDMirrorSize?.none)
-                    ForEach(RDMirrorSize.options, id: \.size) { option in
-                        Text("\(option.name) · \(option.size.label)").tag(RDMirrorSize?.some(option.size))
+            PanelMenuRow(title: "Default desktop size", value: app.settings.defaultDesktopSize.name) {
+                Picker("Default desktop size", selection: $app.settings.defaultDesktopSize) {
+                    Text("Mac's own size").tag(DesktopSizeChoice.macOwn)
+                    Section(DesktopSizeChoice.fillsDeviceTitle) {
+                        ForEach(DesktopSizeChoice.deviceOptions, id: \.choice) { option in
+                            Text(desktopSizeLabel(option.choice, name: option.name)).tag(option.choice)
+                        }
+                    }
+                    Section("Standard sizes") {
+                        ForEach(DesktopSizeChoice.standardSizes, id: \.self) { size in
+                            Text(desktopSizeLabel(.standard(size), name: nil)).tag(DesktopSizeChoice.standard(size))
+                        }
                     }
                 }
             }
@@ -199,9 +206,10 @@ struct SettingsView: View {
         }
     }
 
-    private var mirrorSizeLabel: String {
-        guard let size = app.settings.defaultMirrorSize else { return "Mac's own" }
-        return RDMirrorSize.options.first { $0.size == size }?.name ?? size.label
+    /// A size as it is for the way the device is held now.
+    private func desktopSizeLabel(_ choice: DesktopSizeChoice, name: String?) -> String {
+        let size = choice.size(for: DesktopSizeChoice.currentPictureArea)?.label
+        return [name, size].compactMap { $0 }.joined(separator: " · ")
     }
 
     private var pointerSpeedLabel: String {

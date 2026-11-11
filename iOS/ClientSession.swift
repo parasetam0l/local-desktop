@@ -48,9 +48,19 @@ final class ClientSession: ObservableObject {
     @Published private(set) var sizedMirrorAvailable = false
     /// The size the Mac's desktop is laid out at for us, nil with the Mac's own layout.
     @Published private(set) var mirrorSize: RDMirrorSize?
-    /// The desktop size to ask for when a connection starts (from Settings), if any.
-    var defaultMirrorSize: RDMirrorSize?
-    private var appliedDefaultMirrorSize = false
+    /// How the desktop size is chosen: the Settings default at first, then the session
+    /// menu's choice. It is asked for when a connection starts and again when the device
+    /// is turned, so the picture keeps filling the screen.
+    private(set) var desktopSize: DesktopSizeChoice = .macOwn
+    /// The room the Mac's picture has on this device, in points; the session view sets it.
+    var pictureArea: CGSize = .zero {
+        didSet { if pictureArea != oldValue { pictureAreaChanged() } }
+    }
+    private var appliedDesktopSize = false
+    private var pictureAreaUpdate: DispatchWorkItem?
+    private var mirrorRequestTimeout: DispatchWorkItem?
+    /// How long the Mac gets to set a size up (it retries for a few seconds with its lid shut).
+    private static let mirrorRequestPatience: TimeInterval = 8
     /// Whether the Mac hides its Dock for this session (nil when it can't, or before 1.2.13).
     @Published private(set) var hidesMacDock: Bool?
     /// Whether to ask the Mac to hide its Dock when a connection starts (from Settings).
@@ -72,7 +82,8 @@ final class ClientSession: ObservableObject {
     /// The outcome of something the user asked the Mac for, to show for a moment.
     @Published private(set) var notice: SessionNotice?
     /// A desktop size was asked for and the Mac hasn't answered yet; the inner nil is
-    /// the Mac's own size. `mirrorRequestByUser` is false for the Settings default.
+    /// the Mac's own size. `mirrorRequestByUser` is false for the Settings default and
+    /// for a turn of the device.
     private var requestedMirrorSize: RDMirrorSize??
     private var mirrorRequestByUser = false
     @Published private(set) var liveFPS: Double = 0.0
@@ -420,7 +431,9 @@ final class ClientSession: ObservableObject {
                 fail("Protocol error: unexpected authentication response")
                 return
             }
-            appliedDefaultMirrorSize = false
+            appliedDesktopSize = false
+            requestedMirrorSize = nil
+            mirrorRequestTimeout?.cancel()
             appliedDefaultHideDock = false
             sentTextFocusPreference = false
             handleAuthOK(msg, attempt: attempt)
@@ -491,19 +504,22 @@ final class ClientSession: ObservableObject {
             selectedDisplayId = msg.selectedId
             sizedMirrorAvailable = msg.sizedMirrorAvailable ?? false
             mirrorSize = msg.mirrorSize
-            if let requested = requestedMirrorSize {
+            // The Mac's display list changes while it sets a size up, so messages that
+            // still have the old size arrive before its answer. Only one with the size
+            // asked for settles the request; `mirrorRequestTimedOut` reports one that
+            // never comes.
+            if let requested = requestedMirrorSize, requested == msg.mirrorSize {
                 requestedMirrorSize = nil
-                if requested != msg.mirrorSize {
-                    post("The Mac couldn't change the desktop size", symbol: "exclamationmark.triangle", isFailure: true)
-                } else if mirrorRequestByUser {
+                mirrorRequestTimeout?.cancel()
+                if mirrorRequestByUser {
                     post("Desktop size: \(requested?.label ?? "Mac's own")", symbol: "rectangle.dashed")
                 }
             }
-            // The Settings default, asked for once per connection (the Mac drops the
-            // size when its last client leaves); the session menu can change it after.
-            if !appliedDefaultMirrorSize, sizedMirrorAvailable {
-                appliedDefaultMirrorSize = true
-                if let size = defaultMirrorSize { setSizedMirror(size, byUser: false) }
+            // Asked for once per connection (the Mac drops the size when its last client
+            // leaves); the session menu and a turn of the device change it after.
+            if !appliedDesktopSize, sizedMirrorAvailable {
+                appliedDesktopSize = true
+                if desktopSize != .macOwn { applyDesktopSize(byUser: false) }
             }
 
         case .bye:
@@ -856,11 +872,50 @@ final class ClientSession: ObservableObject {
 
     /// Lays the Mac's desktop out at `size` (its own screen mirrors that for the session),
     /// or back at the Mac's own size with nil; the Mac confirms with a new `displays` message.
-    func setSizedMirror(_ size: RDMirrorSize?, byUser: Bool = true) {
-        guard phase == .connected, sizedMirrorAvailable, size != mirrorSize else { return }
+    private func setSizedMirror(_ size: RDMirrorSize?, byUser: Bool) {
+        // Against the size on its way, if any: that is what the Mac will have next.
+        guard phase == .connected, sizedMirrorAvailable, size != (requestedMirrorSize ?? mirrorSize) else { return }
         requestedMirrorSize = .some(size)
         mirrorRequestByUser = byUser
         sendJSON(.setSizedMirror, RDSetSizedMirrorMsg(size: size))
+        mirrorRequestTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in self?.mirrorRequestTimedOut() }
+        mirrorRequestTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.mirrorRequestPatience, execute: timeout)
+    }
+
+    private func mirrorRequestTimedOut() {
+        guard requestedMirrorSize != nil else { return }
+        requestedMirrorSize = nil
+        guard phase == .connected else { return }
+        // Back on its own size, the Mac is not asked again at every turn of the device.
+        if mirrorSize == nil { desktopSize = .macOwn }
+        post("The Mac couldn't change the desktop size", symbol: "exclamationmark.triangle", isFailure: true)
+    }
+
+    /// Chooses how the Mac's desktop is laid out: at a size that fills this device's
+    /// screen, at a standard size, or the Mac's own way.
+    func setDesktopSize(_ choice: DesktopSizeChoice, byUser: Bool = true) {
+        desktopSize = choice
+        applyDesktopSize(byUser: byUser)
+    }
+
+    private func applyDesktopSize(byUser: Bool) {
+        // Without the picture's area yet, `pictureAreaChanged` asks once it is known.
+        guard desktopSize == .macOwn || pictureArea.width >= 1 else { return }
+        setSizedMirror(desktopSize.size(for: pictureArea), byUser: byUser)
+    }
+
+    /// The device was turned (or the session view was first laid out). The desktop
+    /// follows a moment later, so that one turn asks the Mac once.
+    private func pictureAreaChanged() {
+        pictureAreaUpdate?.cancel()
+        let update = DispatchWorkItem { [weak self] in
+            guard let self, self.appliedDesktopSize, self.desktopSize != .macOwn else { return }
+            self.applyDesktopSize(byUser: false)
+        }
+        pictureAreaUpdate = update
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: update)
     }
 
     /// Hides the Mac's Dock for the session or shows it again; the Mac confirms with `hostState`.
