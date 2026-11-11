@@ -167,6 +167,7 @@ struct SessionPanel: View {
                 PanelToggleRow(title: "One-finger scroll", isOn: $app.settings.isOneFingerScroll)
             }
             PanelToggleRow(title: "Lock zoom", isOn: $app.settings.isZoomLocked)
+            PanelToggleRow(title: "Lock orientation", isOn: $app.isOrientationLocked)
             PanelButtonRow(title: "Gestures", symbol: "questionmark.circle") {
                 showGestures = true
             }

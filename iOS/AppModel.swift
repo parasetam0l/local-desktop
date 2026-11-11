@@ -28,6 +28,8 @@ struct AppSettings: Codable {
     var pointerSpeedMultiplier: Double = 1.5
     /// Optional so settings saved before it existed still decode.
     var zoomLocked: Bool? = nil
+    /// The `UIInterfaceOrientation` the app stays in; nil turns with the device.
+    var lockedOrientation: Int? = nil
     var oneFingerScroll: Bool? = nil
     /// The desktop size sessions start with, when it is one of the standard sizes.
     var defaultMirrorSize: RDMirrorSize? = nil
@@ -97,6 +99,15 @@ final class AppModel: ObservableObject {
     }
     /// Server ids of Macs this device has paired with (cached from the Keychain).
     @Published private(set) var pairedServerIds: Set<String> = []
+
+    /// Keeps the app in the orientation it is in now, or lets it turn with the device.
+    var isOrientationLocked: Bool {
+        get { settings.lockedOrientation != nil }
+        set {
+            settings.lockedOrientation = newValue ? OrientationLock.current?.rawValue : nil
+            OrientationLock.apply(settings.lockedOrientation)
+        }
+    }
 
     private var didAutoConnect = false
     private var cancellables = Set<AnyCancellable>()

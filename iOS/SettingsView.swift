@@ -106,6 +106,7 @@ struct SettingsView: View {
             PanelToggleRow(title: "Show the Mac's cursor", isOn: $app.settings.showRemoteCursor)
             PanelToggleRow(title: "One-finger drag scrolls in direct touch", isOn: $app.settings.isOneFingerScroll)
             PanelToggleRow(title: "Lock zoom", isOn: $app.settings.isZoomLocked)
+            PanelToggleRow(title: "Lock orientation", isOn: $app.isOrientationLocked)
             PanelButtonRow(title: "Gestures", symbol: "questionmark.circle") {
                 showGestures = true
             }
