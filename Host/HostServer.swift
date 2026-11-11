@@ -108,6 +108,10 @@ final class HostServer: ObservableObject {
     }
 
     private var listener: NWListener?
+    /// The QUIC listener beside the TCP one (UDP, same port number when it's free).
+    private var quicListener: NWListener?
+    /// The UDP port QUIC listens on, once its listener is ready.
+    private var quicPort: UInt16?
     /// Connections still performing the handshake.
     private var pendingSessions: [ClientSession] = []
     /// All authenticated, streaming sessions.
@@ -315,16 +319,10 @@ final class HostServer: ObservableObject {
             } else {
                 newListener = try NWListener(using: parameters, on: .any)
             }
-            var txt = NWTXTRecord()
-            txt["sid"] = AuthStore.shared.serverId
-            txt["name"] = HostServer.computerName
-            newListener.service = NWListener.Service(name: bonjourName,
-                                                     type: RDService.type,
-                                                     domain: nil,
-                                                     txtRecord: txt.data)
+            newListener.service = advertisedService()
             newListener.newConnectionHandler = { [weak self] connection in
                 MainActor.assumeIsolated {
-                    self?.accept(connection)
+                    self?.accept(connection, transport: .tcp)
                 }
             }
             newListener.stateUpdateHandler = { [weak self] state in
@@ -333,6 +331,7 @@ final class HostServer: ObservableObject {
                     switch state {
                     case .ready:
                         self.port = newListener.port?.rawValue ?? 0
+                        self.readvertise()
                     case .failed(let error):
                         self.lastError = "Server error: \(error.localizedDescription)"
                     default:
@@ -342,6 +341,7 @@ final class HostServer: ObservableObject {
             }
             listener = newListener
             newListener.start(queue: .main)
+            startQUICListener(on: preferredPort)
             running = true
             lastError = nil
             UserDefaults.standard.set(true, forKey: Self.sharingWantedKey)
@@ -373,6 +373,9 @@ final class HostServer: ObservableObject {
         updateLocalInputBlocking()
         listener?.cancel()
         listener = nil
+        quicListener?.cancel()
+        quicListener = nil
+        quicPort = nil
         ScreenStreamer.shared.stop()
         updateFrameGate()
         running = false
@@ -611,7 +614,70 @@ final class HostServer: ObservableObject {
         }
     }
 
-    private func accept(_ connection: NWConnection) {
+    // MARK: Transports
+
+    /// The Bonjour record: `sid`, `name`, and `quic=1` (+ `qport` when the UDP port
+    /// differs from the TCP one) once the QUIC listener is ready.
+    private func advertisedService() -> NWListener.Service {
+        var txt = NWTXTRecord()
+        txt["sid"] = AuthStore.shared.serverId
+        txt["name"] = HostServer.computerName
+        if let quicPort {
+            txt[RDQUIC.txtFlag] = "1"
+            if quicPort != port {
+                txt[RDQUIC.txtPort] = String(quicPort)
+            }
+        }
+        return NWListener.Service(name: bonjourName, type: RDService.type, domain: nil, txtRecord: txt.data)
+    }
+
+    /// Updates the TXT record (setting the service again re-registers it).
+    private func readvertise() {
+        listener?.service = advertisedService()
+    }
+
+    /// Listens for QUIC on UDP beside TCP. Each incoming stream is a byte stream like a
+    /// TCP connection and becomes a `ClientSession` the same way. Failure only means
+    /// clients keep using TCP.
+    private func startQUICListener(on preferredPort: NWEndpoint.Port, isRetry: Bool = false) {
+        guard let identity = QUICIdentityStore.loadOrCreate(),
+              let parameters = RDQUIC.serverParameters(identity: identity),
+              let newListener = try? NWListener(using: parameters, on: preferredPort) else {
+            HostLog.write("QUIC: listener unavailable; TCP only")
+            return
+        }
+        newListener.newConnectionHandler = { [weak self] stream in
+            MainActor.assumeIsolated {
+                self?.accept(stream, transport: .quic)
+            }
+        }
+        newListener.stateUpdateHandler = { [weak self, weak newListener] state in
+            MainActor.assumeIsolated {
+                guard let self, let newListener, self.quicListener === newListener else { return }
+                switch state {
+                case .ready:
+                    self.quicPort = newListener.port?.rawValue
+                    HostLog.write("QUIC: listening on UDP \(self.quicPort ?? 0)")
+                    self.readvertise()
+                case .failed(let error):
+                    newListener.cancel()
+                    self.quicListener = nil
+                    self.quicPort = nil
+                    self.readvertise()
+                    HostLog.write("QUIC: listener failed (\(error.localizedDescription))")
+                    if !isRetry, preferredPort != .any {
+                        self.startQUICListener(on: .any, isRetry: true)
+                    }
+                default:
+                    break
+                }
+            }
+        }
+        quicListener = newListener
+        newListener.start(queue: .main)
+    }
+
+    private func accept(_ connection: NWConnection, transport: RDTransport) {
         guard running else {
             connection.cancel()
             return
@@ -629,6 +695,7 @@ final class HostServer: ObservableObject {
             return
         }
         let session = ClientSession(connection: connection, server: self, remoteAddress: address)
+        HostLog.write("session from \(address) over \(transport == .quic ? "QUIC" : "TCP")")
         pendingSessions.append(session)
         session.start()
     }

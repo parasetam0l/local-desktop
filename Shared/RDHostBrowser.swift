@@ -8,6 +8,8 @@ struct DiscoveredHost: Identifiable, Equatable {
     let name: String
     var serverId: String? = nil
     let endpoint: NWEndpoint
+    /// Set when the host's TXT record advertises QUIC (`quic=1`, from 1.2.29).
+    var quic: RDQUICAdvert? = nil
 }
 
 @MainActor
@@ -37,10 +39,13 @@ final class HostBrowser: ObservableObject {
             let items = results.compactMap { result -> DiscoveredHost? in
                 guard case let .service(name, _, _, _) = result.endpoint else { return nil }
                 var serverId: String?
+                var quic: RDQUICAdvert?
                 if case let .bonjour(record) = result.metadata {
                     serverId = record["sid"]
+                    quic = RDQUICAdvert(txt: record)
                 }
-                return DiscoveredHost(id: name, name: name, serverId: serverId, endpoint: result.endpoint)
+                return DiscoveredHost(id: name, name: name, serverId: serverId, endpoint: result.endpoint,
+                                      quic: quic)
             }
             MainActor.assumeIsolated {
                 guard let self else { return }

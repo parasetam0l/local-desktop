@@ -200,7 +200,7 @@ final class AppModel: ObservableObject {
     // MARK: Connecting
 
     func connect(endpoint: NWEndpoint, fallbackName: String? = nil, expectedServerId: String? = nil,
-                 retryWhileWaking: Bool = false) {
+                 quic: RDQUICAdvert? = nil, retryWhileWaking: Bool = false) {
         manualError = nil
         // Never leave a previous session running (and reconnecting) in the background.
         session?.disconnect()
@@ -222,11 +222,12 @@ final class AppModel: ObservableObject {
             self?.pairedServerIds.insert(serverId)
         }
         newSession.connect(to: endpoint, fallbackName: fallbackName, expectedServerId: expectedServerId,
-                           retryWhileWaking: retryWhileWaking)
+                           quic: quic, retryWhileWaking: retryWhileWaking)
     }
 
     func connect(to host: DiscoveredHost) {
-        connect(endpoint: host.endpoint, fallbackName: host.name, expectedServerId: host.serverId)
+        connect(endpoint: host.endpoint, fallbackName: host.name, expectedServerId: host.serverId,
+                quic: host.quic)
     }
 
     func connectRecent(_ recent: RecentHost) {

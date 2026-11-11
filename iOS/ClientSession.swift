@@ -147,6 +147,8 @@ final class ClientSession: ObservableObject {
 
     private let networkQueue = DispatchQueue(label: "rd.client.network", qos: .userInteractive)
     private(set) var endpoint: NWEndpoint?
+    /// The host's QUIC advertisement, kept for reconnects to the same host.
+    private var quicAdvert: RDQUICAdvert?
     private var actualEndpoint: NWEndpoint?
     /// The Mac the user meant to reach (from Bonjour or recents), if known.
     private var expectedServerId: String?
@@ -186,8 +188,12 @@ final class ClientSession: ObservableObject {
 
     // MARK: Connection lifecycle
 
+    /// - Parameter quic: what the host advertised about QUIC. Without TXT info (a recent
+    ///   Mac reached by address, or a Bonjour result from before the host's QUIC listener
+    ///   was up) QUIC is still tried on the TCP port number: an older Mac doesn't answer
+    ///   on UDP and the attempt falls back to TCP within `RDQUIC.fallbackDelay`.
     func connect(to target: NWEndpoint, fallbackName: String? = nil, expectedServerId: String? = nil,
-                 retryWhileWaking: Bool = false) {
+                 quic: RDQUICAdvert? = nil, retryWhileWaking: Bool = false) {
         userInitiatedDisconnect = false
         tearDownConnection()
         stopPing()
@@ -210,6 +216,7 @@ final class ClientSession: ObservableObject {
         pinError = nil
         identityMismatchServerId = nil
         endpoint = target
+        quicAdvert = quic
         actualEndpoint = nil
         hostDescription = describe(target)
         phase = .connecting
@@ -221,6 +228,7 @@ final class ClientSession: ObservableObject {
         let video = self.video
         let conn = ClientConnection(
             to: target,
+            quicEndpoint: (quic ?? .samePort).endpoint(forTCP: target),
             deviceId: TrustStore.deviceId,
             deviceName: deviceName,
             queue: networkQueue,
@@ -243,7 +251,9 @@ final class ClientSession: ObservableObject {
 
     func reconnect() {
         guard let target = currentEndpoint else { return }
-        connect(to: target, fallbackName: targetName, expectedServerId: serverId.isEmpty ? nil : serverId)
+        // `target` is the resolved TCP address; the QUIC port is derived from it again.
+        connect(to: target, fallbackName: targetName, expectedServerId: serverId.isEmpty ? nil : serverId,
+                quic: quicAdvert)
     }
 
     /// "Reconnect Now": starts a fresh backoff sequence.

@@ -36,8 +36,17 @@ private final class LoopbackHost: @unchecked Sendable {
 
     var serverId: String { RDHandshake.serverId(for: identity.publicKey.rawRepresentation) }
 
-    func start() throws -> UInt16 {
-        listener = try NWListener(using: .tcp, on: .any)
+    /// Listens on TCP, or with `quic` on one QUIC stream per connection, presenting a
+    /// fresh self-signed certificate the way the real host does.
+    func start(quic: Bool = false) throws -> UInt16 {
+        if quic {
+            let key = P256.Signing.PrivateKey()
+            let certificate = try RDSelfSignedIdentity.makeCertificate(for: key)
+            let identity = try XCTUnwrap(RDSelfSignedIdentity.identity(key: key, certificate: certificate))
+            listener = try NWListener(using: try XCTUnwrap(RDQUIC.serverParameters(identity: identity)), on: .any)
+        } else {
+            listener = try NWListener(using: .tcp, on: .any)
+        }
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { state in
             if case .ready = state { ready.signal() }
@@ -242,9 +251,12 @@ final class LoopbackTests: XCTestCase {
         host.stop()
     }
 
-    private func connect(deviceId: String = "loopback-device") -> (ClientConnection, EventLog) {
+    private func connect(deviceId: String = "loopback-device",
+                         quicPort: UInt16? = nil) -> (ClientConnection, EventLog) {
         let log = EventLog()
+        let quicEndpoint = quicPort.map { NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: $0)!) }
         let connection = ClientConnection(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!),
+                                          quicEndpoint: quicEndpoint,
                                           deviceId: deviceId,
                                           deviceName: "Test iPhone",
                                           queue: DispatchQueue(label: "test.client"),
@@ -293,6 +305,42 @@ final class LoopbackTests: XCTestCase {
         second.send(.authDevice, RDJSON.encode(AuthDeviceMsg(signature: signature)))
         wait(for: [log2.expectation("authOK") { !log2.messages(.authOK).isEmpty }], timeout: 5)
         second.cancel()
+    }
+
+    /// The same handshake, pairing, large burst and pong over one QUIC stream. The QUIC
+    /// host has no TCP listener, so success can't come from the TCP fallback.
+    func testHandshakeAndPairingOverQUIC() throws {
+        let quicHost = LoopbackHost()
+        let quicPort = try quicHost.start(quic: true)
+        defer { quicHost.stop() }
+        let deviceKey = Curve25519.Signing.PrivateKey()
+
+        let (first, log) = connect(quicPort: quicPort)
+        wait(for: [log.expectation("serverHello over QUIC") { log.serverIdentity != nil }], timeout: 5)
+        XCTAssertEqual(log.serverIdentity?.identityKey, quicHost.identity.publicKey.rawRepresentation)
+        first.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: true,
+                                                      deviceKey: deviceKey.publicKey.rawRepresentation)))
+        wait(for: [log.expectation("authOK + burst") {
+            !log.messages(.authOK).isEmpty && !log.messages(.runningApps).isEmpty && !log.snapshot.video.isEmpty
+        }], timeout: 5)
+        XCTAssertEqual(log.messages(.runningApps).first, quicHost.largeMessage)
+        first.send(.ping, RDJSON.encode(PingMsg(t: 42)))
+        wait(for: [log.expectation("pong") { log.pongs > 0 }], timeout: 5)
+        XCTAssertNil(log.failure)
+        XCTAssertTrue(quicHost.received.contains(.frameAck))
+        first.cancel()
+        // The TCP host never saw a thing.
+        XCTAssertTrue(host.received.isEmpty)
+    }
+
+    /// A host that advertises QUIC but doesn't answer on UDP: the attempt moves to TCP
+    /// on its own, without a failure event.
+    func testFallsBackToTCPWhenQUICDoesNotAnswer() {
+        let (connection, log) = connect(quicPort: port)   // nothing listens on this UDP port
+        wait(for: [log.expectation("serverHello over TCP") { log.serverIdentity != nil }], timeout: 5)
+        XCTAssertNil(log.failure)
+        XCTAssertEqual(host.received.first, .hello)
+        connection.cancel()
     }
 
     func testReplayedDeviceProofIsRejected() {

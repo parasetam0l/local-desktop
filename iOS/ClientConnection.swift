@@ -13,6 +13,12 @@ struct ServerIdentity: Sendable {
 /// The network side of one connection attempt: socket, framing, the handshake
 /// crypto, and per-direction encryption.
 ///
+/// Transport: when the host advertises QUIC, the attempt starts on one bidirectional
+/// QUIC stream and falls back to TCP if QUIC isn't ready within
+/// `RDQUIC.fallbackDelay` or fails before `serverHello`. The fallback is invisible to
+/// the caller: `ready` is reported once, and the handshake simply restarts on TCP.
+/// Both transports are byte streams, so everything above `connection` is shared.
+///
 /// Everything mutable is confined to `queue`, and the callbacks run there too, so
 /// none of this touches main-actor state. `ClientSession` hops events to the main
 /// actor; video payloads go straight to the decode pipeline.
@@ -37,7 +43,11 @@ final class ClientConnection: @unchecked Sendable {
     }
 
     private let queue: DispatchQueue
-    private let connection: NWConnection
+    private var connection: NWConnection
+    private let tcpEndpoint: NWEndpoint
+    /// The transport currently in use.
+    private var transport: RDTransport
+    private var reportedReady = false
     private let deviceId: String
     private let deviceName: String
     private let onEvent: @Sendable (Event) -> Void
@@ -54,7 +64,9 @@ final class ClientConnection: @unchecked Sendable {
     private let statsLock = NSLock()
     private var stats = Stats()
 
+    /// - Parameter quicEndpoint: where to try QUIC first; nil connects over TCP only.
     init(to endpoint: NWEndpoint,
+         quicEndpoint: NWEndpoint? = nil,
          deviceId: String,
          deviceName: String,
          queue: DispatchQueue,
@@ -65,7 +77,14 @@ final class ClientConnection: @unchecked Sendable {
         self.deviceName = deviceName
         self.onEvent = onEvent
         self.onVideoFrame = onVideoFrame
-        connection = NWConnection(to: endpoint, using: Self.makeParameters())
+        tcpEndpoint = endpoint
+        if let quicEndpoint {
+            transport = .quic
+            connection = NWConnection(to: quicEndpoint, using: RDQUIC.clientParameters(verifyQueue: queue))
+        } else {
+            transport = .tcp
+            connection = NWConnection(to: endpoint, using: Self.makeParameters())
+        }
         reader.maxPayload = RDService.maxHandshakePayload
     }
 
@@ -86,10 +105,44 @@ final class ClientConnection: @unchecked Sendable {
     }
 
     func start() {
-        connection.stateUpdateHandler = { [weak self] state in
-            self?.handleState(state)
+        queue.async {
+            self.startCurrentConnection()
+            guard self.transport == .quic else { return }
+            let quic = self.connection
+            self.queue.asyncAfter(deadline: .now() + RDQUIC.fallbackDelay) { [weak self] in
+                guard let self, self.connection === quic, quic.state != .ready else { return }
+                self.fallBackToTCP()
+            }
         }
-        connection.start(queue: queue)
+    }
+
+    private func startCurrentConnection() {
+        let current = connection
+        current.stateUpdateHandler = { [weak self, weak current] state in
+            guard let self, let current, self.connection === current else { return }
+            self.handleState(state)
+        }
+        current.start(queue: queue)
+    }
+
+    /// Whether a failure on the current connection should switch to TCP instead of
+    /// ending the attempt: only on QUIC, and only before the host has identified itself.
+    private var canFallBack: Bool {
+        transport == .quic && receiveCipher == nil && !isFinished
+    }
+
+    /// Drops the QUIC attempt and restarts the same attempt over TCP from scratch.
+    private func fallBackToTCP() {
+        guard canFallBack else { return }
+        let quic = connection
+        quic.stateUpdateHandler = nil
+        quic.cancel()
+        transport = .tcp
+        ephemeralKey = nil
+        reader = RDFrameReader()
+        reader.maxPayload = RDService.maxHandshakePayload
+        connection = NWConnection(to: tcpEndpoint, using: Self.makeParameters())
+        startCurrentConnection()
     }
 
     /// Closes the connection without reporting an event.
@@ -147,20 +200,38 @@ final class ClientConnection: @unchecked Sendable {
         guard !isFinished else { return }
         switch state {
         case .ready:
-            onEvent(.ready(connection.currentPath?.remoteEndpoint))
+            if !reportedReady {
+                reportedReady = true
+                onEvent(.ready(reportedRemoteEndpoint()))
+            }
             sendHello()
             receive()
         case .failed(let error):
+            if canFallBack { return fallBackToTCP() }
             finish(.failed(error.localizedDescription))
         case .cancelled:
+            if canFallBack { return fallBackToTCP() }
             finish(.closed)
         case .waiting(let error):
+            if canFallBack { return fallBackToTCP() }
             if case .posix(let code) = error, code == .ECONNREFUSED || code == .EHOSTUNREACH || code == .ENETUNREACH {
                 finish(.failed(error.localizedDescription))
             }
         default:
             break
         }
+    }
+
+    /// The remote endpoint as a TCP address, which is what a reconnect dials: over QUIC
+    /// the UDP port may differ, so it's swapped for the TCP one when that's known.
+    private func reportedRemoteEndpoint() -> NWEndpoint? {
+        let remote = connection.currentPath?.remoteEndpoint
+        guard transport == .quic else { return remote }
+        if case .hostPort(let host, _)? = remote, case .hostPort(_, let tcpPort) = tcpEndpoint {
+            return .hostPort(host: host, port: tcpPort)
+        }
+        // A Bonjour service is only tried over QUIC on the same port number.
+        return remote
     }
 
     private func finish(_ event: Event?) {
@@ -180,9 +251,12 @@ final class ClientConnection: @unchecked Sendable {
     }
 
     private func receive() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] chunk, _, isComplete, error in
-            guard let self, !self.isFinished else { return }
+        let current = connection
+        current.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] chunk, _, isComplete, error in
+            // A dropped QUIC attempt may still deliver a last callback; ignore it.
+            guard let self, !self.isFinished, self.connection === current else { return }
             if let error {
+                if self.canFallBack { return self.fallBackToTCP() }
                 self.finish(.failed(error.localizedDescription))
                 return
             }
@@ -191,6 +265,7 @@ final class ClientConnection: @unchecked Sendable {
                 self.processFrames()
             }
             if isComplete {
+                if self.canFallBack { return self.fallBackToTCP() }
                 self.finish(.closed)
                 return
             }

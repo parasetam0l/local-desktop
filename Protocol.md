@@ -1,6 +1,7 @@
 # LocalDesktop wire protocol (v2)
 
-TCP transport (Network.framework), default port 52341. Every message is framed as:
+TCP transport (Network.framework), default port 52341, or QUIC (see Transports). Every
+message is framed as:
 
 ```
 +--------------------+---------+---------------------------+
@@ -125,3 +126,27 @@ Bonjour service `_rd-desktop._tcp`. The advertised instance name is
 `<ComputerName> [<first 4 hex chars of serverId>]`, and the TXT record carries
 `sid` (the server id) and `name`. Clients use `sid` to recognise Macs they've paired with;
 because the server id is derived from the identity key, a spoofed `sid` fails the handshake.
+From 1.2.29 it also carries `quic=1` while the Mac listens for QUIC, plus `qport` (decimal)
+when the UDP port differs from the advertised TCP port.
+
+## Transports
+
+From 1.2.29 the Mac listens on two transports that carry exactly the same byte stream
+(framing, handshake, encryption and every message above are unchanged):
+
+- **TCP** on the advertised port (default 52341). Always available; old clients and
+  hosts reached without TXT information (recent hosts, a typed address) use only this.
+- **QUIC** on UDP, same port number when free (else `qport`), ALPN `localdesktop/1`.
+  The whole protocol runs over **one client-opened bidirectional stream**; the Mac allows
+  one stream per QUIC connection and treats it like a TCP connection. No datagrams yet.
+
+A client that sees `quic=1` tries QUIC first and falls back to TCP, starting the attempt
+over (new `hello`, new ephemeral key), when QUIC isn't ready within about 1 s or fails
+before `serverHello`. After `serverHello` there is no fallback: a failure ends the
+connection as it would on TCP. A Bonjour service whose `qport` differs is reached over TCP.
+
+**TLS carries no trust.** QUIC requires TLS 1.3, so the Mac presents a self-signed P-256
+certificate (made once, kept in `~/Library/Application Support/localdesktop.host/quic-tls.*`)
+and the client accepts any certificate. Authentication and confidentiality come only from
+the handshake above (identity-key signature, PIN pairing, device signature) and its
+session keys, exactly as over TCP; TLS is an extra, unauthenticated layer.

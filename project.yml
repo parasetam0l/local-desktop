@@ -117,6 +117,7 @@ targets:
       - Shared/DockGapFit.swift
       - Shared/RDCrypto.swift
       - Shared/RDSecureChannel.swift
+      - Shared/RDTransport.swift
       - Host/PINSecurity.swift
       - Host/LocalInputBlocker.swift
       - Host/CongestionEstimator.swift
