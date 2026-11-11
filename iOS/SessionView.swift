@@ -67,6 +67,13 @@ struct SessionView: View {
         isConnected && keyboardVisible && scenePhase == .active ? modifiers.union(hardwareModifiers) : []
     }
 
+    /// Room the key bar takes above a docked keyboard (an iPhone's, or a docked iPad
+    /// keyboard); a floating keyboard carries the key bar with it, away from the bottom edge.
+    private var dockedKeyBarInset: CGFloat {
+        isConnected && keyboardVisible && (keyboardFrame.map { $0.minX <= 1 && $0.height > 0 } ?? false)
+            ? KeyBar.height : 0
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -97,6 +104,8 @@ struct SessionView: View {
                     isOneFingerScroll: app.settings.isOneFingerScroll
                 )
                 .allowsHitTesting(isConnected && (!touchpadMode || session.isViewOnly))
+                // The picture ends above the key bar rather than behind it.
+                .padding(.bottom, dockedKeyBarInset)
             }
 
             if touchpadMode, isConnected, !session.isViewOnly {
@@ -195,10 +204,8 @@ struct SessionView: View {
                     app: app,
                     session: session,
                     canvasController: canvasController,
-                    // Keeps clear of the key bar, which is drawn on top of the keyboard. A
-                    // floating keyboard carries the key bar with it, away from the bottom edge.
-                    bottomInset: keyboardVisible && (keyboardFrame.map { $0.minX <= 1 } ?? false)
-                        ? KeyBar.height + 4 : 0,
+                    // Keeps clear of the key bar, which is drawn on top of the keyboard.
+                    bottomInset: dockedKeyBarInset > 0 ? dockedKeyBarInset + 4 : 0,
                     onKeyboardToggle: {
                         keyboardAutoShown = false
                         keyboardVisible.toggle()

@@ -33,10 +33,13 @@ struct SessionControlBar: View {
     private static let barSpacing: CGFloat = 2
     /// One more with a Mac that can act on its windows.
     private var buttonCount: CGFloat { session.macWindowActions ? 7 : 6 }
-    private static let handleLength: CGFloat = 44
-    private static let handleThickness: CGFloat = 22
+    /// The handle's size grows with the Handle size setting (1 is the small one).
+    private var handleScale: CGFloat { CGFloat(app.settings.handleScale ?? 1) }
+    private var handleLength: CGFloat { 44 * handleScale }
+    private var handleThickness: CGFloat { 22 * handleScale }
     private static let margin: CGFloat = 8
 
+    private var handleOpacity: Double { min(max(app.settings.handleOpacity ?? 0.85, 0.2), 1) }
     private var edge: Edge { Edge(rawValue: edgeRaw) ?? .bottom }
     private var isVertical: Bool { edge == .leading || edge == .trailing }
     private var isPresenting: Bool { showApps || showPanel || showWindow || confirmDisconnect }
@@ -53,9 +56,25 @@ struct SessionControlBar: View {
     var body: some View {
         GeometryReader { proxy in
             let size = barSize
+            let shape = RoundedRectangle(cornerRadius: collapsed ? handleThickness / 2 : 22,
+                                         style: .continuous)
+            // One shape that is the handle when collapsed and grows into the bar from it.
             bar
                 .frame(width: size.width, height: size.height)
-                .contentShape(Rectangle())
+                .clipShape(shape)
+                .background {
+                    ZStack {
+                        shape.fill(SessionStyle.panel.opacity(0.94))
+                            .overlay(shape.strokeBorder(SessionStyle.hairline, lineWidth: 0.5))
+                            .opacity(collapsed ? 0 : 1)
+                        // Solid accent with a light edge, so it stands out on any desktop.
+                        shape.fill(SessionStyle.accent)
+                            .overlay(shape.strokeBorder(Color.white.opacity(0.45), lineWidth: 1))
+                            .shadow(color: .black.opacity(0.45), radius: 4, y: 1)
+                            .opacity(collapsed ? handleOpacity : 0)
+                    }
+                }
+                .contentShape(shape)
                 .highPriorityGesture(dragGesture(in: proxy.size))
                 .position(position(in: proxy.size, barSize: size))
                 .animation(.snappy(duration: 0.25), value: collapsed)
@@ -80,8 +99,8 @@ struct SessionControlBar: View {
         let length: CGFloat
         let thickness: CGFloat
         if collapsed {
-            length = Self.handleLength
-            thickness = Self.handleThickness
+            length = handleLength
+            thickness = handleThickness
         } else {
             let along = isVertical ? Self.buttonSize.height : Self.buttonSize.width
             let across = isVertical ? Self.buttonSize.width : Self.buttonSize.height
@@ -217,8 +236,8 @@ struct SessionControlBar: View {
                 }
             }
             .padding(Self.barPadding)
-            .sessionSurface(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .fixedSize()
+            .scaleEffect(collapsed ? 0.5 : 1)
             .opacity(collapsed ? 0 : 1)
             .allowsHitTesting(!collapsed)
             .accessibilityHidden(collapsed)
@@ -229,20 +248,17 @@ struct SessionControlBar: View {
                     activity += 1
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.footnote.weight(.bold))
+                        .font(.system(size: 13 * handleScale, weight: .bold))
                         .rotationEffect(isVertical ? .degrees(90) : .zero)
                         .foregroundStyle(.white)
-                        .frame(width: isVertical ? Self.handleThickness : Self.handleLength,
-                               height: isVertical ? Self.handleLength : Self.handleThickness)
-                        // Solid accent with a light edge, so it stands out on any desktop.
-                        .background(SessionStyle.accent, in: Capsule())
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.45), lineWidth: 1))
-                        .shadow(color: .black.opacity(0.45), radius: 4, y: 1)
-                        .opacity(0.85)
+                        .frame(width: isVertical ? handleThickness : handleLength,
+                               height: isVertical ? handleLength : handleThickness)
+                        .opacity(max(handleOpacity, 0.5))
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Show session controls")
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .scale(scale: 2)))
             }
         }
     }

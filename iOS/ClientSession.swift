@@ -68,8 +68,14 @@ final class ClientSession: ObservableObject {
     /// Whether to ask the Mac to hide its Dock when a connection starts (from Settings).
     var defaultHideDock = false
     private var appliedDefaultHideDock = false
-    /// Show the keyboard when a click lands in a text field on the Mac (from Settings).
-    var autoKeyboard = false
+    /// Show the keyboard when a click lands in a text field on the Mac. It starts from
+    /// Settings and the session panel changes it for this session only.
+    @Published var autoKeyboard = false {
+        didSet {
+            guard autoKeyboard != oldValue, sentTextFocusPreference else { return }
+            sendJSON(.setTextFocusReports, RDSetTextFocusReportsMsg(enabled: autoKeyboard))
+        }
+    }
     private var sentTextFocusPreference = false
     /// Whether this session shares the clipboard with the Mac. It starts from Settings and
     /// the session panel changes it for this session only.

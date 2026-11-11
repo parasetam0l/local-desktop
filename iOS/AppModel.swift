@@ -44,6 +44,10 @@ struct AppSettings: Codable {
     var shareClipboard: Bool? = nil
     /// Sessions hide the status bar and dim the home indicator (on unless turned off).
     var fullScreen: Bool? = nil
+    /// How opaque the collapsed session controls' handle is, 0.2 to 1 (0.85 unless changed).
+    var handleOpacity: Double? = nil
+    /// How big the handle is: 1 small (the default), 1.4 medium, 1.8 large.
+    var handleScale: Double? = nil
     /// Ids of the key bar's favourite keys; nil until the user changes the default set.
     var favouriteKeys: [String]? = nil
 

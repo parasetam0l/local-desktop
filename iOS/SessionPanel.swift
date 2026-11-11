@@ -115,6 +115,7 @@ struct SessionPanel: View {
                                isOn: Binding(get: { hidesMacDock }, set: { session.setHidesMacDock($0) }))
             }
             PanelToggleRow(title: "Share clipboard", isOn: $session.sharesClipboard)
+            PanelToggleRow(title: "Show keyboard for text fields", isOn: $session.autoKeyboard)
             PanelButtonRow(title: "Brightness and volume", symbol: "chevron.right") {
                 showHardwareSheet = true
             }
@@ -149,6 +150,8 @@ struct SessionPanel: View {
             PanelButtonRow(title: "Refresh picture", symbol: "arrow.triangle.2.circlepath") {
                 session.requestKeyframe(reason: "user_refresh")
             }
+            HandleSizeRow(app: app)
+            HandleOpacityRow(app: app)
             PanelToggleRow(title: "Performance readout",
                            isOn: Binding(get: { session.showDebugHUD },
                                          set: { on in withAnimation { session.showDebugHUD = on } }))
@@ -343,6 +346,46 @@ struct PanelMenuRow<Choices: View>: View {
                     .foregroundStyle(SessionStyle.secondaryText)
             }
             .contentShape(Rectangle())
+        }
+    }
+}
+
+/// How big the collapsed session controls' handle is.
+struct HandleSizeRow: View {
+    @ObservedObject var app: AppModel
+
+    private static let sizes: [(label: String, value: Double)] = [("Small", 1), ("Medium", 1.4), ("Large", 1.8)]
+
+    var body: some View {
+        PanelRow {
+            Text("Handle size")
+            Spacer(minLength: 12)
+            Picker("Handle size", selection: Binding(get: { app.settings.handleScale ?? 1 },
+                                                     set: { app.settings.handleScale = $0 })) {
+                ForEach(Self.sizes, id: \.value) { size in
+                    Text(size.label).tag(size.value)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 200)
+        }
+    }
+}
+
+/// How see-through the collapsed session controls' handle is.
+struct HandleOpacityRow: View {
+    @ObservedObject var app: AppModel
+
+    var body: some View {
+        PanelRow {
+            Text("Handle opacity")
+            Spacer(minLength: 12)
+            Slider(value: Binding(get: { app.settings.handleOpacity ?? 0.85 },
+                                  set: { app.settings.handleOpacity = $0 }),
+                   in: 0.2...1)
+                .frame(maxWidth: 180)
+                .accessibilityValue("\(Int(((app.settings.handleOpacity ?? 0.85) * 100).rounded())) percent")
         }
     }
 }

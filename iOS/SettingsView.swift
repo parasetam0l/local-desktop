@@ -91,6 +91,8 @@ struct SettingsView: View {
                            isOn: Binding(get: { app.settings.hideDock ?? false }, set: { app.settings.hideDock = $0 }))
             PanelToggleRow(title: "Full screen during sessions",
                            isOn: Binding(get: { app.settings.fullScreen ?? true }, set: { app.settings.fullScreen = $0 }))
+            HandleSizeRow(app: app)
+            HandleOpacityRow(app: app)
         }
     }
 
