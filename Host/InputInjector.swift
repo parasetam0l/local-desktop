@@ -68,6 +68,7 @@ enum InputInjector {
     static func moveAbs(_ x: Double, _ y: Double, within bounds: CGRect) {
         let point = CGPoint(x: clamp(x, bounds.minX, bounds.maxX - 1),
                             y: clamp(y, bounds.minY, bounds.maxY - 1))
+        let previous = currentPositionTopLeft
         trackedPosition = point
         trackedAt = ProcessInfo.processInfo.systemUptime
         CGWarpMouseCursorPosition(point)
@@ -86,6 +87,14 @@ enum InputInjector {
             (type, button) = (.mouseMoved, .left)
         }
         if let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) {
+            // The warp above already moved the cursor, so the system would give this event
+            // zero deltas. Some UIs follow the deltas rather than the position (the
+            // screenshot tool's selection handles never moved), so set them explicitly.
+            event.setIntegerValueField(.mouseEventDeltaX, value: Int64((point.x - previous.x).rounded()))
+            event.setIntegerValueField(.mouseEventDeltaY, value: Int64((point.y - previous.y).rounded()))
+            if type != .mouseMoved {
+                event.setIntegerValueField(.mouseEventClickState, value: clickCount)
+            }
             event.flags = heldModifiers
             event.post(tap: .cghidEventTap)
         }
