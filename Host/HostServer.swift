@@ -31,6 +31,10 @@ final class HostServer: ObservableObject {
     private var displayBeforeSizedMirror: CGDirectDisplayID?
     /// A size a client asked for while the lid was shut with no display to lay out.
     private var pendingMirrorSize: RDMirrorSize?
+    /// A new virtual display is being set up, which takes a moment.
+    private var isStartingSizedMirror = false
+    /// What was asked for while it was (the inner nil is the Mac's own layout); done next.
+    private var mirrorSizeAfterStart: RDMirrorSize??
     private var mirrorSizeRetries = 0
     /// Puts the desktop size and the Dock back a while after the last client left.
     private var sessionSettingsReset: DispatchWorkItem?
@@ -378,6 +382,8 @@ final class HostServer: ObservableObject {
     /// Re-reads the Mac's displays; clients hear about any change. A chosen display
     /// that's gone gives way to the main one.
     func refreshDisplays() {
+        // A display still being set up is no desktop yet; this runs again once it is.
+        guard !isStartingSizedMirror else { return }
         displays = Self.currentDisplays()
         // The sized mirror's display is listed a moment after it is created.
         if let mirror = sizedMirror.displayID, selectedDisplayID == mirror, CGDisplayIsOnline(mirror) != 0 { return }
@@ -433,6 +439,10 @@ final class HostServer: ObservableObject {
     func setSizedMirror(_ size: RDMirrorSize?) {
         let wanted = size.map(SizedMirror.clamped)
         HostLog.write("size wanted=\(wanted?.label ?? "own") current=\(mirrorSize?.label ?? "own") headless=\(isHeadlessClosedLid) | \(HostLog.displaySummary())")
+        guard !isStartingSizedMirror else {
+            mirrorSizeAfterStart = .some(wanted)
+            return
+        }
         guard wanted != mirrorSize else { return }
         guard let wanted else {
             pendingMirrorSize = nil
@@ -449,7 +459,27 @@ final class HostServer: ObservableObject {
         }
         pendingMirrorSize = nil
         if mirrorSize == nil { displayBeforeSizedMirror = selectedDisplayID }
-        guard let id = sizedMirror.start(size: wanted) else {
+        // A size change of the display already there (a turn of the device, say) leaves
+        // the windows where they were, so they are fitted to it afterwards.
+        let areasBefore = mirrorSize != nil ? WindowActions.screenAreas() : nil
+        isStartingSizedMirror = true
+        Task { [weak self] in
+            guard let self else { return }
+            let id = await self.sizedMirror.start(size: wanted)
+            self.isStartingSizedMirror = false
+            self.finishSizedMirror(wanted, display: id)
+            if id != nil, let areasBefore {
+                WindowActions.fitWindows(since: areasBefore, settling: .milliseconds(300))
+            }
+            if let next = self.mirrorSizeAfterStart {
+                self.mirrorSizeAfterStart = nil
+                self.setSizedMirror(next)
+            }
+        }
+    }
+
+    private func finishSizedMirror(_ wanted: RDMirrorSize, display: CGDirectDisplayID?) {
+        guard let id = display else {
             HostLog.write("size failed lid=\(isLidClosed) tries=\(mirrorSizeRetries) | \(HostLog.displaySummary())")
             // Nothing may be left of an earlier virtual display, so the mode is off now.
             endSizedMirror(force: true)
@@ -466,6 +496,11 @@ final class HostServer: ObservableObject {
             }
             return
         }
+        // The last client left while the display was being set up.
+        guard running, !activeSessions.isEmpty else {
+            endSizedMirror(force: true)
+            return
+        }
         mirrorSizeRetries = 0
         HostLog.write("size started display=\(id) | \(HostLog.displaySummary())")
         mirrorSize = wanted
@@ -478,9 +513,17 @@ final class HostServer: ObservableObject {
     /// that only dropped or went to the background comes back to the same desktop, without
     /// the displays being rebuilt (which, with the lid shut, removes the only display and
     /// locks the Mac). With the lid open the Mac's own screen is in use, so the wait is short.
-    private func scheduleSessionSettingsReset() {
+    private func scheduleSessionSettingsReset(leftOnPurpose: Bool) {
         sessionSettingsReset?.cancel()
         guard mirrorSize != nil || hidesDock else { return }
+        // Nobody is coming back after pressing Disconnect, so there is nothing to wait
+        // for. With the lid shut the wait stays: removing the display would lock the Mac.
+        if leftOnPurpose, !isLidClosed {
+            sessionSettingsReset = nil
+            endSizedMirror()
+            setHidesDock(false)
+            return
+        }
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.activeSessions.isEmpty else { return }
@@ -490,10 +533,14 @@ final class HostServer: ObservableObject {
             }
         }
         sessionSettingsReset = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (isLidClosed ? 180 : 20), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (isLidClosed ? 180 : 3), execute: work)
     }
 
     private func endSizedMirror(force: Bool = false) {
+        guard !isStartingSizedMirror else {
+            mirrorSizeAfterStart = .some(nil)
+            return
+        }
         guard force || mirrorSize != nil else { return }
         HostLog.write("size ended force=\(force) sessions=\(activeSessions.count)")
         sizedMirror.stop()
@@ -636,7 +683,7 @@ final class HostServer: ObservableObject {
             wakeRequestedWithClosedLid = false
             pendingMirrorSize = nil
             mirrorSizeRetries = 0
-            scheduleSessionSettingsReset()
+            scheduleSessionSettingsReset(leftOnPurpose: session.leftOnPurpose)
             lid.stop()
             power.release()
             ScreenStreamer.shared.stop()
@@ -725,7 +772,7 @@ final class HostServer: ObservableObject {
     func setHidesDock(_ on: Bool) {
         guard DockHider.isAvailable, on != hidesDock, !on || !activeSessions.isEmpty else { return }
         hidesDock = on
-        if on { DockHider.hide() } else { DockHider.restore() }
+        WindowActions.fitWindowsToDock { if on { DockHider.hide() } else { DockHider.restore() } }
         scheduleHostStateBroadcast()
     }
 

@@ -83,6 +83,9 @@ final class ClientSession {
 
     /// Ends the session. With a reason, an active client is sent `bye` first so it
     /// knows not to reconnect.
+    /// The client said goodbye because its user pressed Disconnect.
+    private(set) var leftOnPurpose = false
+
     func close(sendingBye reason: String? = nil) {
         guard phase != .closed else { return }
         if let reason, phase == .active {
@@ -472,6 +475,7 @@ final class ClientSession {
             server?.updateBitrate()
 
         case .bye:
+            leftOnPurpose = RDJSON.decode(ByeMsg.self, from: payload)?.reason == RDByeReason.userDisconnect
             finish(reason: "client disconnected")
 
         default:

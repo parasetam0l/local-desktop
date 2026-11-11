@@ -10,7 +10,7 @@ enum WindowActions {
 
     /// A screen's usable area (without menu bar and Dock) in the top-left based
     /// coordinates accessibility uses.
-    private struct ScreenArea {
+    struct ScreenArea {
         let full: CGRect
         let usable: CGRect
     }
@@ -56,6 +56,98 @@ enum WindowActions {
                 MainActor.assumeIsolated { describe(after: action == .windowFullScreen ? 1.0 : 0.45, completion: completion) }
             }
         }
+    }
+
+    /// Does `change`, which shows or hides the Dock, then fits the windows against it to
+    /// the room there is now: macOS leaves open windows where they are.
+    @MainActor
+    static func fitWindowsToDock(around change: () -> Void) {
+        let before = screenAreas()
+        change()
+        fitWindows(since: before)
+    }
+
+    /// Fits the windows to a change of the usable area of a screen since `before`: their
+    /// edges against the old limits follow them. `settling` gives macOS time to finish
+    /// moving windows itself, as it does when a display changes size.
+    @MainActor
+    static func fitWindows(since before: [UInt32: ScreenArea], settling: Duration = .zero) {
+        fitGeneration += 1
+        let generation = fitGeneration
+        Task { @MainActor in
+            @MainActor func changes() -> [AreaChange] {
+                screenAreas().compactMap { id, new in
+                    guard let old = before[id], DockGapFit.differs(old.usable, new.usable) else { return nil }
+                    return AreaChange(old: old.usable, new: new.usable, full: old.full.union(new.full))
+                }
+            }
+            // The usable area follows the change a moment later.
+            let deadline = Date().addingTimeInterval(2)
+            while changes().isEmpty, Date() < deadline, generation == fitGeneration {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            if settling > .zero { try? await Task.sleep(for: settling) }
+            let settled = changes()
+            guard generation == fitGeneration, !settled.isEmpty else { return }
+            // A window on a screen that didn't change is not one of these, wherever the
+            // changed screen's old area was.
+            let others = screenAreas().values.map(\.full).filter { full in !settled.contains { $0.full.contains(full) } }
+            let pids = NSWorkspace.shared.runningApplications
+                .filter { $0.activationPolicy == .regular && !$0.isHidden }
+                .map(\.processIdentifier)
+            queue.async {
+                let fitted = pids.reduce(0) { $0 + fitWindows(of: $1, to: settled, others: others) }
+                HostLog.write("windows fitted=\(fitted)")
+            }
+        }
+    }
+
+    @MainActor private static var fitGeneration = 0
+
+    /// How a screen's usable area changed; `full` covers the screen before and after.
+    private struct AreaChange {
+        let old: CGRect
+        let new: CGRect
+        let full: CGRect
+    }
+
+    @MainActor
+    static func screenAreas() -> [UInt32: ScreenArea] {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        var areas: [UInt32: ScreenArea] = [:]
+        for screen in NSScreen.screens {
+            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
+            areas[id.uint32Value] = ScreenArea(full: flipped(screen.frame, primaryHeight: primaryHeight),
+                                               usable: flipped(screen.visibleFrame, primaryHeight: primaryHeight))
+        }
+        return areas
+    }
+
+    /// Fits one app's standard windows on the current Space; returns how many changed.
+    private static func fitWindows(of pid: pid_t, to changes: [AreaChange], others: [CGRect]) -> Int {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return 0 }
+        var fitted = 0
+        for window in windows {
+            AXUIElementSetMessagingTimeout(window, 0.5)
+            var subrole: CFTypeRef?
+            var resizable = DarwinBoolean(false)
+            guard AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole) == .success,
+                  subrole as? String == kAXStandardWindowSubrole,
+                  bool(window, kAXMinimizedAttribute) != true, bool(window, "AXFullScreen") != true,
+                  AXUIElementIsAttributeSettable(window, kAXSizeAttribute as CFString, &resizable) == .success,
+                  resizable.boolValue, let frame = frame(of: window) else { continue }
+            let center = CGPoint(x: frame.midX, y: frame.midY)
+            guard !others.contains(where: { $0.contains(center) }),
+                  let change = changes.first(where: { $0.full.contains(center) }),
+                  let target = DockGapFit.fitted(frame, from: change.old, to: change.new, screen: change.full),
+                  setFrame(target, of: window) else { continue }
+            fitted += 1
+        }
+        return fitted
     }
 
     private static func flipped(_ rect: CGRect, primaryHeight: CGFloat) -> CGRect {

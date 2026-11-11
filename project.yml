@@ -114,6 +114,7 @@ targets:
     sources:
       - Tests
       - Shared/RDProtocol.swift
+      - Shared/DockGapFit.swift
       - Shared/RDCrypto.swift
       - Shared/RDSecureChannel.swift
       - Host/PINSecurity.swift

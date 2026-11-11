@@ -10,6 +10,7 @@ import CoreGraphics
 /// are looked up at run time, so the app still launches (and reports the mode as
 /// unavailable) on a macOS that no longer has them. macOS removes the display and the
 /// mirroring by itself when this process exits, so a crash can't leave the Mac mirrored.
+@MainActor
 final class SizedMirror {
     /// Limits for either side of a requested size, in points (a portrait desktop is
     /// taller than wide, so both sides share them).
@@ -42,7 +43,11 @@ final class SizedMirror {
     /// display mirror it, or resizes the one already there (no display is removed for
     /// that, which matters with the lid shut, where it is the only one). Returns the
     /// virtual display's id, or nil (with nothing left behind) when that failed.
-    func start(size requested: RDMirrorSize) -> CGDirectDisplayID? {
+    ///
+    /// A new display takes a moment, and this waits for it without holding the main
+    /// thread: macOS tells this process about display changes there, so until the main
+    /// thread is free `CGDisplayBounds` keeps the old answer.
+    func start(size requested: RDMirrorSize) async -> CGDirectDisplayID? {
         let size = Self.clamped(requested)
         if let display = virtualDisplay, let id = displayID, CGDisplayIsOnline(id) != 0 {
             guard Self.apply(size, to: display) else { return nil }
@@ -51,7 +56,7 @@ final class SizedMirror {
             return id
         }
         stop()
-        guard let (display, id) = Self.makeRetinaDisplay(size: size) else { return nil }
+        guard let (display, id) = await Self.makeRetinaDisplay(size: size) else { return nil }
 
         // The virtual display is the one being mirrored, so its size is the desktop's size
         // (and, mirrored by the main display, it becomes the main display itself).
@@ -159,16 +164,16 @@ final class SizedMirror {
 
     /// A new virtual display of `size` points that is online and Retina, or nil (the
     /// display is gone again by then).
-    static func makeRetinaDisplay(size: RDMirrorSize) -> (NSObject, CGDirectDisplayID)? {
+    static func makeRetinaDisplay(size: RDMirrorSize) async -> (NSObject, CGDirectDisplayID)? {
         let first = size.width >= retinaStartWidth ? size : startSize
         guard let (display, id) = makeDisplay(size: first) else { return nil }
         // The display takes a moment to come online; configuring it before then fails.
-        guard waitUntil({ CGDisplayIsOnline(id) != 0 }) else { return nil }
+        guard await waitUntil({ CGDisplayIsOnline(id) != 0 }) else { return nil }
         if first != size {
-            guard waitUntil({ hasSize(first, id) }), apply(size, to: display) else { return nil }
+            guard await waitUntil({ hasSize(first, id) }), apply(size, to: display) else { return nil }
         }
         // Twice the size here means macOS took it for a plain display after all.
-        guard waitUntil({ hasSize(size, id) }) else { return nil }
+        guard await waitUntil({ hasSize(size, id) }) else { return nil }
         return (display, id)
     }
 
@@ -177,11 +182,11 @@ final class SizedMirror {
         return Int(bounds.width) == size.width && Int(bounds.height) == size.height
     }
 
-    private static func waitUntil(_ condition: () -> Bool) -> Bool {
+    private static func waitUntil(_ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(2)
         while !condition() {
             if Date() >= deadline { return false }
-            usleep(50_000)
+            try? await Task.sleep(for: .milliseconds(50))
         }
         return true
     }
