@@ -58,7 +58,7 @@ struct SettingsView: View {
     // MARK: Sections
 
     private var displaySection: some View {
-        PanelSection("Display", footer: "Desktop size lays the Mac's desktop out at that size for each session, and the Mac's own screen shows the same layout. A size that fills the screen follows it when you turn the device.") {
+        PanelSection("Display", footer: "Desktop size lays the Mac's desktop out at that size for each session, and the Mac's own screen shows the same layout. A size that fills the screen follows it when you turn the device. Full screen hides the status bar and dims the home indicator during sessions; swipes from the screen's edges then need a second swipe.") {
             PanelMenuRow(title: "Default quality", value: app.settings.preset.shortLabel) {
                 Picker("Default quality", selection: $app.settings.qualityRaw) {
                     ForEach(RDQualityPreset.allCases) { preset in
@@ -89,6 +89,8 @@ struct SettingsView: View {
             }
             PanelToggleRow(title: "Hide the Mac's Dock during sessions",
                            isOn: Binding(get: { app.settings.hideDock ?? false }, set: { app.settings.hideDock = $0 }))
+            PanelToggleRow(title: "Full screen during sessions",
+                           isOn: Binding(get: { app.settings.fullScreen ?? true }, set: { app.settings.fullScreen = $0 }))
         }
     }
 

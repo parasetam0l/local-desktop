@@ -134,9 +134,15 @@ struct ConnectView: View {
         .fullScreenCover(item: $app.session, onDismiss: {
             app.endSession()
         }) { session in
+            let fullScreen = app.settings.fullScreen ?? true
             SessionView(session: session, app: app, onDismiss: {
                 app.endSession()
             })
+            // Like a full-screen game: no status bar, a home indicator that fades, and
+            // edge swipes that need a second swipe so drags near the edge reach the Mac.
+            .statusBarHidden(fullScreen)
+            .persistentSystemOverlays(fullScreen ? .hidden : .automatic)
+            .defersSystemGestures(on: fullScreen ? .all : [])
         }
     }
 

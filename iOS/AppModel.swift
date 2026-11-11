@@ -42,6 +42,8 @@ struct AppSettings: Codable {
     var autoKeyboard: Bool? = nil
     /// Sessions share the clipboard with the Mac (off unless turned on).
     var shareClipboard: Bool? = nil
+    /// Sessions hide the status bar and dim the home indicator (on unless turned off).
+    var fullScreen: Bool? = nil
     /// Ids of the key bar's favourite keys; nil until the user changes the default set.
     var favouriteKeys: [String]? = nil
 
