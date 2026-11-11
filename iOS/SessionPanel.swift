@@ -156,7 +156,9 @@ struct SessionPanel: View {
     }
 
     private var touchSection: some View {
-        PanelSection("Touch", footer: touchpadMode
+        PanelSection("Touch", footer: session.isViewOnly
+                     ? "View only: you can watch, zoom and pan, but taps, scrolls and typing don't reach the Mac."
+                     : touchpadMode
                      ? "Touchpad: drag anywhere to move the pointer, tap to click."
                      : "Direct touch: tap and drag right where your finger is.") {
             PanelRow {
@@ -186,6 +188,7 @@ struct SessionPanel: View {
             }
             PanelToggleRow(title: "Lock zoom", isOn: $app.settings.isZoomLocked)
             PanelToggleRow(title: "Lock orientation", isOn: $app.isOrientationLocked)
+            PanelToggleRow(title: "View only", isOn: $session.isViewOnly)
             PanelButtonRow(title: "Gestures", symbol: "questionmark.circle") {
                 showGestures = true
             }

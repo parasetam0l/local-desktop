@@ -96,10 +96,10 @@ struct SessionView: View {
                     isZoomLocked: app.settings.isZoomLocked,
                     isOneFingerScroll: app.settings.isOneFingerScroll
                 )
-                .allowsHitTesting(isConnected && !touchpadMode)
+                .allowsHitTesting(isConnected && (!touchpadMode || session.isViewOnly))
             }
 
-            if touchpadMode, isConnected {
+            if touchpadMode, isConnected, !session.isViewOnly {
                 TouchpadOverlay(
                     controller: canvasController,
                     onMove: moveVirtualCursor,

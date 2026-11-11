@@ -91,6 +91,8 @@ final class ClientSession: ObservableObject {
     /// The Mac's front window as last reported (see `requestFrontWindow`).
     @Published private(set) var frontWindow: RDFrontWindowMsg?
     @Published var showDebugHUD = false
+    /// Watch only: no pointer, scroll or keyboard input reaches the Mac.
+    @Published var isViewOnly = false
     /// The outcome of something the user asked the Mac for, to show for a moment.
     @Published private(set) var notice: SessionNotice?
     /// A desktop size was asked for and the Mac hasn't answered yet; the inner nil is
@@ -764,8 +766,13 @@ final class ClientSession: ObservableObject {
         connection?.send(wire, payload)
     }
 
+    /// What View only holds back.
+    private static let inputWires: Set<RDWire> = [.mouseMoveAbs, .mouseMoveRel, .mouseDown, .mouseUp,
+                                                  .scroll, .keyEvent, .textEvent]
+
     private func sendJSON<T: Encodable>(_ wire: RDWire, _ message: T) {
         guard phase == .connected else { return }
+        if isViewOnly, Self.inputWires.contains(wire) { return }
         send(wire, RDJSON.encode(message))
     }
 
