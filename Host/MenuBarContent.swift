@@ -93,33 +93,37 @@ struct MenuBarContent: View {
     @State private var copiedAddress = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             header
+            VStack(alignment: .leading, spacing: 16) {
+                if !state.missingSetup.isEmpty {
+                    setupCallout
+                }
+                if let version = state.pendingUpdateVersion {
+                    updateBanner(version)
+                }
+                if let error = state.lastError {
+                    errorBanner(error)
+                }
+                if state.failedPINAttempts > 0 {
+                    lockoutBanner
+                }
 
-            if !state.missingSetup.isEmpty {
-                setupCallout
-            }
-            if let version = state.pendingUpdateVersion {
-                updateBanner(version)
-            }
-            if let error = state.lastError {
-                errorBanner(error)
-            }
-            if state.failedPINAttempts > 0 {
-                lockoutBanner
-            }
+                thisMacCard
+                if state.isSharing {
+                    streamCard
+                }
+                devicesCard
 
-            thisMacCard
-            if state.isSharing {
-                streamCard
+                footer
             }
-            devicesCard
-
-            Divider()
-            footer
+            .padding(.horizontal, 14)
+            .padding(.bottom, 14)
         }
-        .padding(14)
         .frame(width: 360)
+        .foregroundStyle(PanelStyle.primaryText)
+        .tint(PanelStyle.accent)
+        .background(PanelStyle.panel)
     }
 
     // MARK: Header
@@ -136,8 +140,8 @@ struct MenuBarContent: View {
     }
 
     private var statusColor: Color {
-        if !state.isSharing { return .secondary }
-        return state.clientName == nil ? .blue : .green
+        if !state.isSharing { return PanelStyle.secondaryText }
+        return state.clientName == nil ? PanelStyle.accent : .green
     }
 
     private var header: some View {
@@ -150,10 +154,18 @@ struct MenuBarContent: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("LocalDesktop")
                     .font(.headline)
-                Text(statusText)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    // The iOS session header's status dot.
+                    if state.isSharing {
+                        Circle()
+                            .fill(state.clientName == nil ? Color.orange : Color.green)
+                            .frame(width: 7, height: 7)
+                    }
+                    Text(statusText)
+                        .font(.subheadline)
+                        .foregroundStyle(PanelStyle.secondaryText)
+                        .lineLimit(1)
+                }
             }
             Spacer()
             Toggle("Sharing", isOn: Binding(get: { state.isSharing }, set: { [actions] in actions.setSharing($0) }))
@@ -162,6 +174,9 @@ struct MenuBarContent: View {
                 .disabled(!state.isSharing && !state.canStartSharing)
                 .help(state.isSharing ? "Stop sharing" : "Start sharing")
         }
+        .padding(.horizontal, 18)
+        .padding(.top, 16)
+        .padding(.bottom, 14)
     }
 
     // MARK: Banners
@@ -173,36 +188,32 @@ struct MenuBarContent: View {
             ForEach(state.missingSetup) { item in
                 Label(item.title, systemImage: item.symbol)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PanelStyle.secondaryText)
             }
             Button("Open Setup Assistant…", action: actions.openSetup)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(PanelButtonStyle(prominent: true))
                 .padding(.top, 2)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.orange.opacity(0.35)))
+        .panelNotice(.orange)
     }
 
     private func updateBanner(_ version: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.down.circle.fill")
-                .foregroundStyle(.blue)
+                .foregroundStyle(PanelStyle.accent)
             Text("Version \(version) is available")
                 .font(.subheadline.weight(.medium))
             Spacer()
             Button("Update…", action: actions.checkForUpdates)
-                .controlSize(.small)
+                .buttonStyle(PanelButtonStyle(compact: true))
         }
-        .padding(10)
-        .background(Color.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .panelNotice(PanelStyle.accent)
     }
 
     private func errorBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.octagon.fill")
-                .foregroundStyle(.red)
+                .foregroundStyle(PanelStyle.danger)
             Text(message)
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
@@ -212,12 +223,12 @@ struct MenuBarContent: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.caption.weight(.bold))
+                    .foregroundStyle(PanelStyle.secondaryText)
             }
             .buttonStyle(.borderless)
             .help("Dismiss")
         }
-        .padding(10)
-        .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .panelNotice(PanelStyle.danger)
     }
 
     private var lockoutBanner: some View {
@@ -225,38 +236,38 @@ struct MenuBarContent: View {
         let attempts = "\(state.failedPINAttempts) wrong PIN \(state.failedPINAttempts == 1 ? "attempt" : "attempts")"
         return HStack(spacing: 8) {
             Image(systemName: locked ? "lock.trianglebadge.exclamationmark.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(locked ? .red : .orange)
+                .foregroundStyle(locked ? PanelStyle.danger : .orange)
             VStack(alignment: .leading, spacing: 1) {
                 Text(attempts)
                     .font(.subheadline.weight(.medium))
                 if locked, let until = state.pinLockedUntil {
                     Text("PIN entry locked until \(until.formatted(date: .omitted, time: .shortened))")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(PanelStyle.secondaryText)
                 }
             }
             Spacer()
             Button(locked ? "Unlock" : "Clear", action: actions.clearLockout)
-                .controlSize(.small)
+                .buttonStyle(PanelButtonStyle(compact: true))
         }
-        .padding(10)
-        .background((locked ? Color.red : Color.orange).opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .panelNotice(locked ? PanelStyle.danger : .orange)
     }
 
-    // MARK: Cards
+    // MARK: Sections
 
     private var thisMacCard: some View {
-        Card(title: "This Mac") {
-            InfoRow("Name") {
+        PanelSection("This Mac") {
+            PanelValueRow("Name") {
                 Text(state.computerName)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
             if state.isSharing, let address = state.address {
-                InfoRow("Address") {
-                    HStack(spacing: 4) {
+                PanelValueRow("Address") {
+                    HStack(spacing: 6) {
                         Text(address)
-                            .font(.subheadline.monospaced())
+                            .font(.body.monospaced())
+                            .lineLimit(1)
                             .textSelection(.enabled)
                         Button {
                             NSPasteboard.general.clearContents()
@@ -265,31 +276,32 @@ struct MenuBarContent: View {
                         } label: {
                             Image(systemName: copiedAddress ? "checkmark" : "doc.on.doc")
                                 .font(.caption)
+                                .foregroundStyle(copiedAddress ? PanelStyle.accent : PanelStyle.secondaryText)
                         }
                         .buttonStyle(.borderless)
                         .help("Copy address")
                     }
                 }
             }
-            InfoRow("Fingerprint") {
+            PanelValueRow("Fingerprint") {
                 Text(state.fingerprint)
-                    .font(.subheadline.monospaced())
+                    .font(.body.monospaced())
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
             .help("Your iPhone shows the same fingerprint when pairing. Only enter the PIN if they match.")
 
-            Divider()
             if isChangingPIN {
                 pinEditor
             } else {
-                InfoRow("PIN") {
+                PanelValueRow("PIN") {
                     HStack(spacing: 8) {
                         Text(state.hasPIN ? "••••" : "Not set")
-                            .foregroundStyle(state.hasPIN ? .primary : .secondary)
                         Button(state.hasPIN ? "Change…" : "Set…") {
                             isChangingPIN = true
                         }
-                        .controlSize(.small)
+                        .buttonStyle(PanelButtonStyle(compact: true))
                     }
                 }
             }
@@ -301,35 +313,37 @@ struct MenuBarContent: View {
     }
 
     private var pinEditor: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(state.hasPIN ? "New PIN" : "Choose a PIN")
-                .font(.subheadline.weight(.medium))
-            HStack(spacing: 8) {
-                SecureField("4 digits", text: $newPIN)
-                SecureField("Confirm", text: $confirmPIN)
-            }
-            .textFieldStyle(.roundedBorder)
-            .font(.body.monospacedDigit())
-            HStack {
-                Text(!newPIN.isEmpty && !PINHasher.isValidFormat(newPIN) ? "Use exactly 4 digits."
-                     : (!confirmPIN.isEmpty && confirmPIN != newPIN ? "The PINs don't match." : " "))
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                Spacer()
-                Button("Cancel") { endPINEditing() }
-                    .controlSize(.small)
-                Button("Save") {
-                    let pin = newPIN
-                    isSavingPIN = true
-                    Task {
-                        await actions.changePIN(pin)
-                        isSavingPIN = false
-                        endPINEditing()
-                    }
+        PanelRow(verticalPadding: 10) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(state.hasPIN ? "New PIN" : "Choose a PIN")
+                    .font(.subheadline.weight(.medium))
+                HStack(spacing: 8) {
+                    SecureField("4 digits", text: $newPIN)
+                    SecureField("Confirm", text: $confirmPIN)
                 }
-                .controlSize(.small)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!pinValid || isSavingPIN)
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospacedDigit())
+                HStack(spacing: 6) {
+                    Text(!newPIN.isEmpty && !PINHasher.isValidFormat(newPIN) ? "Use exactly 4 digits."
+                         : (!confirmPIN.isEmpty && confirmPIN != newPIN ? "The PINs don't match." : " "))
+                        .font(.caption)
+                        .foregroundStyle(PanelStyle.danger)
+                    Spacer()
+                    Button("Cancel") { endPINEditing() }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                    Button("Save") {
+                        let pin = newPIN
+                        isSavingPIN = true
+                        Task {
+                            await actions.changePIN(pin)
+                            isSavingPIN = false
+                            endPINEditing()
+                        }
+                    }
+                    .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!pinValid || isSavingPIN)
+                }
             }
         }
     }
@@ -340,9 +354,15 @@ struct MenuBarContent: View {
         confirmPIN = ""
     }
 
+    private var localInputFooter: String {
+        if let error = state.localInputBlockError { return error }
+        if state.isBlockingLocalInput { return "Blocked now. Only connected devices can type and click." }
+        return "While a device is connected. Input comes back when the last one disconnects."
+    }
+
     private var streamCard: some View {
-        Card(title: "Stream", controlSize: .small) {
-            InfoRow("Quality") {
+        PanelSection("Stream", footer: localInputFooter, footerIsWarning: state.localInputBlockError != nil) {
+            PanelValueRow("Quality") {
                 Picker("Quality", selection: Binding(get: { state.preset }, set: { [actions] in actions.setPreset($0) })) {
                     ForEach(RDQualityPreset.allCases) { preset in
                         Text(preset.label).tag(preset)
@@ -351,7 +371,7 @@ struct MenuBarContent: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            InfoRow("Codec") {
+            PanelValueRow("Codec") {
                 Picker("Codec", selection: Binding(get: { state.codec }, set: { [actions] in actions.setCodec($0) })) {
                     ForEach(RDCodec.allCases) { codec in
                         Text(codec.label).tag(codec)
@@ -361,7 +381,7 @@ struct MenuBarContent: View {
                 .fixedSize()
             }
             if state.displays.count > 1 {
-                InfoRow("Display") {
+                PanelValueRow("Display") {
                     Picker("Display", selection: Binding(
                         get: { state.selectedDisplay ?? state.displays.first?.id ?? 0 },
                         set: { [actions] in actions.setDisplay($0) }
@@ -374,51 +394,43 @@ struct MenuBarContent: View {
                     .fixedSize()
                 }
             }
-            Divider()
-            Toggle(isOn: Binding(get: { state.blocksLocalInput }, set: { [actions] in actions.setBlocksLocalInput($0) })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Block this Mac's keyboard and trackpad")
-                    Group {
-                        if let error = state.localInputBlockError {
-                            Text(error).foregroundStyle(.red)
-                        } else if state.isBlockingLocalInput {
-                            Text("Blocked now. Only connected devices can type and click.")
-                        } else {
-                            Text("While a device is connected. Input comes back when the last one disconnects.")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
+            PanelRow {
+                Toggle("Block this Mac's keyboard and trackpad",
+                       isOn: Binding(get: { state.blocksLocalInput }, set: { [actions] in actions.setBlocksLocalInput($0) }))
+                    .toggleStyle(.switch)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .toggleStyle(.switch)
         }
+        .controlSize(.small)
     }
 
     private var devicesCard: some View {
-        Card(title: "Trusted Devices") {
+        PanelSection("Trusted Devices",
+                     footer: state.devices.isEmpty
+                        ? "A device is added here after it connects with the PIN and chooses to be trusted."
+                        : "A revoked device needs the PIN again to connect.") {
             if state.devices.isEmpty {
-                Text("None yet. A device is added here after it connects with the PIN and chooses to be trusted.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                PanelRow {
+                    Text("None yet")
+                        .foregroundStyle(PanelStyle.secondaryText)
+                    Spacer()
+                }
             } else {
                 ForEach(state.devices) { device in
-                    HStack(spacing: 10) {
+                    PanelRow(verticalPadding: 6) {
                         Image(systemName: device.name.localizedCaseInsensitiveContains("ipad") ? "ipad" : "iphone")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(PanelStyle.secondaryText)
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(device.name)
                                 .lineLimit(1)
                             Text("Trusted \(device.trustedAt.formatted(date: .abbreviated, time: .omitted))")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(PanelStyle.secondaryText)
                         }
-                        Spacer()
+                        Spacer(minLength: 12)
                         Button("Revoke") { actions.revoke(device.id) }
-                            .controlSize(.small)
+                            .buttonStyle(PanelButtonStyle(destructive: true, compact: true))
                             .help("This device will need the PIN again")
                     }
                 }
@@ -433,12 +445,12 @@ struct MenuBarContent: View {
             if let result = state.backgroundCheckResult {
                 Text(result)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PanelStyle.secondaryText)
             }
             HStack(spacing: 8) {
                 Text("Version \(state.appVersion)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PanelStyle.secondaryText)
                     .lineLimit(1)
                     .textSelection(.enabled)
                 Spacer()
@@ -454,16 +466,18 @@ struct MenuBarContent: View {
                     Divider()
                     Toggle("Open at Login", isOn: Binding(get: { state.launchAtLogin }, set: { [actions] in actions.setLaunchAtLogin($0) }))
                     Button("Setup Assistant…", action: actions.openSetup)
+                    Divider()
+                    Button("Quit LocalDesktop…") { confirmQuit() }
                 } label: {
                     Image(systemName: "gearshape")
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .help("Updates and settings")
-                Button("Quit", action: actions.quit)
+                .help("Updates, settings and Quit")
             }
             .controlSize(.small)
+            .padding(.horizontal, 4)
             if state.launchNeedsApproval {
                 HStack(spacing: 4) {
                     Text("Allow it in Login Items to open at login.")
@@ -472,58 +486,36 @@ struct MenuBarContent: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.orange)
+                .padding(.horizontal, 4)
             }
             if let error = state.launchError {
                 Text(error)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(PanelStyle.danger)
+                    .padding(.horizontal, 4)
             }
         }
     }
-}
 
-/// A titled, rounded group of rows.
-private struct Card<Content: View>: View {
-    let title: String
-    var controlSize: ControlSize = .regular
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 2)
-            VStack(alignment: .leading, spacing: 8) {
-                content
+    /// Asks before quitting, since a quit Mac can't be reached until someone opens the app on it.
+    /// An `NSAlert` rather than a SwiftUI `.alert`: the panel is a menu bar window that closes
+    /// as soon as it loses focus, and an alert attached to it would go with it (or not show).
+    private func confirmQuit() {
+        let quit = actions.quit
+        // Let the menu finish tracking and the panel close before the alert takes over.
+        Task { @MainActor in
+            NSApp.activate()
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Quit LocalDesktop?"
+            alert.informativeText = "Connected devices will be disconnected, and this Mac can't be reached until LocalDesktop is opened again."
+            // The first button is the default (Return), so Cancel goes first.
+            alert.addButton(withTitle: "Cancel")
+            let quitButton = alert.addButton(withTitle: "Quit")
+            quitButton.hasDestructiveAction = true
+            if alert.runModal() == .alertSecondButtonReturn {
+                quit()
             }
-            .controlSize(controlSize)
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
         }
-    }
-}
-
-/// "Label ……… value" row with a fixed label column.
-private struct InfoRow<Value: View>: View {
-    let label: String
-    @ViewBuilder var value: Value
-
-    init(_ label: String, @ViewBuilder value: () -> Value) {
-        self.label = label
-        self.value = value()
-    }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .frame(width: 80, alignment: .leading)
-            value
-            Spacer(minLength: 0)
-        }
-        .font(.subheadline)
     }
 }
