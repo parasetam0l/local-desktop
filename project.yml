@@ -119,6 +119,7 @@ targets:
       - Shared/RDSecureChannel.swift
       - Host/PINSecurity.swift
       - Host/LocalInputBlocker.swift
+      - Host/CongestionEstimator.swift
       - iOS/ClientConnection.swift
       - iOS/AppUpdater.swift
 schemes:

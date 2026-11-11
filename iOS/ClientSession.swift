@@ -299,6 +299,10 @@ final class ClientSession: ObservableObject {
             handleServerHello(identity)
         case .message(let wire, let payload):
             handleMessage(wire, payload: payload)
+        case .pong(let rttMs):
+            lastPongAt = Date()
+            lastRTT = rttMs
+            reportNetworkStatsIfNeeded()
         case .closed:
             if phase == .connected {
                 fail("Connection closed by host")
@@ -481,12 +485,6 @@ final class ClientSession: ObservableObject {
                 phase = .needPin
             }
 
-        case .pong:
-            lastPongAt = Date()
-            if let msg = RDJSON.decode(PingMsg.self, from: payload) {
-                lastRTT = max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)
-                reportNetworkStatsIfNeeded()
-            }
 
         case .hostState:
             guard let msg = RDJSON.decode(HostStateMsg.self, from: payload) else { break }
@@ -621,7 +619,9 @@ final class ClientSession: ObservableObject {
         stopPing()
         lastPongAt = Date()
         lastStatsReport = Date()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+        // Every second, and in the common run-loop modes so it keeps ticking while a
+        // finger is on the screen (the default mode pauses during touch tracking).
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] timer in
             guard let session = self else {
                 timer.invalidate()
                 return
@@ -630,6 +630,8 @@ final class ClientSession: ObservableObject {
                 session.pingTick()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pingTimer = timer
     }
 
     private func pingTick() {
@@ -670,7 +672,7 @@ final class ClientSession: ObservableObject {
         sendJSON(.networkStats, NetworkStatsMsg(rttMs: lastRTT,
                                                 decodeMs: decoded.decodeMs,
                                                 fps: fps,
-                                                droppedFrames: 0))
+                                                droppedFrames: decoded.dropped))
     }
 
     // MARK: Clipboard

@@ -218,6 +218,11 @@ private final class EventLog: @unchecked Sendable {
         }
     }
 
+    /// Pongs arrive as their own event, already timed.
+    var pongs: Int {
+        snapshot.events.filter { if case .pong = $0 { return true } else { return false } }.count
+    }
+
     var failure: String? {
         for case .failed(let reason) in snapshot.events { return reason }
         return nil
@@ -274,7 +279,7 @@ final class LoopbackTests: XCTestCase {
         XCTAssertNil(log.failure)
 
         first.send(.ping, RDJSON.encode(PingMsg(t: 42)))
-        wait(for: [log.expectation("pong") { !log.messages(.pong).isEmpty }], timeout: 5)
+        wait(for: [log.expectation("pong") { log.pongs > 0 }], timeout: 5)
         first.cancel()
 
         // 2. Reconnect and log in with a signature over the new handshake, no PIN.

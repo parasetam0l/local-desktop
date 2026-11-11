@@ -16,6 +16,10 @@ final class CaptureState: @unchecked Sendable {
     private var _forceNextKeyframe = false
     private var _isCapturing = false
     private var _clientsReady = false
+    /// The newest frame captured while no client could take one. The screen may not
+    /// change again, so it is encoded as soon as a client can (otherwise the last
+    /// keystroke or scroll step could stay missing on the device until the next change).
+    private var _pendingFrame: (buffer: CVPixelBuffer, pts: CMTime)?
     /// The SCStream whose frames we accept; frames from a superseded stream are dropped.
     private var _activeStream: ObjectIdentifier?
     private var _onVideoPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)?
@@ -52,14 +56,34 @@ final class CaptureState: @unchecked Sendable {
 
     /// Whether at least one client can take another frame. When none can, captured
     /// frames are not encoded at all, which keeps the encoder's reference chain intact.
-    func setClientsReady(_ ready: Bool) {
-        withLock { _clientsReady = ready }
+    /// Returns whether frames became ready while one was held back.
+    func setClientsReady(_ ready: Bool) -> Bool {
+        withLock {
+            let reopened = ready && !_clientsReady && _pendingFrame != nil
+            _clientsReady = ready
+            return reopened
+        }
+    }
+
+    /// Encodes the frame held back while no client could take one. Runs on the capture queue.
+    func encodePendingFrame() {
+        lock.lock()
+        guard _isCapturing, _clientsReady, let pending = _pendingFrame else {
+            lock.unlock()
+            return
+        }
+        _pendingFrame = nil
+        let force = _forceNextKeyframe
+        _forceNextKeyframe = false
+        lock.unlock()
+        encoder.encode(pixelBuffer: pending.buffer, pts: pending.pts, forceKeyframe: force)
     }
 
     func activate(stream: SCStream?) {
         withLock {
             _activeStream = stream.map(ObjectIdentifier.init)
             _isCapturing = stream != nil
+            _pendingFrame = nil
             if stream != nil {
                 _forceNextKeyframe = true
             }
@@ -81,16 +105,18 @@ final class CaptureState: @unchecked Sendable {
             return
         }
         _lastFrameTime = Date()
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard _clientsReady else {
+            _pendingFrame = (pixelBuffer, pts)
             lock.unlock()
             return
         }
+        _pendingFrame = nil
         // Only consume a pending keyframe request when a frame is actually encoded.
         let force = _forceNextKeyframe
         _forceNextKeyframe = false
         lock.unlock()
 
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         encoder.encode(pixelBuffer: pixelBuffer, pts: pts, forceKeyframe: force)
     }
 
@@ -163,7 +189,10 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func setClientsReady(_ ready: Bool) {
-        state.setClientsReady(ready)
+        if state.setClientsReady(ready) {
+            let state = self.state
+            captureQueue.async { state.encodePendingFrame() }
+        }
     }
 
     func start(displayID: CGDirectDisplayID?, preset newPreset: RDQualityPreset, codec: RDCodec = .hevc, forceRestart: Bool = false) async throws {
@@ -281,7 +310,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private func makeConfiguration(for display: SCDisplay) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(preset.fps))
-        config.queueDepth = 3
+        config.queueDepth = 4
         config.showsCursor = showRemoteCursor
         // Native NV12 YUV 4:2:0 bi-planar video range for zero-copy hardware encoding
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange

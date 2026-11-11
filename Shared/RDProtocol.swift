@@ -26,6 +26,9 @@ enum RDWire: UInt8 {
     // Video
     case frame = 0x10
     case requestKeyframe = 0x11
+    /// Client → host: `[count u32]` big-endian, the video frames received on this
+    /// connection so far, sent for every frame (clients from 1.2.29).
+    case frameAck = 0x12
 
     // Mouse
     case mouseMoveAbs = 0x20

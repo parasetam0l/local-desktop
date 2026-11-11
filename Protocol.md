@@ -31,6 +31,7 @@ newer message types don't break older peers.
 | 0x06 | authFailed            | S → C 🔒  | `{reason, kind?, retryAfter?}` — kind: `incorrectPin`, `lockedOut`, `busy`, `untrusted`, `tooManyAttempts`, `unsupportedVersion` |
 | 0x10 | frame                 | S → C 🔒  | binary (see above) |
 | 0x11 | requestKeyframe       | C → S 🔒  | `{reason?}` |
+| 0x12 | frameAck              | C → S 🔒  | binary `[count u32]` big-endian: the `frame` messages received on this connection so far, sent on receipt of each. A host that has seen one holds new frames while the oldest unconfirmed one is 120 ms old or 8 are unconfirmed, and sets the bitrate from the delivery times instead of `networkStats` (from 1.2.29) |
 | 0x20 | mouseMoveAbs          | both 🔒   | `{x, y}` — frame pixel space; the host echoes the resulting cursor position |
 | 0x21 | mouseMoveRel          | C → S 🔒  | `{dx, dy}` — screen points |
 | 0x22 | mouseDown             | C → S 🔒  | `{button}` (0 left, 1 right) |

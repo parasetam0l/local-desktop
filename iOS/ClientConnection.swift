@@ -22,6 +22,9 @@ final class ClientConnection: @unchecked Sendable {
         /// The host proved it holds `identityKey`; encryption is now active.
         case serverHello(ServerIdentity)
         case message(RDWire, Data)
+        /// A `pong`, timed here on arrival: timed on the main thread it also measured how
+        /// busy the UI was (typing with the on-screen keyboard showed as RTT spikes).
+        case pong(rttMs: Double)
         case closed
         case failed(String)
         /// The host refused this client outright (version mismatch); don't retry on our own.
@@ -43,6 +46,8 @@ final class ClientConnection: @unchecked Sendable {
     private var ephemeralKey: Curve25519.KeyAgreement.PrivateKey?
     private var reader = RDFrameReader()
     private var sendCipher: RDCipher?
+    /// Video frames received so far; confirmed to the host with each one (`frameAck`).
+    private var framesReceived: UInt32 = 0
     private var receiveCipher: RDCipher?
     private var isFinished = false
 
@@ -233,9 +238,18 @@ final class ClientConnection: @unchecked Sendable {
             guard let wire = frame.wire else { continue }
             switch wire {
             case .frame:
+                // Confirmed on arrival, before decoding: the host paces itself on what
+                // reached the device, not on what it handed to its own network stack.
+                framesReceived &+= 1
+                let count = framesReceived
+                write(.frameAck, Data([UInt8(count >> 24), UInt8(count >> 16 & 0xFF),
+                                       UInt8(count >> 8 & 0xFF), UInt8(count & 0xFF)]), then: nil)
                 onVideoFrame(plain)
             case .serverHello:
                 finish(.failed("Protocol error: repeated handshake"))
+            case .pong:
+                guard let msg = RDJSON.decode(PingMsg.self, from: plain) else { continue }
+                onEvent(.pong(rttMs: max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)))
             default:
                 if wire == .authOK {
                     // Video and app lists can be large; lift the handshake limit before

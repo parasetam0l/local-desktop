@@ -47,6 +47,23 @@ final class ClientSession {
     private var needsKeyframeRecovery = false
     private var lastKeyframeRequestAt = Date.distantPast
     private(set) var bitrateFactor: Double = 1.0
+    /// Video frames sent on this connection and the count the client confirmed
+    /// (`frameAck`, clients from 1.2.29). A send completion only means macOS took the
+    /// bytes; its socket buffer can hold hundreds of milliseconds of video, which every
+    /// later frame, pong and cursor echo then waits behind. With acks, frames in flight
+    /// are counted up to the device instead.
+    private var framesSent: UInt32 = 0
+    private var framesAcked: UInt32 = 0
+    private var clientAcksFrames = false
+    private var frameSentAt = [TimeInterval](repeating: 0, count: 32)
+    private var congestion = CongestionEstimator()
+    /// Delivery figures summed for the log every 5 seconds, to see where lag comes from.
+    private var deliveryLog = (start: 0.0, sent: 0, acked: 0, total: 0.0, min: 1.0, max: 0.0, held: 0)
+    /// Limits on frames in flight to the device. A frame count alone capped the frame
+    /// rate at count ÷ delivery time (3 frames at 65 ms is 45 fps), so the brake is the
+    /// age of the oldest unconfirmed frame; the count only bounds a stalled link.
+    private static let maxUnackedFrames: UInt32 = 8
+    private static let maxUnackedAge: TimeInterval = 0.12
 
     // Input the client is holding down, released if the session ends mid-press.
     private var heldButtons = Set<Int>()
@@ -56,7 +73,15 @@ final class ClientSession {
     private var lastActivityAt = Date()
     private var watchdogTimer: Timer?
 
-    var canSendFrame: Bool { phase == .active && outgoingFrames < 2 }
+    var canSendFrame: Bool {
+        guard phase == .active, outgoingFrames < 2 else { return false }
+        guard clientAcksFrames else { return true }
+        let unacked = framesSent &- framesAcked
+        guard unacked > 0 else { return true }
+        guard unacked < Self.maxUnackedFrames else { return false }
+        let oldestSentAt = frameSentAt[Int((framesAcked &+ 1) % 32)]
+        return ProcessInfo.processInfo.systemUptime - oldestSentAt < Self.maxUnackedAge
+    }
 
     init(connection: NWConnection, server: HostServer, remoteAddress: String) {
         self.connection = connection
@@ -173,6 +198,8 @@ final class ClientSession {
         let isVideo = wire == .frame
         if isVideo {
             outgoingFrames += 1
+            framesSent &+= 1
+            frameSentAt[Int(framesSent % 32)] = ProcessInfo.processInfo.systemUptime
             server?.updateFrameGate()
         }
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
@@ -207,6 +234,7 @@ final class ClientSession {
         }
 
         guard canSendFrame else {
+            deliveryLog.held += 1
             needsKeyframeRecovery = true
             requestRecoveryKeyframe()
             return
@@ -220,6 +248,23 @@ final class ClientSession {
 
     /// Asks for an IDR, at most twice a second per client, so one slow client can't
     /// turn every frame into a keyframe for everyone else.
+    private func logDelivery(delay: TimeInterval, frames: Int) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if deliveryLog.start == 0 { deliveryLog.start = now }
+        deliveryLog.acked += frames
+        deliveryLog.total += delay
+        deliveryLog.sent += 1
+        deliveryLog.min = min(deliveryLog.min, delay)
+        deliveryLog.max = max(deliveryLog.max, delay)
+        let elapsed = now - deliveryLog.start
+        guard elapsed >= 5 else { return }
+        let log = deliveryLog
+        HostLog.write(String(format: "delivery %@: %.0f fps, %.0f/%.0f/%.0f ms min/avg/max, %d held back, bitrate ×%.2f",
+                             peerDisplayName, Double(log.acked) / elapsed, log.min * 1000,
+                             log.total / Double(log.sent) * 1000, log.max * 1000, log.held, bitrateFactor))
+        deliveryLog = (now, 0, 0, 0, 1, 0, 0)
+    }
+
     private func requestRecoveryKeyframe() {
         let now = Date()
         guard now.timeIntervalSince(lastKeyframeRequestAt) > 0.5 else { return }
@@ -436,7 +481,7 @@ final class ClientSession {
 
     private func handleActive(_ wire: RDWire, payload: Data) {
         switch wire {
-        case .setQuality, .wakeDisplay, .requestKeyframe, .ping, .networkStats, .bye:
+        case .setQuality, .wakeDisplay, .requestKeyframe, .ping, .networkStats, .frameAck, .bye:
             handleSessionMessage(wire, payload: payload)
         case .mouseMoveAbs, .mouseMoveRel, .mouseDown, .mouseUp, .scroll, .keyEvent, .textEvent:
             InputInjector.tickleUserActivity()
@@ -474,7 +519,27 @@ final class ClientSession {
             guard let msg = RDJSON.decode(PingMsg.self, from: payload) else { return }
             send(.pong, json: PingMsg(t: msg.t))
 
+        case .frameAck:
+            guard payload.count >= 4 else { return }
+            let count = payload.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+            // Only counts that move forward and don't pass what was sent.
+            let advance = count &- framesAcked
+            guard advance > 0, advance <= framesSent &- framesAcked else { return }
+            if framesSent &- count < 32 {
+                let delay = ProcessInfo.processInfo.systemUptime - frameSentAt[Int(count % 32)]
+                logDelivery(delay: delay, frames: Int(advance))
+                if let factor = congestion.add(delay: delay, factor: bitrateFactor) {
+                    bitrateFactor = factor
+                    server?.updateBitrate()
+                }
+            }
+            framesAcked = count
+            clientAcksFrames = true
+            server?.updateFrameGate()
+
         case .networkStats:
+            // Clients that ack frames are measured from those acks instead.
+            guard !clientAcksFrames else { return }
             guard let msg = RDJSON.decode(NetworkStatsMsg.self, from: payload) else { return }
             if msg.rttMs > 45.0 || msg.droppedFrames > 0 {
                 // Wi-Fi congestion or jitter detected - scale down bitrate by 20%

@@ -47,18 +47,31 @@ final class HardwareVideoEncoder: @unchecked Sendable {
 
         let codecType: CMVideoCodecType = (codec == .hevc) ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
 
-        let status = VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: width,
-            height: height,
-            codecType: codecType,
-            encoderSpecification: nil,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: callback,
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
-            compressionSessionOut: &newSession
-        )
+        func create(_ specification: CFDictionary?) -> OSStatus {
+            VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: width,
+                height: height,
+                codecType: codecType,
+                encoderSpecification: specification,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: nil,
+                outputCallback: callback,
+                refcon: Unmanaged.passUnretained(self).toOpaque(),
+                compressionSessionOut: &newSession
+            )
+        }
+        // Low-latency rate control (Apple's mode for video calls) keeps each frame near
+        // the average size instead of letting keyframes and busy frames burst, which on
+        // Wi-Fi turns into queueing delay. Encoders without it get the normal mode.
+        let lowLatency = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue] as CFDictionary
+        var status = create(lowLatency)
+        let usesLowLatency = status == noErr
+        if !usesLowLatency {
+            newSession = nil
+            status = create(nil)
+        }
+        HostLog.write("encoder \(codec) \(width)x\(height), low-latency rate control \(usesLowLatency ? "on" : "unavailable")")
 
         guard status == noErr, let session = newSession else { return }
 
@@ -90,7 +103,9 @@ final class HardwareVideoEncoder: @unchecked Sendable {
     private static func applyBitrate(_ session: VTCompressionSession, _ bitrate: Int) {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFTypeRef)
         let bytesPerSecond = bitrate / 8
-        let limits: [NSNumber] = [NSNumber(value: Int(Double(bytesPerSecond) * 2.5)), NSNumber(value: 1)]
+        // At most 1.5× the average in any second (it was 2.5×): bursts above the link's
+        // rate wait in a queue and show up as lag.
+        let limits: [NSNumber] = [NSNumber(value: Int(Double(bytesPerSecond) * 1.5)), NSNumber(value: 1)]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
     }
 

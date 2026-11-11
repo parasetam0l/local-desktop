@@ -69,6 +69,8 @@ final class VideoPipeline: @unchecked Sendable {
     private let statsLock = NSLock()
     private var decodedFrames = 0
     private var lastDecodeMs: Double = 0
+    /// Frames that didn't make it to the screen: decode errors and renderer failures.
+    private var droppedFrames = 0
 
     /// - Parameters:
     ///   - onSize: the first frame arrived or the stream size changed.
@@ -91,11 +93,12 @@ final class VideoPipeline: @unchecked Sendable {
         }
     }
 
-    func drainStats() -> (frames: Int, decodeMs: Double) {
+    func drainStats() -> (frames: Int, decodeMs: Double, dropped: Int) {
         statsLock.lock()
         defer { statsLock.unlock() }
-        let result = (decodedFrames, lastDecodeMs)
+        let result = (decodedFrames, lastDecodeMs, droppedFrames)
         decodedFrames = 0
+        droppedFrames = 0
         return result
     }
 
@@ -118,9 +121,15 @@ final class VideoPipeline: @unchecked Sendable {
                 }
             }
             if output.enqueue(sample, size: size) {
+                statsLock.lock()
+                droppedFrames += 1
+                statsLock.unlock()
                 requestKeyframe()
             }
         } onError: {
+            self.statsLock.lock()
+            self.droppedFrames += 1
+            self.statsLock.unlock()
             self.requestKeyframe()
         }
     }
