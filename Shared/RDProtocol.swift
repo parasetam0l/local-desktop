@@ -329,13 +329,13 @@ struct RDSetTextFocusReportsMsg: Codable {
     let enabled: Bool
 }
 
-/// Turns clipboard sharing on or off for this client (off until asked; from 1.2.20). Only while
+/// Turns clipboard sharing on or off for this client (off until asked; from 1.2.21). Only while
 /// it is on does the Mac send this client its clipboard changes and take the client's clipboard.
 struct RDSetClipboardSharingMsg: Codable {
     let enabled: Bool
 }
 
-/// Plain text copied on one side during a session, to put on the other side's clipboard (from 1.2.20).
+/// Plain text copied on one side during a session, to put on the other side's clipboard (from 1.2.21).
 struct RDClipboardMsg: Codable {
     let text: String
 
@@ -353,7 +353,7 @@ struct RDClipboardMsg: Codable {
 
 /// An image copied on one side during a session, sent as PNG (JPEG for a photo copied as JPEG,
 /// or one too large as PNG) in binary pieces small enough
-/// for the host's 1 MB limit on client messages (from 1.2.20). Each piece is
+/// for the host's 1 MB limit on client messages (from 1.2.21). Each piece is
 /// `[id u32][index u16][count u16][image bytes]`, big-endian; the pieces of one image share
 /// an id and are sent back to back, in order.
 enum RDClipboardImage {

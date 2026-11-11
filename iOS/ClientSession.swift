@@ -451,7 +451,7 @@ final class ClientSession: ObservableObject {
             clipboardImage.reset()
             handleAuthOK(msg, attempt: attempt)
             if phase == .connected, sharesClipboard {
-                // Macs before 1.2.20 ignore this.
+                // Macs before 1.2.21 ignore this.
                 sendJSON(.setClipboardSharing, RDSetClipboardSharingMsg(enabled: true))
                 // Text copied in another app while the connection was down.
                 syncClipboardToMac()
