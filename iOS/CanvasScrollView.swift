@@ -16,9 +16,15 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
     var isZoomLocked = false {
         didSet {
             guard isZoomLocked != oldValue else { return }
-            pinchGestureRecognizer?.isEnabled = !isZoomLocked
-            panGestureRecognizer.maximumNumberOfTouches = isZoomLocked ? 1 : Int.max
+            applyZoomLock()
         }
+    }
+
+    /// Also called when the zoom range changes: the pinch recognizer doesn't exist while
+    /// the scroll view can't zoom, so a lock set before that has nothing to act on.
+    private func applyZoomLock() {
+        pinchGestureRecognizer?.isEnabled = !isZoomLocked
+        panGestureRecognizer.maximumNumberOfTouches = isZoomLocked ? 1 : Int.max
     }
 
     /// One finger works like on iOS: a drag scrolls the Mac (at fit zoom; zoomed in it
@@ -182,6 +188,7 @@ final class CanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRecog
         let prevMin = minimumZoomScale
         minimumZoomScale = fitScale
         maximumZoomScale = max(fitScale * 8.0, 4.0)
+        applyZoomLock()
 
         let forceReset = !hasSetInitialZoom || resetZoom
         if forceReset || zoomScale <= prevMin + 0.001 {
