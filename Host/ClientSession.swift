@@ -36,6 +36,13 @@ final class ClientSession {
     private var pacer: DatagramPacer?
     /// The client follows `videoStream` (1.2.30 on), so lossy datagrams can be left.
     private var clientCanResumeStream = false
+    /// The client's `videoDatagrams` max size, until the stream has shown a good link.
+    private var pendingDatagramOffer: Int?
+    /// Video starts on the stream and moves to datagrams only after a `delivery` window
+    /// with no frame held back and an average below this. Starting on datagrams, a lossy
+    /// start (an iPad's Wi-Fi) lost keyframe pieces, each loss asked for another large
+    /// keyframe, and the picture lagged or stalled for 10-15 s; the stream resends instead.
+    private static let datagramSwitchMaxDelay: TimeInterval = 0.025
     /// Consecutive `delivery` windows with at least `lossyWindowFrames` lost frames.
     private var lossyWindows = 0
     /// Lost datagram frames in a 5 s window that count it as lossy; two such windows in a
@@ -45,8 +52,16 @@ final class ClientSession {
     /// Set once the datagram flow is ready; cleared only by `resumeStreamVideo`, which
     /// tells the client where stream numbering goes on.
     private var videoOverDatagrams = false
-    /// Unconfirmed datagram frames older than this are counted lost and stop braking.
+    /// Losses normally show as gaps in the client's acks. With nothing newer acked, an
+    /// unconfirmed datagram frame counts as lost after `datagramLossTimeout` only while
+    /// at most `isolatedLossFrames` are out (a lone frame lost on a still screen). More
+    /// out means the link is backed up, not losing: Network.framework queues datagrams
+    /// ahead of stream data, and writing them off at 300 ms let the host keep filling
+    /// that queue until the device's pongs waited past its 8 s heartbeat (a 13-15 s
+    /// stall when a session started). Then the host waits up to `datagramStallTimeout`.
     private static let datagramLossTimeout: TimeInterval = 0.3
+    private static let isolatedLossFrames: UInt32 = 2
+    private static let datagramStallTimeout: TimeInterval = 1.5
     /// Datagram frames lost since the last `delivery` log line.
     private var deliveryLost = 0
     private weak var server: HostServer?
@@ -411,7 +426,9 @@ final class ClientSession {
         let now = ProcessInfo.processInfo.systemUptime
         var expired = false
         while framesSent != framesAcked, framesSent &- framesAcked < 32,
-              now - frameSentAt[Int((framesAcked &+ 1) % 32)] > Self.datagramLossTimeout {
+              now - frameSentAt[Int((framesAcked &+ 1) % 32)]
+                > (framesSent &- framesAcked <= Self.isolatedLossFrames ? Self.datagramLossTimeout
+                                                                         : Self.datagramStallTimeout) {
             framesAcked &+= 1
             deliveryLost += 1
             expired = true
@@ -439,6 +456,11 @@ final class ClientSession {
                              peerDisplayName, transport, Double(log.acked) / elapsed, log.min * 1000,
                              log.total / Double(log.sent) * 1000, log.max * 1000, log.held, deliveryLost, bitrateFactor))
         deliveryLog = (now, 0, 0, 0, 1, 0, 0)
+        if let maxSize = pendingDatagramOffer, !videoOverDatagrams, log.held == 0,
+           log.total / Double(log.sent) < Self.datagramSwitchMaxDelay {
+            pendingDatagramOffer = nil
+            startVideoDatagrams(maxSize: maxSize)
+        }
         let lost = deliveryLost
         deliveryLost = 0
         if videoOverDatagrams {
@@ -745,7 +767,7 @@ final class ClientSession {
         case .videoDatagrams:
             guard let msg = RDJSON.decode(VideoDatagramsMsg.self, from: payload) else { return }
             clientCanResumeStream = msg.canResumeStream == true
-            startVideoDatagrams(maxSize: msg.maxSize)
+            pendingDatagramOffer = msg.maxSize
 
         case .bye:
             leftOnPurpose = RDJSON.decode(ByeMsg.self, from: payload)?.reason == RDByeReason.userDisconnect

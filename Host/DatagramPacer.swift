@@ -6,15 +6,23 @@ import Network
 /// dropped some, and one lost piece costs the whole frame and a new, larger keyframe.
 /// A frame up to `burstBytes` still leaves at once, so ordinary frames gain no delay;
 /// the rest goes at `rate`, a few times the encoder's bitrate.
+///
+/// At most `maxInStack` datagrams sit in Network.framework at once (it reports each as
+/// processed once sent). Early in a connection QUIC may send little; without this bound
+/// it queued seconds of datagrams, and the stream's messages (the device's heartbeat
+/// pongs) waited behind them.
 final class DatagramPacer: @unchecked Sendable {
     /// Sent without waiting: covers a typical inter frame at 20 Mbit/s.
     static let burstBytes = 24_000
     /// The pacing rate is the encoder's bitrate times this, at least `minRate`.
     static let rateMultiple = 4.0
     static let minRate = 40_000_000
+    /// About 58 KB, some 50 ms of video at full rate.
+    static let maxInStack = 48
 
     private let queue = DispatchQueue(label: "rd.datagram-pacer", qos: .userInteractive)
-    private let send: (Data, Bool) -> Void
+    private let send: (Data, @escaping @Sendable () -> Void) -> Void
+    private var inStack = 0
     private var pending: [(datagram: Data, done: (() -> Void)?)] = []
     private var head = 0
     private var bytesPerSecond = Double(minRate) / 8
@@ -23,16 +31,18 @@ final class DatagramPacer: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private let now: () -> TimeInterval
 
-    /// `send(datagram, isLast)` runs on the pacer's queue; `isLast` marks a frame's
-    /// final datagram.
+    /// `send(datagram, processed)` runs on the pacer's queue and calls `processed` (on
+    /// any queue) once the network stack has taken the datagram off its hands.
     init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         send: @escaping (Data, Bool) -> Void) {
+         send: @escaping (Data, @escaping @Sendable () -> Void) -> Void) {
         self.now = now
         self.send = send
     }
 
     convenience init(flow: NWConnection) {
-        self.init { datagram, _ in flow.send(content: datagram, completion: .idempotent) }
+        self.init { datagram, processed in
+            flow.send(content: datagram, completion: .contentProcessed { _ in processed() })
+        }
     }
 
     static func rate(forEncoderBitrate bitrate: Int) -> Int {
@@ -74,11 +84,18 @@ final class DatagramPacer: @unchecked Sendable {
             credit = min(Double(Self.burstBytes), credit + (t - lastRefill) * bytesPerSecond)
         }
         lastRefill = t
-        while head < pending.count, credit > 0 {
+        while head < pending.count, credit > 0, inStack < Self.maxInStack {
             let item = pending[head]
             head += 1
             credit -= Double(item.datagram.count)
-            send(item.datagram, item.done != nil)
+            inStack += 1
+            send(item.datagram) { [weak self] in
+                guard let self else { return }
+                self.queue.async {
+                    self.inStack -= 1
+                    if self.head < self.pending.count { self.drain() }
+                }
+            }
             item.done?()
         }
         if head == pending.count {

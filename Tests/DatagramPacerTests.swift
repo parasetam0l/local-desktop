@@ -11,7 +11,7 @@ final class DatagramPacerTests: XCTestCase {
 
     func testSmallFrameLeavesAtOnceAndLargeOneIsPaced() {
         let clock = Clock(), sent = Sent()
-        let pacer = DatagramPacer(now: { clock.t }) { d, _ in sent.add(d.count) }
+        let pacer = DatagramPacer(now: { clock.t }) { d, processed in sent.add(d.count); processed() }
         pacer.setRate(bitsPerSecond: 96_000_000)   // 12,000 bytes per ms
         let small = Array(repeating: Data(count: 1200), count: 10)   // 12 KB
         let done = expectation(description: "small done")
@@ -37,6 +37,25 @@ final class DatagramPacerTests: XCTestCase {
         }
         XCTAssertEqual(pacer.queuedForTesting, 0)
         XCTAssertEqual(sent.count, 110)
+    }
+
+    /// Datagrams the stack hasn't processed yet cap what the pacer hands over.
+    func testStopsAtTheStackLimitUntilDatagramsAreProcessed() {
+        final class Held: @unchecked Sendable { var callbacks: [@Sendable () -> Void] = [] }
+        let clock = Clock(), held = Held()
+        let pacer = DatagramPacer(now: { clock.t }) { _, processed in held.callbacks.append(processed) }
+        pacer.setRate(bitsPerSecond: 1_000_000_000)
+        pacer.enqueue(Array(repeating: Data(count: 100), count: 100)) {}
+        pacer.tickForTesting()
+        XCTAssertEqual(held.callbacks.count, DatagramPacer.maxInStack)
+        clock.t += 0.01
+        pacer.tickForTesting()
+        XCTAssertEqual(held.callbacks.count, DatagramPacer.maxInStack)
+        let first = held.callbacks.prefix(10)
+        first.forEach { $0() }
+        clock.t += 0.01
+        pacer.tickForTesting()
+        XCTAssertEqual(held.callbacks.count, DatagramPacer.maxInStack + 10)
     }
 
     func testRateFollowsEncoderWithFloor() {

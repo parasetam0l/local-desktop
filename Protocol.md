@@ -33,7 +33,7 @@ newer message types don't break older peers.
 | 0x10 | frame                 | S → C 🔒  | binary (see above) |
 | 0x11 | requestKeyframe       | C → S 🔒  | `{reason?}` |
 | 0x12 | frameAck              | C → S 🔒  | binary `[frame u32]` big-endian: the highest video frame number received, sent on receipt of each frame. The host numbers every video frame it sends on a connection from 1, on the stream and as datagrams alike, so over the stream alone this is the count of `frame` messages received; with datagrams, numbers it skips were lost (frames completed but discarded while waiting for a keyframe are still acked). A host that has seen one holds new frames while the oldest unconfirmed one is 120 ms old or 8 are unconfirmed, and sets the bitrate from the delivery times instead of `networkStats` (from 1.2.29) |
-| 0x13 | videoDatagrams        | C → S 🔒  | `{maxSize}` — QUIC only, after `authOK`: send video as datagrams (see Transports); `maxSize` is the largest datagram the client's connection accepts. The host switches once its datagram flow is ready; until then frames stay on the stream. `canResumeStream: true` (clients from 1.2.30) lets the host move video back to the stream with `videoStream` when datagrams keep losing frames. Hosts that don't know it keep using the stream (from 1.2.29) |
+| 0x13 | videoDatagrams        | C → S 🔒  | `{maxSize}` — QUIC only, after `authOK`: send video as datagrams (see Transports); `maxSize` is the largest datagram the client's connection accepts. From 1.2.30 the host keeps video on the stream until a 5-second window there shows no frame held back and under 25 ms average delivery, then switches once its datagram flow is ready; until then frames stay on the stream. `canResumeStream: true` (clients from 1.2.30) lets the host move video back to the stream with `videoStream` when datagrams keep losing frames. Hosts that don't know it keep using the stream (from 1.2.29) |
 | 0x14 | transportNote         | C → S 🔒  | `{quicFallback}` — a note for the host's log, sent after `authOK`: by a client that tried QUIC and fell back to TCP ("fell back to TCP: …"), or by a QUIC client whose datagram flow didn't come up within 2 s ("no video datagrams …"), with the reason and timed QUIC events (at most 1,000 characters), for the host's log only (from 1.2.29) |
 | 0x15 | videoStream           | S → C 🔒  | `{nextFrame}` — QUIC only: video leaves datagrams for the stream again (two 5 s windows in a row with 3 or more lost frames), and the next stream frame is number `nextFrame`; the client ignores datagrams from then on. Sent only to clients whose `videoDatagrams` carried `canResumeStream: true` (from 1.2.30) |
 | 0x20 | mouseMoveAbs          | both 🔒   | `{x, y}` — frame pixel space; the host echoes the resulting cursor position |
@@ -180,8 +180,10 @@ a frame still incomplete when a newer one completes is dropped; after a drop, P-
 are discarded until the next keyframe and the client sends `requestKeyframe
 {reason: "loss"}` (at most twice a second). A stream frame that arrives after a newer
 datagram frame (around the switch) is treated the same way. Lost and discarded frames
-count into `networkStats.droppedFrames`. On the host, an unconfirmed datagram frame
-older than 300 ms counts as lost so the in-flight limit doesn't wait for it, and the
+count into `networkStats.droppedFrames`. On the host, with nothing newer acked, an
+unconfirmed datagram frame counts as lost after 300 ms while at most 2 frames are out, and
+after 1.5 s with more out (a backed-up link, not a lossy one), so the in-flight limit
+doesn't wait for it forever, and the
 5-second `delivery` log line shows the transport and lost frames.
 
 The host paces datagrams (from 1.2.30): a frame up to 24,000 bytes leaves at once, the
