@@ -135,35 +135,57 @@ struct SessionStateOverlay: View {
 
     @ViewBuilder
     private var connectedOverlay: some View {
-        // The display can still wake with the lid shut when asked by a touch, so the card
+        // The display can still wake with the lid shut when asked, so the card
         // only stays while the display is actually asleep.
-        if session.isHeadlessClosedLid, session.isDisplaySleeping {
+        switch ClientWakePolicy.connectedOverlay(isHeadlessClosedLid: session.isHeadlessClosedLid,
+                                                 isDisplaySleeping: session.isDisplaySleeping,
+                                                 showsDisplaySleeping: showsDisplaySleeping,
+                                                 hasVideoFrame: session.hasVideoFrame) {
+        case .lidClosed:
             lidClosedOverlay
-        } else if showsDisplaySleeping {
+        case .sleeping:
             sleepingOverlay
-        } else if !session.hasVideoFrame {
+        case .loading:
             loadingOverlay
+        case .none:
+            EmptyView()
         }
     }
 
     /// A shut lid with no external display: the Mac doesn't wake its screen on its own then
-    /// (that only looped between wake and sleep), but a drag or tap still asks it to.
+    /// (that only looped between wake and sleep), so an explicit connect or touch asks it to.
     private var lidClosedOverlay: some View {
         VStack(spacing: 14) {
             Image(systemName: "laptopcomputer.slash")
                 .font(.system(size: 34))
-                .foregroundStyle(SessionStyle.secondaryText)
+                .foregroundStyle(session.isWakingDisplay ? SessionStyle.accent : SessionStyle.secondaryText)
             Text("Mac lid is closed")
                 .font(.headline)
-            Text("The Mac's screen is asleep. Drag or tap to try waking it, or open the lid or connect an external display.")
+            Text(lidClosedSubtitle)
                 .font(.caption)
                 .foregroundStyle(SessionStyle.secondaryText)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+            wakeButton
         }
         .padding(24)
         .frame(maxWidth: 320)
         .stateCard()
+        .padding(.horizontal, 16)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            session.wakeHostDisplay()
+        }
+    }
+
+    private var lidClosedSubtitle: String {
+        if session.isWakingDisplay {
+            return "Trying to wake the Mac…"
+        }
+        if session.wakeTimedOut {
+            return "The Mac stayed asleep with the lid closed. Try again, or open the lid or connect an external display."
+        }
+        return "The Mac's screen is asleep. Tap to try waking it, or open the lid or connect an external display."
     }
 
     private var sleepingOverlay: some View {
@@ -173,22 +195,39 @@ struct SessionStateOverlay: View {
                 .foregroundStyle(SessionStyle.accent)
             Text("Mac display is sleeping")
                 .font(.headline)
-            Text("Tap anywhere to wake the screen")
+            Text(session.isWakingDisplay ? "Trying to wake the screen…" : "Tap anywhere to wake the screen")
                 .font(.caption)
                 .foregroundStyle(SessionStyle.secondaryText)
-            Button {
-                session.wakeHostDisplay()
-            } label: {
-                Label("Wake display", systemImage: "sun.max.fill")
-            }
-            .buttonStyle(SessionButtonStyle(prominent: true))
+                .multilineTextAlignment(.center)
+            wakeButton
         }
         .padding(24)
+        .frame(maxWidth: 320)
         .stateCard()
+        .padding(.horizontal, 16)
         .contentShape(Rectangle())
         .onTapGesture {
             session.wakeHostDisplay()
         }
+    }
+
+    private var wakeButton: some View {
+        Button {
+            session.wakeHostDisplay()
+        } label: {
+            if session.isWakingDisplay {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                    Text("Waking…")
+                }
+            } else {
+                Label("Wake display", systemImage: "sun.max.fill")
+            }
+        }
+        .buttonStyle(SessionButtonStyle(prominent: true))
+        .disabled(session.isWakingDisplay)
     }
 
     private var loadingOverlay: some View {

@@ -55,9 +55,12 @@ final class HostServer: ObservableObject {
     /// can't fight with power assertions.
     /// A client's touch asked to wake the Mac anyway. The display often does wake with the
     /// lid shut, so an explicit request is tried; only automatic wakes stay off. Cleared when
-    /// the lid or displays change or the last client leaves.
-    private var wakeRequestedWithClosedLid = false
-    var isHeadlessClosedLid: Bool { isLidClosed && !hasExternalDisplay && !wakeRequestedWithClosedLid }
+    /// the lid or displays change, sleep resumes, or the last client leaves.
+    private var closedLidWake = HostClosedLidWakeState()
+    private var closedLidWakeCheckTask: Task<Void, Never>?
+    var isHeadlessClosedLid: Bool {
+        closedLidWake.isHeadlessClosedLid(lidClosed: isLidClosed, hasExternalDisplay: hasExternalDisplay)
+    }
     /// The setting: block this Mac's own keyboard and trackpad while devices are connected.
     @Published private(set) var blocksLocalInput = UserDefaults.standard.bool(forKey: HostServer.blocksLocalInputKey)
     /// Whether they're blocked right now.
@@ -171,17 +174,25 @@ final class HostServer: ObservableObject {
         let workspace = NSWorkspace.shared.notificationCenter
         observe(workspace, NSWorkspace.screensDidSleepNotification) { server, _ in
             HostLog.write("screens did sleep | \(HostLog.displaySummary())")
+            if server.closedLidWake.handleScreensDidSleep(lidClosed: server.isLidClosed,
+                                                            hasExternalDisplay: server.hasExternalDisplay,
+                                                            isStartingSizedMirror: server.isStartingSizedMirror,
+                                                            now: ProcessInfo.processInfo.systemUptime) {
+                server.closedLidWakeCheckTask?.cancel()
+                server.closedLidWakeCheckTask = nil
+                server.updatePowerAssertions()
+            }
             server.isDisplaySleeping = true
             server.lid.refresh()
             server.scheduleHostStateBroadcast()
         }
         observe(workspace, NSWorkspace.screensDidWakeNotification) { server, _ in
             HostLog.write("screens did wake | \(HostLog.displaySummary())")
-            server.isDisplaySleeping = false
+            server.lid.refresh()
+            server.isDisplaySleeping = server.isHeadlessClosedLid
             server.applyPendingMirrorSize()
             // A missed unlock notification mustn't leave a false lock behind.
             server.isHostLocked = Self.readIsLocked()
-            server.lid.refresh()
             server.scheduleHostStateBroadcast()
             if !server.activeSessions.isEmpty, !server.isHeadlessClosedLid {
                 server.restartCapture()
@@ -233,12 +244,16 @@ final class HostServer: ObservableObject {
     /// clamshell sleep there is nothing capture can use, so capture waits instead of
     /// retrying; once a usable display exists again it picks back up.
     private func lidStateChanged() {
-        if lid.isLidClosed != isLidClosed || lid.hasExternalDisplay != hasExternalDisplay {
-            wakeRequestedWithClosedLid = false
+        closedLidWake.lidOrExternalChanged(lidClosed: lid.isLidClosed, prevLidClosed: isLidClosed,
+                                           hasExternalDisplay: lid.hasExternalDisplay, prevHasExternalDisplay: hasExternalDisplay)
+        if !closedLidWake.wakeRequestedWithClosedLid {
+            closedLidWakeCheckTask?.cancel()
+            closedLidWakeCheckTask = nil
         }
         isLidClosed = lid.isLidClosed
         hasExternalDisplay = lid.hasExternalDisplay
         HostLog.write("lid closed=\(isLidClosed) external=\(hasExternalDisplay) headless=\(isHeadlessClosedLid) sessions=\(activeSessions.count) | \(HostLog.displaySummary())")
+        refreshDisplaySleepState()
         scheduleHostStateBroadcast()
         updatePowerAssertions()
         sizedMirror.mirrorReturnedDisplays()
@@ -373,6 +388,9 @@ final class HostServer: ObservableObject {
         sessionSettingsReset = nil
         endSizedMirror()
         setHidesDock(false)
+        closedLidWakeCheckTask?.cancel()
+        closedLidWakeCheckTask = nil
+        closedLidWake.reset()
         lid.stop()
         stopCapsLockWatch()
         power.release()
@@ -513,6 +531,7 @@ final class HostServer: ObservableObject {
                 }
             } else {
                 captureError = "Could not set up the \(wanted.label) display."
+                scheduleClosedLidWakeCheckIfNeeded()
             }
             return
         }
@@ -588,6 +607,13 @@ final class HostServer: ObservableObject {
                 try await ScreenStreamer.shared.restart(displayID: requested, preset: preset,
                                                         codec: codec ?? ScreenStreamer.shared.currentCodec)
                 captureError = nil
+                closedLidWakeCheckTask?.cancel()
+                closedLidWakeCheckTask = nil
+                if isDisplaySleeping {
+                    isDisplaySleeping = false
+                    isHostLocked = Self.readIsLocked()
+                    broadcastHostState()
+                }
                 // The chosen display was gone and capture fell back to another one.
                 let streamed = ScreenStreamer.shared.currentDisplay
                 if requested != nil, streamed != requested, selectedDisplayID == requested {
@@ -771,7 +797,9 @@ final class HostServer: ObservableObject {
         updateLocalInputBlocking()
         if activeSessions.isEmpty {
             clientName = nil
-            wakeRequestedWithClosedLid = false
+            closedLidWakeCheckTask?.cancel()
+            closedLidWakeCheckTask = nil
+            closedLidWake.reset()
             pendingMirrorSize = nil
             mirrorSizeRetries = 0
             scheduleSessionSettingsReset(leftOnPurpose: session.leftOnPurpose)
@@ -817,19 +845,47 @@ final class HostServer: ObservableObject {
     func handleWakeDisplayRequest() {
         lid.refresh()
         HostLog.write("wake request lid=\(isLidClosed) headless=\(isHeadlessClosedLid) locked=\(isHostLocked) sleeping=\(isDisplaySleeping) | \(HostLog.displaySummary())")
-        updatePowerAssertions()
         // Wake requests come from the user's touches on the client, so try even with the lid
         // shut and no external display: the display often wakes then. Automatic wakes
         // (on connect, after capture loss) still skip that state to avoid a wake/sleep loop.
-        if isLidClosed, !hasExternalDisplay, !wakeRequestedWithClosedLid {
-            wakeRequestedWithClosedLid = true
-            updatePowerAssertions()
-        }
-        InputInjector.wakeDisplay(within: streamedDisplayBounds)
-        isDisplaySleeping = false
-        broadcastHostState()
-        restartCapture()
+        closedLidWake.beginWakeRequest(lidClosed: isLidClosed,
+                                       hasExternalDisplay: hasExternalDisplay,
+                                       now: ProcessInfo.processInfo.systemUptime)
+        updatePowerAssertions()
+        InputInjector.wakeDisplay(within: streamedDisplayBounds,
+                                 force: !ScreenStreamer.shared.isRunning || isLidClosed)
         applyPendingMirrorSize()
+        restartCapture()
+        scheduleClosedLidWakeCheckIfNeeded()
+    }
+
+    private func scheduleClosedLidWakeCheckIfNeeded() {
+        guard closedLidWake.wakeRequestedWithClosedLid else { return }
+        closedLidWakeCheckTask?.cancel()
+        closedLidWakeCheckTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            if self.closedLidWake.wakeRequestedWithClosedLid,
+               !self.activeSessions.isEmpty,
+               !ScreenStreamer.shared.isRunning,
+               !self.isStartingSizedMirror,
+               self.pendingMirrorSize == nil {
+                self.restartCapture()
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            if self.closedLidWake.wakeRequestedWithClosedLid,
+               !ScreenStreamer.shared.isRunning,
+               !self.isStartingSizedMirror,
+               self.pendingMirrorSize == nil {
+                HostLog.write("closed-lid wake found no usable display | \(HostLog.displaySummary())")
+                self.closedLidWake.reset()
+                self.updatePowerAssertions()
+                self.refreshDisplaySleepState()
+                self.broadcastHostState()
+            }
+            self.closedLidWakeCheckTask = nil
+        }
     }
 
     private func applyPendingMirrorSize() {

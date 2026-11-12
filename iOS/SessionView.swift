@@ -100,6 +100,11 @@ struct SessionView: View {
                     onRightTap: directRightTapHandler,
                     onDrag: dragHandler,
                     onScroll: directScrollHandler,
+                    onWakeInteraction: {
+                        if session.isDisplaySleeping {
+                            session.wakeHostDisplay()
+                        }
+                    },
                     isZoomLocked: app.settings.isZoomLocked,
                     isOneFingerScroll: app.settings.isOneFingerScroll
                 )
@@ -129,7 +134,9 @@ struct SessionView: View {
                     }
                 )
 
-                if app.settings.showScrollHelpers {
+                if ClientWakePolicy.shouldShowScrollHelpers(showSetting: app.settings.showScrollHelpers,
+                                                            hasVideoFrame: session.hasVideoFrame,
+                                                            isDisplaySleeping: session.isDisplaySleeping) {
                     VStack(spacing: 8) {
                         RepeatingScrollButton(iconName: "chevron.up") {
                             session.scroll(dx: 0, dy: 1)
@@ -332,6 +339,9 @@ struct SessionView: View {
     }
 
     private func moveVirtualCursor(dx: CGFloat, dy: CGFloat) {
+        if session.isDisplaySleeping, !session.isWakingDisplay {
+            session.wakeHostDisplay()
+        }
         let speed = app.settings.pointerSpeedMultiplier
         let scaledDx = dx * speed
         let scaledDy = dy * speed
@@ -384,10 +394,10 @@ struct SessionView: View {
     /// like the touchpad's two-finger scroll.
     private var directScrollHandler: ((CGPoint?, CGFloat, CGFloat) -> Void)? {
         isConnected && !touchpadMode ? { start, dx, dy in
+            if session.isDisplaySleeping {
+                session.wakeHostDisplay()
+            }
             if let start {
-                if session.isDisplaySleeping {
-                    session.wakeHostDisplay()
-                }
                 session.moveAbs(Double(start.x), Double(start.y))
             }
             session.scroll(dx: Double(dx) * Self.touchpadScrollSpeed,

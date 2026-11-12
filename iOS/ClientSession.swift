@@ -37,6 +37,8 @@ final class ClientSession: ObservableObject {
     @Published private(set) var identityMismatchServerId: String?
     @Published private(set) var isHostLocked = false
     @Published private(set) var isDisplaySleeping = false
+    @Published private(set) var isWakingDisplay = false
+    @Published private(set) var wakeTimedOut = false
     /// The Mac's Caps Lock, for the key bar's caps light (nil from Macs that don't say).
     @Published private(set) var macCapsLock: Bool?
     /// Whether the Mac's lid is shut, and whether an external display keeps it usable
@@ -168,6 +170,9 @@ final class ClientSession: ObservableObject {
     private var lastPongAt = Date()
     private var lastStatsReport = Date()
     private var lastKeyframeRequestAt = Date.distantPast
+    private var lastWakeRequestAt = Date.distantPast
+    private var wakeTimeoutTask: Task<Void, Never>?
+    private var shouldAutoWakeClosedLidOnInitialHostState = false
     private(set) var hasConnectedOnce = false
     private var userInitiatedDisconnect = false
     private var reconnectAttempt = 0
@@ -196,6 +201,7 @@ final class ClientSession: ObservableObject {
                  quic: RDQUICAdvert? = nil, retryWhileWaking: Bool = false) {
         ClientLog.write("connect to \(target) quic=\(String(describing: quic))")
         userInitiatedDisconnect = false
+        resetWakeState()
         tearDownConnection()
         stopPing()
         countdownTimer?.invalidate()
@@ -267,6 +273,7 @@ final class ClientSession: ObservableObject {
     func disconnect() {
         ClientLog.write("disconnect (user)")
         userInitiatedDisconnect = true
+        resetWakeState()
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
         stopPing()
@@ -333,6 +340,7 @@ final class ClientSession: ObservableObject {
     private func fail(_ reason: String, allowReconnect: Bool = true) {
         ClientLog.write("session failed: \(reason) (reconnect \(allowReconnect))")
         guard !isDead else { return }
+        resetWakeState()
         tearDownConnection()
         stopPing()
         countdownTimer?.invalidate()
@@ -522,6 +530,20 @@ final class ClientSession: ObservableObject {
             // Macs before this protocol version don't report it; assume a display rather
             // than showing a false "lid closed" warning to them.
             hasExternalDisplay = msg.hasExternalDisplay ?? true
+            if !isDisplaySleeping {
+                wakeTimeoutTask?.cancel()
+                wakeTimeoutTask = nil
+                isWakingDisplay = false
+                wakeTimedOut = false
+                shouldAutoWakeClosedLidOnInitialHostState = false
+            } else if shouldAutoWakeClosedLidOnInitialHostState {
+                shouldAutoWakeClosedLidOnInitialHostState = false
+                if ClientWakePolicy.shouldAutoWakeClosedLid(isInitialConnect: true,
+                                                            isHeadlessClosedLid: isHeadlessClosedLid,
+                                                            isDisplaySleeping: isDisplaySleeping) {
+                    wakeHostDisplay()
+                }
+            }
 
         case .frontWindow:
             guard let msg = RDJSON.decode(RDFrontWindowMsg.self, from: payload) else { break }
@@ -587,6 +609,8 @@ final class ClientSession: ObservableObject {
     private func handleAuthOK(_ msg: AuthOKMsg, attempt: AuthAttempt) {
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
+        let isInitialConnect = !hasConnectedOnce
+        shouldAutoWakeClosedLidOnInitialHostState = isInitialConnect
         phase = .connected
         hasConnectedOnce = true
         reconnectAttempt = 0
@@ -999,14 +1023,40 @@ final class ClientSession: ObservableObject {
 
     func wakeHostDisplay() {
         guard phase == .connected else { return }
+        let now = Date()
+        guard !isWakingDisplay, now.timeIntervalSince(lastWakeRequestAt) >= 2.0 else { return }
+        lastWakeRequestAt = now
+        if isDisplaySleeping {
+            isWakingDisplay = true
+            wakeTimedOut = false
+            wakeTimeoutTask?.cancel()
+            wakeTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                self.isWakingDisplay = false
+                if self.isDisplaySleeping {
+                    self.wakeTimedOut = true
+                }
+            }
+        }
         send(.wakeDisplay, Data())
-        moveRel(dx: 1, dy: 1)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            MainActor.assumeIsolated {
-                self?.moveRel(dx: -1, dy: -1)
+        if hasVideoFrame {
+            moveRel(dx: 1, dy: 1)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.moveRel(dx: -1, dy: -1)
+                }
             }
         }
         requestKeyframe(reason: "wake_display")
+    }
+
+    private func resetWakeState() {
+        wakeTimeoutTask?.cancel()
+        wakeTimeoutTask = nil
+        isWakingDisplay = false
+        wakeTimedOut = false
+        shouldAutoWakeClosedLidOnInitialHostState = false
     }
 
     func requestRunningApps() {

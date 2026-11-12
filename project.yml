@@ -119,6 +119,7 @@ targets:
       - Shared/RDSecureChannel.swift
       - Shared/RDTransport.swift
       - Shared/RDVideoDatagrams.swift
+      - Shared/ClosedLidWakePolicy.swift
       - Host/PINSecurity.swift
       - Host/QUICAcceptor.swift
       - Host/LocalInputBlocker.swift

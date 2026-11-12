@@ -135,11 +135,12 @@ enum InputInjector {
     /// 3. Non-zero hardware cursor delta nudge
     /// 4. Non-destructive modifier key pulse (Shift key tap)
     @discardableResult
-    static func wakeDisplay(within bounds: CGRect) -> Bool {
+    static func wakeDisplay(within bounds: CGRect, force: Bool = false) -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
         guard !wakeInFlight, now - lastWakeAttempt >= wakeCooldown else { return false }
-        // The display never slept; declaring user activity is enough.
-        guard CGDisplayIsAsleep(CGMainDisplayID()) != 0 else {
+        // The display never slept; declaring user activity is enough unless forced (e.g.
+        // closed-lid wake where CGMainDisplayID may not report sleep accurately).
+        guard force || CGDisplayIsAsleep(CGMainDisplayID()) != 0 else {
             tickleUserActivity()
             return false
         }
@@ -170,13 +171,15 @@ enum InputInjector {
         }
 
         // 3. Move cursor by an actual non-zero delta (+2, +2 then back) so WindowServer processes motion
-        let base = currentPositionTopLeft
-        let offsetX: Double = (base.x + 2 >= bounds.maxX) ? -2 : 2
-        let offsetY: Double = (base.y + 2 >= bounds.maxY) ? -2 : 2
-        moveAbs(base.x + offsetX, base.y + offsetY, within: bounds)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-            MainActor.assumeIsolated {
-                moveAbs(base.x, base.y, within: bounds)
+        if !bounds.isEmpty {
+            let base = currentPositionTopLeft
+            let offsetX: Double = (base.x + 2 >= bounds.maxX) ? -2 : 2
+            let offsetY: Double = (base.y + 2 >= bounds.maxY) ? -2 : 2
+            moveAbs(base.x + offsetX, base.y + offsetY, within: bounds)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                MainActor.assumeIsolated {
+                    moveAbs(base.x, base.y, within: bounds)
+                }
             }
         }
 
