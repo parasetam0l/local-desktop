@@ -233,7 +233,8 @@ final class ClientConnection: @unchecked Sendable {
     private func openQUICFlows(_ group: NWConnectionGroup) {
         guard connection == nil else { return }
         guard openControlStream(group) else { return }
-        guard let flow = NWConnection(from: group, using: RDQUIC.clientDatagramFlowOptions(verifyQueue: queue)) else { return }
+        guard let options = RDQUIC.datagramFlowOptions(for: group),
+              let flow = NWConnection(from: group, using: options) else { return }
         datagramFlow = flow
         flow.stateUpdateHandler = { [weak self, weak flow] state in
             guard let self, let flow, self.datagramFlow === flow else { return }

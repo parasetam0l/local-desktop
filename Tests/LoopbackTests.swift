@@ -7,8 +7,6 @@ import CryptoKit
 /// bookkeeping of the real `ClientSession` (host) is left out.
 private final class LoopbackHost: @unchecked Sendable {
     let identity = Curve25519.Signing.PrivateKey()
-    /// The QUIC listener's TLS identity, reused for its datagram flows like the real host.
-    private var tlsIdentity: SecIdentity?
     let queue = DispatchQueue(label: "test.host")
     let pin = "1234"
     /// Corrupts the serverHello signature, as an impostor without the key would.
@@ -55,7 +53,6 @@ private final class LoopbackHost: @unchecked Sendable {
             let key = P256.Signing.PrivateKey()
             let certificate = try RDSelfSignedIdentity.makeCertificate(for: key)
             let identity = try XCTUnwrap(RDSelfSignedIdentity.identity(key: key, certificate: certificate))
-            tlsIdentity = identity
             listener = try NWListener(using: try XCTUnwrap(RDQUIC.serverParameters(identity: identity)), on: .any)
         } else {
             listener = try NWListener(using: .tcp, on: .any)
@@ -104,7 +101,7 @@ private final class LoopbackHost: @unchecked Sendable {
 
     private func startDatagramVideo(maxSize: Int) {
         guard sendDatagramVideo, let group, let videoKey,
-              let tlsIdentity, let options = RDQUIC.serverDatagramFlowOptions(identity: tlsIdentity),
+              let options = RDQUIC.datagramFlowOptions(for: group),
               let flow = NWConnection(from: group, using: options) else { return }
         datagramFlow = flow
         let packetizer = RDVideoPacketizer(key: videoKey)
@@ -412,17 +409,9 @@ final class LoopbackTests: XCTestCase {
         let (connection, log) = connect(quicPort: quicPort)
         wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
         connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
-        let frames = log.expectation("stream frame + 2 datagram frames") { log.snapshot.video.count >= 3 }
-        if XCTWaiter().wait(for: [frames], timeout: 5) != .completed {
-            // The client offers datagrams only once its datagram flow is ready; where the
-            // OS never readies it (the macOS 26 CI runner, iPadOS 17) video stays on the
-            // stream, which the other QUIC test covers.
-            if !quicHost.received.contains(.videoDatagrams) {
-                connection.cancel()
-                throw XCTSkip("QUIC datagram flow never became ready on this OS")
-            }
-            XCTFail("datagram frames missing after the client offered datagrams")
-        }
+        // Strict: the release job runs this on macOS 26, where a datagram flow with fresh
+        // options never became ready (see `RDQUIC.datagramFlowOptions`).
+        wait(for: [log.expectation("stream frame + 2 datagram frames") { log.snapshot.video.count >= 3 }], timeout: 5)
         let video = log.snapshot.video
         XCTAssertEqual(video.count, 3)
         guard video.count == 3 else { return connection.cancel() }

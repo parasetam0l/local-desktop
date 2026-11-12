@@ -36,11 +36,14 @@ enum RDQUIC {
         parameters(clientOptions(verifyQueue: verifyQueue))
     }
 
-    /// The client's datagram flow: the group's own QUIC options plus `isDatagram`. Fresh
-    /// options (no verify block, different transport settings) made iOS try a separate
-    /// path, which failed over Wi-Fi with "Network is down" (loopback still worked).
-    static func clientDatagramFlowOptions(verifyQueue: DispatchQueue) -> NWProtocolQUIC.Options {
-        let options = clientOptions(verifyQueue: verifyQueue)
+    /// Options for a datagram flow (`NWConnection(from:using:)`) on `group`: the group's
+    /// own QUIC options object with `isDatagram` set. A fresh options object, even one
+    /// built the same way, made macOS 26 and iOS 17 try a separate path that failed with
+    /// "Network is down", so video stayed on the stream; macOS 27 accepted either. Set
+    /// only after the group's streams exist, since the flag lives on the shared object.
+    static func datagramFlowOptions(for group: NWConnectionGroup) -> NWProtocolQUIC.Options? {
+        guard let options = group.parameters.defaultProtocolStack.transportProtocol as? NWProtocolQUIC.Options
+        else { return nil }
         options.isDatagram = true
         return options
     }
@@ -59,14 +62,6 @@ enum RDQUIC {
     /// Host parameters: presents `identity` (a self-signed certificate).
     static func serverParameters(identity: SecIdentity) -> NWParameters? {
         serverOptions(identity: identity).map(parameters)
-    }
-
-    /// The host's datagram flow: the listener's QUIC options plus `isDatagram` (see
-    /// `clientDatagramFlowOptions`).
-    static func serverDatagramFlowOptions(identity: SecIdentity) -> NWProtocolQUIC.Options? {
-        guard let options = serverOptions(identity: identity) else { return nil }
-        options.isDatagram = true
-        return options
     }
 
     private static func serverOptions(identity: SecIdentity) -> NWProtocolQUIC.Options? {

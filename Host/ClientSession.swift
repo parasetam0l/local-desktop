@@ -298,8 +298,7 @@ final class ClientSession {
     /// and switch once it is ready. Until then frames keep going on the stream.
     private func startVideoDatagrams(maxSize: Int) {
         guard let quicGroup, datagramFlow == nil, let videoKey,
-              let identity = QUICIdentityStore.loadOrCreate(),
-              let options = RDQUIC.serverDatagramFlowOptions(identity: identity),
+              let options = RDQUIC.datagramFlowOptions(for: quicGroup),
               let flow = NWConnection(from: quicGroup, using: options) else { return }
         clientMaxDatagramSize = max(RDVideoDatagram.minPieceBody + RDVideoDatagram.overhead, maxSize)
         packetizer = RDVideoPacketizer(key: videoKey)
