@@ -36,6 +36,10 @@ enum RDWire: UInt8 {
     /// Client → host, after `authOK`: `{quicFallback}`, why this connection left QUIC
     /// for TCP, for the host's log (from 1.2.29).
     case transportNote = 0x14
+    /// Host → client, QUIC only: `{nextFrame}`, video leaves datagrams for the stream
+    /// again, and the next stream frame is number `nextFrame`. Sent only to clients whose
+    /// `videoDatagrams` said `canResumeStream` (from 1.2.30).
+    case videoStream = 0x15
 
     // Mouse
     case mouseMoveAbs = 0x20
@@ -307,6 +311,13 @@ struct TransportNoteMsg: Codable {
 struct VideoDatagramsMsg: Codable {
     /// The largest datagram the client's QUIC connection accepts.
     var maxSize: Int
+    /// The client follows `videoStream` back to stream video (from 1.2.30).
+    var canResumeStream: Bool?
+}
+
+struct VideoStreamMsg: Codable {
+    /// The number of the next frame, which comes on the stream.
+    var nextFrame: UInt32
 }
 
 struct RequestKeyframeMsg: Codable {

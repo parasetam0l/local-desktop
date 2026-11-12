@@ -795,8 +795,13 @@ final class HostServer: ObservableObject {
 
     /// One encoder serves every client, so it runs at the rate the slowest one can take.
     func updateBitrate() {
+        ScreenStreamer.shared.setDynamicBitrate(encoderBitrate)
+    }
+
+    /// The bitrate the shared encoder runs at.
+    var encoderBitrate: Int {
         let factor = activeSessions.map(\.bitrateFactor).min() ?? 1.0
-        ScreenStreamer.shared.setDynamicBitrate(Int(Double(preset.targetBitrate) * factor))
+        return Int(Double(preset.targetBitrate) * factor)
     }
 
     private func updateClientName() {

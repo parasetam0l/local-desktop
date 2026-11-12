@@ -38,6 +38,12 @@ private final class LoopbackHost: @unchecked Sendable {
     var sendDatagramVideo = false
     /// (number, payload, keyframe); pieces of each frame are sent in reverse order.
     var datagramFrames: [(UInt32, Data, Bool)] = []
+    /// After the datagram frames: `videoStream {nextFrame}` and this frame on the stream.
+    var resumeStreamFrame: (UInt32, Data)?
+    /// What the client's `videoDatagrams` said.
+    var offeredCanResume: Bool?
+    /// The last `frameAck` number.
+    var lastFrameAck: UInt32 = 0
     private var reader = RDFrameReader()
     private var sendCipher: RDCipher?
     private var receiveCipher: RDCipher?
@@ -101,8 +107,7 @@ private final class LoopbackHost: @unchecked Sendable {
 
     private func startDatagramVideo(maxSize: Int) {
         guard sendDatagramVideo, let group, let videoKey,
-              let options = RDQUIC.datagramFlowOptions(for: group),
-              let flow = NWConnection(from: group, using: options) else { return }
+              let flow = RDQUIC.makeDatagramFlow(on: group) else { return }
         datagramFlow = flow
         let packetizer = RDVideoPacketizer(key: videoKey)
         flow.stateUpdateHandler = { [self] state in
@@ -113,6 +118,11 @@ private final class LoopbackHost: @unchecked Sendable {
                 for piece in pieces.reversed() {
                     flow.send(content: piece, completion: .idempotent)
                 }
+            }
+            guard let (next, payload) = resumeStreamFrame else { return }
+            queue.asyncAfter(deadline: .now() + 0.3) { [self] in
+                write(try! sendCipher!.seal(.videoStream, RDJSON.encode(VideoStreamMsg(nextFrame: next))))
+                write(try! sendCipher!.seal(.frame, payload))
             }
         }
         flow.start(queue: queue)
@@ -200,8 +210,12 @@ private final class LoopbackHost: @unchecked Sendable {
         case .ping:
             write(seal(.pong, RDJSON.decode(PingMsg.self, from: payload)!))
 
+        case .frameAck where payload.count >= 4:
+            lastFrameAck = payload.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
         case .videoDatagrams:
-            startDatagramVideo(maxSize: RDJSON.decode(VideoDatagramsMsg.self, from: payload)!.maxSize)
+            let offer = RDJSON.decode(VideoDatagramsMsg.self, from: payload)!
+            offeredCanResume = offer.canResumeStream
+            startDatagramVideo(maxSize: offer.maxSize)
 
         default:
             break
@@ -391,6 +405,34 @@ final class LoopbackTests: XCTestCase {
         XCTAssertTrue(host.received.isEmpty)
     }
 
+    /// The host gives up on lossy datagrams: after `videoStream {nextFrame}` the client
+    /// takes stream frames again, numbered from `nextFrame`, and confirms that number.
+    func testVideoBackOnStreamAfterVideoStream() throws {
+        let quicHost = LoopbackHost()
+        quicHost.sendDatagramVideo = true
+        let keyframe = RDFrameCodec.pack(width: 64, height: 64, codec: .hevc, data: Data(repeating: 7, count: 3000))
+        let streamFrame = RDFrameCodec.pack(width: 64, height: 64, codec: .hevc, data: Data(repeating: 9, count: 500))
+        quicHost.datagramFrames = [(2, keyframe, true)]
+        quicHost.resumeStreamFrame = (5, streamFrame)
+        let quicPort = try quicHost.start(quic: true)
+        defer { quicHost.stop() }
+
+        let (connection, log) = connect(quicPort: quicPort)
+        wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
+        connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
+        wait(for: [log.expectation("stream, datagram, stream frames") { log.snapshot.video.count >= 3 }], timeout: 5)
+        XCTAssertEqual(quicHost.offeredCanResume, true)
+        XCTAssertEqual(log.snapshot.video[1], keyframe)
+        XCTAssertEqual(log.snapshot.video[2], streamFrame)
+        let deadline = Date().addingTimeInterval(2)
+        while quicHost.lastFrameAck != 5, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(quicHost.lastFrameAck, 5)
+        XCTAssertNil(log.failure)
+        connection.cancel()
+    }
+
     /// Video moves to datagrams after authOK: a multi-piece keyframe (pieces reversed)
     /// arrives whole, a frame after a gap is discarded and a keyframe requested, and
     /// the next keyframe resumes. Frame 1 came on the stream, so numbering goes on at 2.
@@ -410,7 +452,7 @@ final class LoopbackTests: XCTestCase {
         wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
         connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
         // Strict: the release job runs this on macOS 26, where a datagram flow with fresh
-        // options never became ready (see `RDQUIC.datagramFlowOptions`).
+        // options never became ready (see `RDQUIC.makeDatagramFlow`).
         wait(for: [log.expectation("stream frame + 2 datagram frames") { log.snapshot.video.count >= 3 }], timeout: 5)
         let video = log.snapshot.video
         XCTAssertEqual(video.count, 3)

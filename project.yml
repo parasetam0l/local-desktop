@@ -123,6 +123,7 @@ targets:
       - Host/QUICAcceptor.swift
       - Host/LocalInputBlocker.swift
       - Host/CongestionEstimator.swift
+      - Host/DatagramPacer.swift
       - iOS/ClientConnection.swift
       - iOS/ClientLog.swift
       - iOS/AppUpdater.swift

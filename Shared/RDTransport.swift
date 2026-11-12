@@ -36,16 +36,18 @@ enum RDQUIC {
         parameters(clientOptions(verifyQueue: verifyQueue))
     }
 
-    /// Options for a datagram flow (`NWConnection(from:using:)`) on `group`: the group's
-    /// own QUIC options object with `isDatagram` set. A fresh options object, even one
-    /// built the same way, made macOS 26 and iOS 17 try a separate path that failed with
-    /// "Network is down", so video stayed on the stream; macOS 27 accepted either. Set
-    /// only after the group's streams exist, since the flag lives on the shared object.
-    static func datagramFlowOptions(for group: NWConnectionGroup) -> NWProtocolQUIC.Options? {
+    /// Opens a datagram flow on `group` with the group's own QUIC options object and
+    /// `isDatagram` set. A fresh options object, even one built the same way, made
+    /// macOS 15/26 and iOS 17 try a separate path that failed with "Network is down", so
+    /// video stayed on the stream; macOS 27 accepted either. The flag is set only while
+    /// the flow is created: the control stream (and, on the host, the listener's later
+    /// connections) share that object and must stay reliable streams.
+    static func makeDatagramFlow(on group: NWConnectionGroup) -> NWConnection? {
         guard let options = group.parameters.defaultProtocolStack.transportProtocol as? NWProtocolQUIC.Options
         else { return nil }
         options.isDatagram = true
-        return options
+        defer { options.isDatagram = false }
+        return NWConnection(from: group, using: options)
     }
 
     private static func clientOptions(verifyQueue: DispatchQueue) -> NWProtocolQUIC.Options {

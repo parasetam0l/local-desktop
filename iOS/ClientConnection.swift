@@ -82,6 +82,28 @@ final class ClientConnection: @unchecked Sendable {
     private var sendCipher: RDCipher?
     /// Video frames received so far; confirmed to the host with each one (`frameAck`).
     private var framesReceived: UInt32 = 0
+    /// Stream messages received and messages written since the last startup line.
+    private var diagReceived: [RDWire: Int] = [:]
+    private var diagWritten: [RDWire: Int] = [:]
+    private var diagDatagrams = 0
+
+    /// The first seconds after `authOK`, once a second: what came in on the stream and
+    /// as datagrams and what went out, to see which side stalls when video doesn't start.
+    private func logStartupDiagnostics(remaining: Int) {
+        guard remaining > 0 else { return }
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, !self.isFinished else { return }
+            func list(_ counts: [RDWire: Int]) -> String {
+                counts.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.key)×\($0.value)" }.joined(separator: " ")
+            }
+            ClientLog.write("startup: in [\(list(self.diagReceived))] datagrams \(self.diagDatagrams) "
+                            + "out [\(list(self.diagWritten))]")
+            self.diagReceived = [:]
+            self.diagWritten = [:]
+            self.diagDatagrams = 0
+            self.logStartupDiagnostics(remaining: remaining - 1)
+        }
+    }
     private var receiveCipher: RDCipher?
     private var isFinished = false
 
@@ -233,8 +255,7 @@ final class ClientConnection: @unchecked Sendable {
     private func openQUICFlows(_ group: NWConnectionGroup) {
         guard connection == nil else { return }
         guard openControlStream(group) else { return }
-        guard let options = RDQUIC.datagramFlowOptions(for: group),
-              let flow = NWConnection(from: group, using: options) else { return }
+        guard let flow = RDQUIC.makeDatagramFlow(on: group) else { return }
         datagramFlow = flow
         flow.stateUpdateHandler = { [weak self, weak flow] state in
             guard let self, let flow, self.datagramFlow === flow else { return }
@@ -367,6 +388,7 @@ final class ClientConnection: @unchecked Sendable {
         } else {
             frame = RDFrame.pack(wire, payload: payload)
         }
+        diagWritten[wire, default: 0] += 1
         connection?.send(content: frame, completion: .contentProcessed { _ in completion?() })
     }
 
@@ -492,6 +514,7 @@ final class ClientConnection: @unchecked Sendable {
                 return
             }
             guard let wire = frame.wire else { continue }
+            diagReceived[wire, default: 0] += 1
             switch wire {
             case .frame:
                 // Confirmed on arrival, before decoding: the host paces itself on what
@@ -514,6 +537,13 @@ final class ClientConnection: @unchecked Sendable {
                 onVideoFrame(plain)
             case .serverHello:
                 finish(.failed("Protocol error: repeated handshake"))
+            case .videoStream:
+                // The host left datagrams; stream frames go on from `nextFrame`, and
+                // datagrams still arriving are ignored.
+                guard let msg = RDJSON.decode(VideoStreamMsg.self, from: plain) else { continue }
+                reassembler = nil
+                framesReceived = msg.nextFrame &- 1
+                ClientLog.write("video back on the QUIC stream at frame \(msg.nextFrame)")
             case .pong:
                 guard let msg = RDJSON.decode(PingMsg.self, from: plain) else { continue }
                 onEvent(.pong(rttMs: max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)))
@@ -526,6 +556,7 @@ final class ClientConnection: @unchecked Sendable {
                 onEvent(.message(wire, plain))
                 if wire == .authOK {
                     isAuthenticated = true
+                    logStartupDiagnostics(remaining: 15)
                     offerDatagramsIfReady()
                     if let reason = quicFallbackReason {
                         quicFallbackReason = nil
@@ -589,7 +620,7 @@ final class ClientConnection: @unchecked Sendable {
         reassembler = RDVideoReassembler(key: videoKey, lastFrame: framesReceived)
         let reported = flow.maximumDatagramSize
         let maxSize = min(RDVideoDatagram.defaultMaxSize, reported > 0 ? reported : RDVideoDatagram.defaultMaxSize)
-        write(.videoDatagrams, RDJSON.encode(VideoDatagramsMsg(maxSize: maxSize)), then: nil)
+        write(.videoDatagrams, RDJSON.encode(VideoDatagramsMsg(maxSize: maxSize, canResumeStream: true)), then: nil)
     }
 
     private func receiveDatagram(on flow: NWConnection) {
@@ -607,6 +638,7 @@ final class ClientConnection: @unchecked Sendable {
     }
 
     private func handleDatagram(_ datagram: Data) {
+        diagDatagrams += 1
         guard var assembler = reassembler else { return }
         let output = assembler.receive(datagram)
         reassembler = assembler

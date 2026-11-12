@@ -33,9 +33,17 @@ final class ClientSession {
     private var videoKey: SymmetricKey?
     private var datagramFlow: NWConnection?
     private var packetizer: RDVideoPacketizer?
+    private var pacer: DatagramPacer?
+    /// The client follows `videoStream` (1.2.30 on), so lossy datagrams can be left.
+    private var clientCanResumeStream = false
+    /// Consecutive `delivery` windows with at least `lossyWindowFrames` lost frames.
+    private var lossyWindows = 0
+    /// Lost datagram frames in a 5 s window that count it as lossy; two such windows in a
+    /// row move video back to the stream, which resends instead of dropping frames.
+    private static let lossyWindowFrames = 3
     private var clientMaxDatagramSize = RDVideoDatagram.defaultMaxSize
-    /// Set once the datagram flow is ready; never cleared, since the client numbers
-    /// stream frames by their position on the stream.
+    /// Set once the datagram flow is ready; cleared only by `resumeStreamVideo`, which
+    /// tells the client where stream numbering goes on.
     private var videoOverDatagrams = false
     /// Unconfirmed datagram frames older than this are counted lost and stop braking.
     private static let datagramLossTimeout: TimeInterval = 0.3
@@ -86,6 +94,19 @@ final class ClientSession {
     private var phaseStartedAt = Date()
     private var lastActivityAt = Date()
     private var watchdogTimer: Timer?
+    /// Session messages received since the last startup diagnostics line.
+    private var diagReceived: [RDWire: Int] = [:]
+
+    /// The first 15 s of a session, once a second: what came in and how the video gate
+    /// stands, to see which side stalls when a session starts without video.
+    private func logStartupDiagnostics(_ now: Date) {
+        guard now.timeIntervalSince(phaseStartedAt) <= 15 else { return }
+        let received = diagReceived.sorted { $0.key.rawValue < $1.key.rawValue }
+            .map { "\($0.key)×\($0.value)" }.joined(separator: " ")
+        diagReceived = [:]
+        HostLog.write("startup \(peerDisplayName): in [\(received)] sent \(framesSent) acked \(framesAcked) "
+                      + "out \(outgoingFrames) gate \(canSendFrame) datagrams \(videoOverDatagrams)")
+    }
 
     var canSendFrame: Bool {
         guard phase == .active, outgoingFrames < 2 else { return false }
@@ -184,7 +205,12 @@ final class ClientSession {
         case .active:
             if now.timeIntervalSince(lastActivityAt) > Self.idleTimeout {
                 finish(reason: "client timed out")
+                return
             }
+            // Also here, not only when a frame is sent: with no confirmations the gate
+            // stops the encoder, so no frame would come to reopen it.
+            expireLostDatagramFrames()
+            logStartupDiagnostics(now)
         case .closed:
             break
         }
@@ -212,6 +238,8 @@ final class ClientSession {
         InputInjector.release(buttons: heldButtons, keys: heldKeys)
         heldButtons.removeAll()
         heldKeys.removeAll()
+        pacer?.cancel()
+        pacer = nil
         datagramFlow?.cancel()
         datagramFlow = nil
         if cancelConnection {
@@ -298,8 +326,7 @@ final class ClientSession {
     /// and switch once it is ready. Until then frames keep going on the stream.
     private func startVideoDatagrams(maxSize: Int) {
         guard let quicGroup, datagramFlow == nil, let videoKey,
-              let options = RDQUIC.datagramFlowOptions(for: quicGroup),
-              let flow = NWConnection(from: quicGroup, using: options) else { return }
+              let flow = RDQUIC.makeDatagramFlow(on: quicGroup) else { return }
         clientMaxDatagramSize = max(RDVideoDatagram.minPieceBody + RDVideoDatagram.overhead, maxSize)
         packetizer = RDVideoPacketizer(key: videoKey)
         datagramFlow = flow
@@ -308,6 +335,8 @@ final class ClientSession {
                 guard let self, let flow, self.datagramFlow === flow else { return }
                 switch state {
                 case .ready:
+                    self.pacer = DatagramPacer(flow: flow)
+                    self.lossyWindows = 0
                     self.videoOverDatagrams = true
                     HostLog.write("video datagrams for \(self.peerDisplayName): up to \(self.maxDatagramSize) bytes")
                 case .failed(let error) where self.videoOverDatagrams:
@@ -333,7 +362,7 @@ final class ClientSession {
 
     /// Numbers the frame like a stream frame (same counter, same gate) and sends its pieces.
     private func sendVideoDatagrams(_ payload: Data, isKeyframe: Bool) {
-        guard phase != .closed, let flow = datagramFlow, let packetizer else { return }
+        guard phase != .closed, let pacer, let packetizer else { return }
         framesSent &+= 1
         let number = framesSent
         frameSentAt[Int(number % 32)] = ProcessInfo.processInfo.systemUptime
@@ -345,18 +374,34 @@ final class ClientSession {
         }
         outgoingFrames += 1
         server?.updateFrameGate()
-        flow.batch {
-            for (index, datagram) in datagrams.enumerated() {
-                let isLast = index == datagrams.count - 1
-                flow.send(content: datagram, completion: isLast ? .contentProcessed { [weak self] _ in
-                    MainActor.assumeIsolated {
-                        guard let self, self.phase != .closed else { return }
-                        self.outgoingFrames = max(0, self.outgoingFrames - 1)
-                        self.server?.updateFrameGate()
-                    }
-                } : .idempotent)
+        pacer.setRate(bitsPerSecond: DatagramPacer.rate(forEncoderBitrate: server?.encoderBitrate ?? 20_000_000))
+        pacer.enqueue(datagrams) { [weak self, weak pacer] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    // A pacer replaced by `resumeStreamVideo` no longer counts.
+                    guard let self, self.phase != .closed, let pacer, self.pacer === pacer else { return }
+                    self.outgoingFrames = max(0, self.outgoingFrames - 1)
+                    self.server?.updateFrameGate()
+                }
             }
         }
+    }
+
+    /// Datagrams kept losing frames: send video on the stream again, which resends
+    /// instead of dropping. The datagram flow stays open, unused, since cancelling it
+    /// could take the QUIC connection with it.
+    private func resumeStreamVideo(lost: Int) {
+        guard videoOverDatagrams, clientCanResumeStream, phase != .closed else { return }
+        videoOverDatagrams = false
+        pacer?.cancel()
+        pacer = nil
+        // Frames still in flight as datagrams will never be confirmed.
+        framesAcked = framesSent
+        outgoingFrames = 0
+        send(.videoStream, json: VideoStreamMsg(nextFrame: framesSent &+ 1))
+        HostLog.write("video for \(peerDisplayName) back on the QUIC stream: \(lost) frames lost in 5 s, twice")
+        requestRecoveryKeyframe()
+        server?.updateFrameGate()
     }
 
     /// A lost datagram frame is never acked on its own; once it is old enough, count it
@@ -394,7 +439,12 @@ final class ClientSession {
                              peerDisplayName, transport, Double(log.acked) / elapsed, log.min * 1000,
                              log.total / Double(log.sent) * 1000, log.max * 1000, log.held, deliveryLost, bitrateFactor))
         deliveryLog = (now, 0, 0, 0, 1, 0, 0)
+        let lost = deliveryLost
         deliveryLost = 0
+        if videoOverDatagrams {
+            lossyWindows = lost >= Self.lossyWindowFrames ? lossyWindows + 1 : 0
+            if lossyWindows >= 2 { resumeStreamVideo(lost: lost) }
+        }
     }
 
     private func requestRecoveryKeyframe() {
@@ -629,6 +679,7 @@ final class ClientSession {
     }
 
     private func handleSessionMessage(_ wire: RDWire, payload: Data) {
+        diagReceived[wire, default: 0] += 1
         switch wire {
         case .setQuality:
             guard let msg = RDJSON.decode(SetQualityMsg.self, from: payload) else { return }
@@ -693,6 +744,7 @@ final class ClientSession {
 
         case .videoDatagrams:
             guard let msg = RDJSON.decode(VideoDatagramsMsg.self, from: payload) else { return }
+            clientCanResumeStream = msg.canResumeStream == true
             startVideoDatagrams(maxSize: msg.maxSize)
 
         case .bye:
