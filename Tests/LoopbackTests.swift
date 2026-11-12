@@ -412,9 +412,20 @@ final class LoopbackTests: XCTestCase {
         let (connection, log) = connect(quicPort: quicPort)
         wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
         connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
-        wait(for: [log.expectation("stream frame + 2 datagram frames") { log.snapshot.video.count >= 3 }], timeout: 5)
+        let frames = log.expectation("stream frame + 2 datagram frames") { log.snapshot.video.count >= 3 }
+        if XCTWaiter().wait(for: [frames], timeout: 5) != .completed {
+            // The client offers datagrams only once its datagram flow is ready; where the
+            // OS never readies it (the macOS 26 CI runner, iPadOS 17) video stays on the
+            // stream, which the other QUIC test covers.
+            if !quicHost.received.contains(.videoDatagrams) {
+                connection.cancel()
+                throw XCTSkip("QUIC datagram flow never became ready on this OS")
+            }
+            XCTFail("datagram frames missing after the client offered datagrams")
+        }
         let video = log.snapshot.video
         XCTAssertEqual(video.count, 3)
+        guard video.count == 3 else { return connection.cancel() }
         XCTAssertEqual(video[1], keyframe)
         XCTAssertEqual(video[2], resume)
         XCTAssertTrue(quicHost.received.contains(.videoDatagrams))
