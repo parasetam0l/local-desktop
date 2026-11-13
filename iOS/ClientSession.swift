@@ -62,7 +62,6 @@ final class ClientSession: ObservableObject {
     var pictureArea: CGSize = .zero {
         didSet { if pictureArea != oldValue { pictureAreaChanged() } }
     }
-    private var appliedDesktopSize = false
     private var pictureAreaUpdate: DispatchWorkItem?
     private var mirrorRequestTimeout: DispatchWorkItem?
     /// How long the Mac gets to set a size up (it retries for a few seconds with its lid shut).
@@ -115,11 +114,7 @@ final class ClientSession: ObservableObject {
     @Published var isViewOnly = false
     /// The outcome of something the user asked the Mac for, to show for a moment.
     @Published private(set) var notice: SessionNotice?
-    /// A desktop size was asked for and the Mac hasn't answered yet; the inner nil is
-    /// the Mac's own size. `mirrorRequestByUser` is false for the Settings default and
-    /// for a turn of the device.
-    private var requestedMirrorSize: RDMirrorSize??
-    private var mirrorRequestByUser = false
+    private var mirrorSizeState = ClientMirrorSizeState()
     @Published private(set) var liveFPS: Double = 0.0
     @Published private(set) var liveBitrateMbps: Double = 0.0
     @Published private(set) var liveDecodeMs: Double = 0.0
@@ -310,6 +305,10 @@ final class ClientSession: ObservableObject {
     private func tearDownConnection() {
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
+        mirrorRequestTimeout?.cancel()
+        mirrorRequestTimeout = nil
+        mirrorSizeState.resetForNewConnection()
+        mirrorSize = nil
         connection?.cancel()
         connection = nil
         connectionGeneration += 1
@@ -498,9 +497,10 @@ final class ClientSession: ObservableObject {
                 fail("Protocol error: unexpected authentication response")
                 return
             }
-            appliedDesktopSize = false
-            requestedMirrorSize = nil
+            mirrorSizeState.resetForNewConnection()
+            mirrorSize = nil
             mirrorRequestTimeout?.cancel()
+            mirrorRequestTimeout = nil
             appliedDefaultHideDock = false
             sentTextFocusPreference = false
             sizedMirrorAvailable = msg.sizedMirrorAvailable ?? false
@@ -511,7 +511,7 @@ final class ClientSession: ObservableObject {
                 transportProtocol = protocolName
             }
             if phase == .connected, sizedMirrorAvailable, desktopSize != .macOwn, pictureArea.width >= 1 {
-                appliedDesktopSize = true
+                mirrorSizeState.markAppliedForConnection()
                 applyDesktopSize(byUser: false)
             }
             if phase == .connected {
@@ -614,18 +614,19 @@ final class ClientSession: ObservableObject {
             // still have the old size arrive before its answer. Only one with the size
             // asked for settles the request; `mirrorRequestTimedOut` reports one that
             // never comes.
-            if let requested = requestedMirrorSize, requested == msg.mirrorSize {
-                requestedMirrorSize = nil
+            let outcome = mirrorSizeState.didReceiveDisplays(mirrorSize: msg.mirrorSize,
+                                                             sizedMirrorAvailable: sizedMirrorAvailable)
+            if outcome.settledRequest {
                 mirrorRequestTimeout?.cancel()
-                if mirrorRequestByUser {
-                    post("Desktop size: \(requested?.label ?? "Mac's own")", symbol: "rectangle.dashed")
-                }
+                mirrorRequestTimeout = nil
+            }
+            if let label = outcome.userConfirmedLabel {
+                post("Desktop size: \(label)", symbol: "rectangle.dashed")
             }
             // Asked for once per connection (the Mac drops the size when its last client
             // leaves); the session menu and a turn of the device change it after.
-            if !appliedDesktopSize, sizedMirrorAvailable {
-                appliedDesktopSize = true
-                if desktopSize != .macOwn { applyDesktopSize(byUser: false) }
+            if outcome.shouldApplyInitialSize, desktopSize != .macOwn {
+                applyDesktopSize(byUser: false)
             }
 
         case .bye:
@@ -1120,10 +1121,13 @@ final class ClientSession: ObservableObject {
     /// or back at the Mac's own size with nil; the Mac confirms with a new `displays` message.
     private func setSizedMirror(_ size: RDMirrorSize?, byUser: Bool) {
         // Against the size on its way, if any: that is what the Mac will have next.
-        guard phase == .connected, sizedMirrorAvailable, size != (requestedMirrorSize ?? mirrorSize) else { return }
-        requestedMirrorSize = .some(size)
-        mirrorRequestByUser = byUser
-        sendJSON(.setSizedMirror, RDSetSizedMirrorMsg(size: size))
+        guard case .send(let targetSize) = mirrorSizeState.beginRequestIfNeeded(
+            size,
+            isConnected: phase == .connected,
+            sizedMirrorAvailable: sizedMirrorAvailable,
+            byUser: byUser
+        ) else { return }
+        sendJSON(.setSizedMirror, RDSetSizedMirrorMsg(size: targetSize))
         mirrorRequestTimeout?.cancel()
         let timeout = DispatchWorkItem { [weak self] in self?.mirrorRequestTimedOut() }
         mirrorRequestTimeout = timeout
@@ -1131,8 +1135,9 @@ final class ClientSession: ObservableObject {
     }
 
     private func mirrorRequestTimedOut() {
-        guard requestedMirrorSize != nil else { return }
-        requestedMirrorSize = nil
+        guard mirrorSizeState.requestedMirrorSize != nil else { return }
+        mirrorSizeState.clearPendingRequest()
+        mirrorRequestTimeout = nil
         guard phase == .connected else { return }
         // Back on its own size, the Mac is not asked again at every turn of the device.
         if mirrorSize == nil { desktopSize = .macOwn }
@@ -1157,14 +1162,14 @@ final class ClientSession: ObservableObject {
     /// after connecting asks immediately without adding a debounce stall.
     private func pictureAreaChanged() {
         pictureAreaUpdate?.cancel()
-        if !appliedDesktopSize, sizedMirrorAvailable, phase == .connected {
+        if !mirrorSizeState.hasAppliedForConnection, sizedMirrorAvailable, phase == .connected {
             guard pictureArea.width >= 1 else { return }
-            appliedDesktopSize = true
+            mirrorSizeState.markAppliedForConnection()
             if desktopSize != .macOwn { applyDesktopSize(byUser: false) }
             return
         }
         let update = DispatchWorkItem { [weak self] in
-            guard let self, self.appliedDesktopSize, self.desktopSize != .macOwn else { return }
+            guard let self, self.mirrorSizeState.hasAppliedForConnection, self.desktopSize != .macOwn else { return }
             self.applyDesktopSize(byUser: false)
         }
         pictureAreaUpdate = update

@@ -129,3 +129,77 @@ struct ClientClipboardSyncState: Equatable {
         return nil
     }
 }
+
+/// Tracks the client's view of the host's sized-mirror desktop layout across initial
+/// authentication, display updates, and reconnects so stale pre-disconnect state never
+/// suppresses re-applying the client's chosen desktop size.
+struct ClientMirrorSizeState: Equatable {
+    enum RequestAction: Equatable {
+        case none
+        case send(RDMirrorSize?)
+    }
+
+    struct DisplaysOutcome: Equatable {
+        let settledRequest: Bool
+        let userConfirmedLabel: String?
+        let shouldApplyInitialSize: Bool
+    }
+
+    private(set) var knownMirrorSize: RDMirrorSize?
+    /// Outer `.some(nil)` means a request for "Mac's own" size is in flight.
+    private(set) var requestedMirrorSize: RDMirrorSize??
+    private(set) var requestedByUser = false
+    private(set) var hasAppliedForConnection = false
+
+    /// Clears per-connection host layout state before authenticating a new socket.
+    mutating func resetForNewConnection() {
+        knownMirrorSize = nil
+        requestedMirrorSize = nil
+        requestedByUser = false
+        hasAppliedForConnection = false
+    }
+
+    mutating func clearPendingRequest() {
+        requestedMirrorSize = nil
+        requestedByUser = false
+    }
+
+    mutating func markAppliedForConnection() {
+        hasAppliedForConnection = true
+    }
+
+    mutating func beginRequestIfNeeded(_ wanted: RDMirrorSize?,
+                                       isConnected: Bool,
+                                       sizedMirrorAvailable: Bool,
+                                       byUser: Bool) -> RequestAction {
+        guard isConnected, sizedMirrorAvailable, wanted != (requestedMirrorSize ?? knownMirrorSize) else {
+            return .none
+        }
+        requestedMirrorSize = .some(wanted)
+        requestedByUser = byUser
+        return .send(wanted)
+    }
+
+    mutating func didReceiveDisplays(mirrorSize: RDMirrorSize?,
+                                   sizedMirrorAvailable: Bool) -> DisplaysOutcome {
+        knownMirrorSize = mirrorSize
+        var settledRequest = false
+        var confirmedLabel: String?
+        if let requested = requestedMirrorSize, requested == mirrorSize {
+            settledRequest = true
+            let byUser = requestedByUser
+            requestedMirrorSize = nil
+            requestedByUser = false
+            if byUser {
+                confirmedLabel = requested?.label ?? "Mac's own"
+            }
+        }
+        let shouldApplyInitialSize = !hasAppliedForConnection && sizedMirrorAvailable
+        if shouldApplyInitialSize {
+            hasAppliedForConnection = true
+        }
+        return DisplaysOutcome(settledRequest: settledRequest,
+                               userConfirmedLabel: confirmedLabel,
+                               shouldApplyInitialSize: shouldApplyInitialSize)
+    }
+}

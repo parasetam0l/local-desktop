@@ -146,4 +146,67 @@ final class ClientSessionPolicyTests: XCTestCase {
                                                                 hasStrings: false,
                                                                 hasURLs: false))
     }
+
+    func testReconnectReappliesDesktopSizeAfterHostDroppedMirror() {
+        let iPadSize = RDMirrorSize(width: 1112, height: 834)
+        var state = ClientMirrorSizeState()
+
+        // Initial connection establishes the iPad-sized virtual display.
+        state.markAppliedForConnection()
+        XCTAssertEqual(state.beginRequestIfNeeded(iPadSize,
+                                                  isConnected: true,
+                                                  sizedMirrorAvailable: true,
+                                                  byUser: false), .send(iPadSize))
+        let initialConfirm = state.didReceiveDisplays(mirrorSize: iPadSize, sizedMirrorAvailable: true)
+        XCTAssertTrue(initialConfirm.settledRequest)
+        XCTAssertNil(initialConfirm.userConfirmedLabel)
+        XCTAssertEqual(state.knownMirrorSize, iPadSize)
+
+        // Backgrounding drops the connection; Mac drops its mirror after 3s. On reconnect,
+        // resetting per-connection mirror state lets `.authOK` re-request the iPad size.
+        state.resetForNewConnection()
+        state.markAppliedForConnection()
+        XCTAssertEqual(state.beginRequestIfNeeded(iPadSize,
+                                                  isConnected: true,
+                                                  sizedMirrorAvailable: true,
+                                                  byUser: false), .send(iPadSize))
+
+        // Host's greeting `.displays` arrives with `nil` before processing `.setSizedMirror`:
+        // request stays pending rather than clearing early or re-triggering.
+        let greeting = state.didReceiveDisplays(mirrorSize: nil, sizedMirrorAvailable: true)
+        XCTAssertFalse(greeting.settledRequest)
+        XCTAssertFalse(greeting.shouldApplyInitialSize)
+        XCTAssertEqual(state.requestedMirrorSize, .some(iPadSize))
+
+        // Host finishes starting the virtual display and confirms `1112x834`.
+        let confirmed = state.didReceiveDisplays(mirrorSize: iPadSize, sizedMirrorAvailable: true)
+        XCTAssertTrue(confirmed.settledRequest)
+        XCTAssertTrue(state.requestedMirrorSize == nil)
+        XCTAssertEqual(state.knownMirrorSize, iPadSize)
+    }
+
+    func testDisplaysFallbackAppliesForOlderAuthAndUserMacOwnConfirms() {
+        let iPadSize = RDMirrorSize(width: 1112, height: 834)
+        var state = ClientMirrorSizeState()
+
+        // Host didn't advertise sizedMirrorAvailable in AuthOK, only in `.displays`.
+        let fallback = state.didReceiveDisplays(mirrorSize: nil, sizedMirrorAvailable: true)
+        XCTAssertTrue(fallback.shouldApplyInitialSize)
+        XCTAssertEqual(state.beginRequestIfNeeded(iPadSize,
+                                                  isConnected: true,
+                                                  sizedMirrorAvailable: true,
+                                                  byUser: true), .send(iPadSize))
+        let created = state.didReceiveDisplays(mirrorSize: iPadSize, sizedMirrorAvailable: true)
+        XCTAssertTrue(created.settledRequest)
+        XCTAssertEqual(created.userConfirmedLabel, "1112×834")
+
+        // User explicitly switches back to "Mac's own" (`nil`).
+        XCTAssertEqual(state.beginRequestIfNeeded(nil,
+                                                  isConnected: true,
+                                                  sizedMirrorAvailable: true,
+                                                  byUser: true), .send(nil))
+        let reset = state.didReceiveDisplays(mirrorSize: nil, sizedMirrorAvailable: true)
+        XCTAssertTrue(reset.settledRequest)
+        XCTAssertEqual(reset.userConfirmedLabel, "Mac's own")
+    }
 }
