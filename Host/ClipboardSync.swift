@@ -64,7 +64,7 @@ final class ClipboardSync {
         switch content {
         case .text(let text):
             guard !text.isEmpty else { return }
-            pasteboard.clearContents()
+            pasteboard.prepareForNewContents(with: .currentHostOnly)
             pasteboard.setString(text, forType: .string)
         case .image(let png):
             // Not an image we can read: leave the clipboard alone.
@@ -74,7 +74,7 @@ final class ClipboardSync {
             if let tiff = image.tiffRepresentation {
                 item.setData(tiff, forType: .tiff)
             }
-            pasteboard.clearContents()
+            pasteboard.prepareForNewContents(with: .currentHostOnly)
             pasteboard.writeObjects([item])
         }
         lastChangeCount = pasteboard.changeCount

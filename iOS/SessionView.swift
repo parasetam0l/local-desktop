@@ -281,12 +281,10 @@ struct SessionView: View {
             session.setHeldModifiers(held)
         }
         .onChange(of: session.textFocusReport.count) {
-            // A tap landed in a text field on the Mac: bring the keyboard up. It goes away
-            // again by itself only if it also came up by itself.
+            // A tap or click landed in a text field on the Mac: bring the keyboard up. It goes
+            // away again by itself only if it also came up by itself.
             if session.textFocusReport.editable {
-                // Direct mode only: in touchpad mode a tap is a click wherever the pointer
-                // happens to be, and the keyboard coming up for it gets in the way.
-                if !keyboardVisible, !touchpadMode {
+                if !keyboardVisible, session.shouldAutoShowKeyboard(touchpadMode: touchpadMode) {
                     keyboardVisible = true
                     keyboardAutoShown = true
                 }

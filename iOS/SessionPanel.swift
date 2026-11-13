@@ -116,6 +116,9 @@ struct SessionPanel: View {
             }
             PanelToggleRow(title: "Share clipboard", isOn: $session.sharesClipboard)
             PanelToggleRow(title: "Show keyboard for text fields", isOn: $session.autoKeyboard)
+            PanelToggleRow(title: "Show keyboard in touchpad mode", isOn: $session.autoKeyboardInTouchpad)
+                .disabled(!session.autoKeyboard)
+                .opacity(session.autoKeyboard ? 1 : 0.45)
             PanelButtonRow(title: "Brightness and volume", symbol: "chevron.right") {
                 showHardwareSheet = true
             }

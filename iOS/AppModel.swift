@@ -40,6 +40,8 @@ struct AppSettings: Codable {
     var hideDock: Bool? = nil
     /// The keyboard opens when a tap lands in a text field on the Mac (on unless turned off).
     var autoKeyboard: Bool? = nil
+    /// The keyboard also opens for text fields while in touchpad mode (on unless turned off).
+    var autoKeyboardInTouchpad: Bool? = nil
     /// Sessions share the clipboard with the Mac (off unless turned on).
     var shareClipboard: Bool? = nil
     /// Sessions hide the status bar and dim the home indicator (on unless turned off).
@@ -209,6 +211,7 @@ final class AppModel: ObservableObject {
         newSession.setDesktopSize(settings.defaultDesktopSize, byUser: false)
         newSession.defaultHideDock = settings.hideDock ?? false
         newSession.autoKeyboard = settings.autoKeyboard ?? true
+        newSession.autoKeyboardInTouchpad = settings.autoKeyboardInTouchpad ?? true
         newSession.sharesClipboard = settings.shareClipboard ?? false
         session = newSession
 

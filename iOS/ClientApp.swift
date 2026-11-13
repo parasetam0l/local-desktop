@@ -6,6 +6,7 @@ struct LocalDesktopClientApp: App {
     @StateObject private var app = AppModel()
     @StateObject private var updater = AppUpdater()
     @Environment(\.scenePhase) private var scenePhase
+    @State private var wasBackgrounded = false
 
     var body: some Scene {
         WindowGroup {
@@ -17,10 +18,14 @@ struct LocalDesktopClientApp: App {
             switch scenePhase {
             case .active:
                 OrientationLock.apply(app.settings.lockedOrientation)
-                // Text copied in another app while this one was away.
-                app.session?.syncClipboardToMac()
+                if wasBackgrounded {
+                    wasBackgrounded = false
+                    // Text copied in another app while this one was away.
+                    app.session?.syncClipboardToMacAfterBackgroundReturn()
+                }
                 Task { await updater.checkIfDue() }
             case .background:
+                wasBackgrounded = true
                 updater.endInstall()
             default:
                 break

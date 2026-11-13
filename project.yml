@@ -120,6 +120,7 @@ targets:
       - Shared/RDTransport.swift
       - Shared/RDVideoDatagrams.swift
       - Shared/ClosedLidWakePolicy.swift
+      - Shared/ClientSessionPolicy.swift
       - Host/PINSecurity.swift
       - Host/HostLog.swift
       - Host/CrashRecoveryManager.swift

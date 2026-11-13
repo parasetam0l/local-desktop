@@ -81,14 +81,14 @@ final class ClientSession: ObservableObject {
         }
     }
     private var sentTextFocusPreference = false
+    /// Show the keyboard on text field focus while in touchpad mode too.
+    @Published var autoKeyboardInTouchpad = true
     /// Whether this session shares the clipboard with the Mac. It starts from Settings and
     /// the session panel changes it for this session only.
     @Published var sharesClipboard = false {
         didSet { if sharesClipboard != oldValue { clipboardSharingChanged() } }
     }
-    /// The pasteboard's change count when sharing turned on, then after each sync, so
-    /// only text copied later goes to the Mac; nil while sharing is off.
-    private var syncedClipboardChangeCount: Int?
+    private var clipboardSyncState = ClientClipboardSyncState()
     private var clipboardImage = RDClipboardImageAssembler()
     private var nextClipboardImageId: UInt32 = 1
     /// The Mac's latest answer after a click: counts up with each one, with whether the
@@ -505,6 +505,7 @@ final class ClientSession: ObservableObject {
             sentTextFocusPreference = false
             sizedMirrorAvailable = msg.sizedMirrorAvailable ?? false
             clipboardImage.reset()
+            let isInitialConnect = !hasConnectedOnce
             handleAuthOK(msg, attempt: attempt)
             if showDebugHUD, let protocolName = connection?.currentTransportLabel {
                 transportProtocol = protocolName
@@ -513,11 +514,17 @@ final class ClientSession: ObservableObject {
                 appliedDesktopSize = true
                 applyDesktopSize(byUser: false)
             }
-            if phase == .connected, sharesClipboard {
-                // Macs before 1.2.21 ignore this.
-                sendJSON(.setClipboardSharing, RDSetClipboardSharingMsg(enabled: true))
-                // Text copied in another app while the connection was down.
-                syncClipboardToMac()
+            if phase == .connected {
+                if sharesClipboard {
+                    // Macs before 1.2.21 ignore this.
+                    sendJSON(.setClipboardSharing, RDSetClipboardSharingMsg(enabled: true))
+                }
+                if clipboardSyncState.didAuthenticate(isInitialConnect: isInitialConnect,
+                                                      sharesClipboard: sharesClipboard,
+                                                      currentChangeCount: UIPasteboard.general.changeCount,
+                                                      now: ProcessInfo.processInfo.systemUptime) {
+                    syncClipboardToMac(trigger: .reconnect)
+                }
             }
 
         case .authFailed:
@@ -742,86 +749,75 @@ final class ClientSession: ObservableObject {
                                                 droppedFrames: decoded.dropped + network.lost))
     }
 
+    func shouldAutoShowKeyboard(touchpadMode: Bool) -> Bool {
+        AutoKeyboardPolicy.shouldAutoShowKeyboard(autoKeyboard: autoKeyboard,
+                                                  autoKeyboardInTouchpad: autoKeyboardInTouchpad,
+                                                  touchpadMode: touchpadMode)
+    }
+
     // MARK: Clipboard
 
     private func clipboardSharingChanged() {
-        syncedClipboardChangeCount = sharesClipboard ? UIPasteboard.general.changeCount : nil
+        clipboardSyncState.setSharing(sharesClipboard, currentChangeCount: UIPasteboard.general.changeCount)
         clipboardImage.reset()
         sendJSON(.setClipboardSharing, RDSetClipboardSharingMsg(enabled: sharesClipboard))
     }
 
-    /// Sends this device's clipboard (text or an image) to the Mac if it changed since
-    /// sharing turned on and since the last sync: when the app comes back and before a
-    /// paste. Reading the contents may show iOS's paste prompt; the change count, the
-    /// `has…` checks and the types don't.
-    func syncClipboardToMac() {
-        guard phase == .connected, sharesClipboard, let synced = syncedClipboardChangeCount else { return }
+    /// Syncs text or an image copied while the app was backgrounded, or queues the sync
+    /// until reconnect finishes if the connection dropped while away.
+    func syncClipboardToMacAfterBackgroundReturn() {
         let pasteboard = UIPasteboard.general
-        let changeCount = pasteboard.changeCount
-        guard changeCount != synced else { return }
-        syncedClipboardChangeCount = changeCount
-        // Nothing to share: don't touch the contents, so iOS doesn't ask.
-        guard pasteboard.hasStrings || pasteboard.hasURLs || pasteboard.hasImages else { return }
-        // iOS shows its paste prompt for every type whose contents are read, and `items`
-        // reads them all (text from Safari carries 3-4), so pick the one type to share
-        // from the list of types, which doesn't ask, and read only that.
-        guard let identifier = Self.clipboardType(in: pasteboard.types),
-              let value = pasteboard.value(forPasteboardType: identifier) else { return }
-        switch Self.clipboardContent(value, identifier: identifier) {
-        case .text(let text)?:
-            guard let payload = RDClipboardMsg.payload(for: text) else { return }
-            send(.clipboard, payload)
-        case .image(let image)?:
-            guard let chunks = RDClipboardImage.chunks(of: image, id: nextClipboardImageId) else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard clipboardSyncState.foregroundReturnShouldSync(isConnected: phase == .connected,
+                                                           sharesClipboard: sharesClipboard,
+                                                           currentChangeCount: pasteboard.changeCount,
+                                                           now: now) else { return }
+        syncClipboard(from: pasteboard)
+    }
+
+    /// Sends this device's clipboard (text or an image) to the Mac if it changed since
+    /// sharing turned on or the last sync. Checking `changeCount`, `hasStrings`, `hasURLs`,
+    /// and `hasImages` does not show iOS's paste prompt; reading a typed value does, so
+    /// only one typed accessor is read per sync.
+    func syncClipboardToMac(trigger: ClientClipboardSyncState.Trigger = .pasteCommand) {
+        let pasteboard = UIPasteboard.general
+        let now = ProcessInfo.processInfo.systemUptime
+        guard clipboardSyncState.canStartSync(trigger: trigger,
+                                              isConnected: phase == .connected,
+                                              sharesClipboard: sharesClipboard,
+                                              currentChangeCount: pasteboard.changeCount,
+                                              now: now) else { return }
+        syncClipboard(from: pasteboard)
+    }
+
+    private func syncClipboard(from pasteboard: UIPasteboard) {
+        clipboardSyncState.beginSync(currentChangeCount: pasteboard.changeCount)
+        defer {
+            clipboardSyncState.endSync(currentChangeCount: pasteboard.changeCount,
+                                       now: ProcessInfo.processInfo.systemUptime)
+        }
+        guard let kind = ClientClipboardSyncState.preferredReadKind(hasImages: pasteboard.hasImages,
+                                                                    hasStrings: pasteboard.hasStrings,
+                                                                    hasURLs: pasteboard.hasURLs) else { return }
+        switch kind {
+        case .image:
+            guard let image = pasteboard.image,
+                  let data = Self.encoded(image),
+                  let chunks = RDClipboardImage.chunks(of: data, id: nextClipboardImageId) else { return }
             nextClipboardImageId &+= 1
             for chunk in chunks {
                 send(.clipboardImage, chunk)
             }
-        case nil:
-            return
+        case .string:
+            guard let text = pasteboard.string, !text.isEmpty,
+                  let payload = RDClipboardMsg.payload(for: text) else { return }
+            send(.clipboard, payload)
+        case .url:
+            guard let url = pasteboard.url else { return }
+            let text = url.absoluteString
+            guard !text.isEmpty, let payload = RDClipboardMsg.payload(for: text) else { return }
+            send(.clipboard, payload)
         }
-    }
-
-    private enum ClipboardContent {
-        case text(String)
-        case image(Data)
-    }
-
-    /// Plain text (a URL as its string) or an image from one clipboard item, whichever
-    /// type the copying app put first. An image goes as it was copied when that is PNG or
-    /// JPEG and not too large, else as PNG, or JPEG when PNG is too large.
-    static func clipboardType(in identifiers: [String]) -> String? {
-        identifiers.first { identifier in
-            guard let type = UTType(identifier) else { return false }
-            return type.conforms(to: .image) || type.conforms(to: .url) || type.conforms(to: .plainText)
-        }
-    }
-
-    private static func clipboardContent(_ value: Any, identifier: String) -> ClipboardContent? {
-        guard let type = UTType(identifier) else { return nil }
-        if type.conforms(to: .image) {
-            if let data = value as? Data {
-                if (type.conforms(to: .png) || type.conforms(to: .jpeg)), data.count <= RDClipboardImage.maxSize,
-                   UIImage(data: data) != nil {
-                    return .image(data)
-                }
-                if let image = UIImage(data: data), let encoded = encoded(image) { return .image(encoded) }
-            } else if let image = value as? UIImage, let encoded = encoded(image) {
-                return .image(encoded)
-            }
-        } else if type.conforms(to: .url) {
-            if let url = value as? URL { return .text(url.absoluteString) }
-            if let text = value as? String, !text.isEmpty { return .text(text) }
-            if let data = value as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
-                return .text(url.absoluteString)
-            }
-        } else if type.conforms(to: .plainText) {
-            if let text = value as? String, !text.isEmpty { return .text(text) }
-            if let data = value as? Data, let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                return .text(text)
-            }
-        }
-        return nil
     }
 
     private static func encoded(_ image: UIImage) -> Data? {
@@ -834,17 +830,17 @@ final class ClientSession: ObservableObject {
         guard UIImage(data: data) != nil else { return }
         let pasteboard = UIPasteboard.general
         let type = RDClipboardImage.isPNG(data) ? UTType.png : UTType.jpeg
-        pasteboard.setData(data, forPasteboardType: type.identifier)
-        // Not sent back to the Mac.
-        syncedClipboardChangeCount = pasteboard.changeCount
+        // Local-only prevents iOS Universal Clipboard from echoing Mac's clipboard back to Mac.
+        pasteboard.setItems([[type.identifier: data]], options: [.localOnly: true])
+        clipboardSyncState.didReceiveFromHost(currentChangeCount: pasteboard.changeCount)
     }
 
     private func receiveClipboard(_ text: String) {
         guard !text.isEmpty, text.utf8.count <= RDClipboardMsg.maxPayload else { return }
         let pasteboard = UIPasteboard.general
-        pasteboard.string = text
-        // Not sent back to the Mac.
-        syncedClipboardChangeCount = pasteboard.changeCount
+        // Local-only prevents iOS Universal Clipboard from echoing Mac's clipboard back to Mac.
+        pasteboard.setItems([[UTType.utf8PlainText.identifier: text]], options: [.localOnly: true])
+        clipboardSyncState.didReceiveFromHost(currentChangeCount: pasteboard.changeCount)
     }
 
     // MARK: Input

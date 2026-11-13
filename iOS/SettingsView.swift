@@ -122,9 +122,15 @@ struct SettingsView: View {
     }
 
     private var keyboardSection: some View {
-        PanelSection("Keyboard", footer: "In direct touch mode the on-screen keyboard opens by itself when you tap a text field on the Mac.") {
+        let autoKeyboardEnabled = app.settings.autoKeyboard ?? true
+        return PanelSection("Keyboard", footer: "The on-screen keyboard opens by itself when a tap or click lands in a text field on the Mac.") {
             PanelToggleRow(title: "Show keyboard for text fields",
                            isOn: Binding(get: { app.settings.autoKeyboard ?? true }, set: { app.settings.autoKeyboard = $0 }))
+            PanelToggleRow(title: "Show keyboard in touchpad mode",
+                           isOn: Binding(get: { app.settings.autoKeyboardInTouchpad ?? true },
+                                         set: { app.settings.autoKeyboardInTouchpad = $0 }))
+                .disabled(!autoKeyboardEnabled)
+                .opacity(autoKeyboardEnabled ? 1 : 0.45)
         }
     }
 
