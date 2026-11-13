@@ -4,6 +4,158 @@ import AppKit
 import CoreGraphics
 import Combine
 
+/// Lock-protected coordination state shared between capture callbacks (`ScreenStreamer`),
+/// per-session network queues (`ClientSession`), and `@MainActor` (`HostServer`).
+final class SessionGate: @unchecked Sendable {
+    private struct Entry {
+        let session: ClientSession
+        let usesAVCC: Bool
+        var canSend: Bool
+        var bitrateFactor: Double
+        var usesDatagrams: Bool
+    }
+
+    private let lock = NSLock()
+    private var entries: [ObjectIdentifier: Entry] = [:]
+    private var baseTargetBitrate: Int
+    private var running = false
+
+    init(baseTargetBitrate: Int) {
+        self.baseTargetBitrate = baseTargetBitrate
+    }
+
+    var isRunning: Bool {
+        withLock { running }
+    }
+
+    func setRunning(_ isRunning: Bool) {
+        withLock { running = isRunning }
+    }
+
+    func register(_ session: ClientSession, canSend: Bool, bitrateFactor: Double) {
+        let id = session.sessionID
+        let state = withLock {
+            entries[id] = Entry(session: session,
+                                usesAVCC: session.clientSupportsAVCC,
+                                canSend: canSend,
+                                bitrateFactor: bitrateFactor,
+                                usesDatagrams: false)
+            return currentControlStateLocked()
+        }
+        pushControlState(state)
+    }
+
+    func unregister(_ session: ClientSession) {
+        let id = session.sessionID
+        let result: (state: (anyReady: Bool, targetRate: Int, anyDatagrams: Bool), removed: Bool) = withLock {
+            let existed = entries.removeValue(forKey: id) != nil
+            return (currentControlStateLocked(), existed)
+        }
+        guard result.removed else { return }
+        pushControlState(result.state)
+    }
+
+    func setCanSend(_ canSend: Bool, for id: ObjectIdentifier) {
+        let anyReady: Bool? = withLock {
+            guard entries[id] != nil else { return nil }
+            entries[id]?.canSend = canSend
+            return entries.values.contains { $0.canSend }
+        }
+        if let anyReady {
+            ScreenStreamer.setClientsReady(anyReady)
+        }
+    }
+
+    func setBitrateFactor(_ factor: Double, for id: ObjectIdentifier) {
+        let targetRate: Int? = withLock {
+            guard entries[id] != nil else { return nil }
+            entries[id]?.bitrateFactor = factor
+            return currentTargetRateLocked()
+        }
+        if let targetRate {
+            ScreenStreamer.setDynamicBitrate(targetRate)
+        }
+    }
+
+    func setUsesDatagrams(_ usesDatagrams: Bool, for id: ObjectIdentifier) {
+        let anyDatagrams: Bool? = withLock {
+            guard entries[id] != nil else { return nil }
+            entries[id]?.usesDatagrams = usesDatagrams
+            return entries.values.contains { $0.usesDatagrams }
+        }
+        if let anyDatagrams {
+            ScreenStreamer.setLossyDatagramMode(anyDatagrams)
+        }
+    }
+
+    func setBaseTargetBitrate(_ target: Int) {
+        let targetRate = withLock {
+            baseTargetBitrate = target
+            return currentTargetRateLocked()
+        }
+        ScreenStreamer.setDynamicBitrate(targetRate)
+    }
+
+    func refreshGateAndBitrate() {
+        let state = withLock { currentControlStateLocked() }
+        pushControlState(state)
+    }
+
+    var currentEncoderBitrate: Int {
+        withLock { currentTargetRateLocked() }
+    }
+
+    var probingMaxFactor: Double {
+        withLock { CongestionEstimator.maxFactor(forBaseBitrate: baseTargetBitrate) }
+    }
+
+    /// Fans out an encoded frame directly from the encoder callback to each session's queue,
+    /// packing AVCC / Annex-B at most once per needed wire format.
+    func broadcastVideo(_ packet: EncodedVideoPacket) {
+        let snapshot: [(session: ClientSession, usesAVCC: Bool)] = withLock {
+            entries.values.map { ($0.session, $0.usesAVCC) }
+        }
+        guard !snapshot.isEmpty else { return }
+        var avccPayload: Data?
+        var annexBPayload: Data?
+        for item in snapshot {
+            let payload: Data
+            if item.usesAVCC {
+                if avccPayload == nil { avccPayload = packet.packAVCC() }
+                payload = avccPayload!
+            } else {
+                if annexBPayload == nil { annexBPayload = packet.packAnnexB() }
+                payload = annexBPayload!
+            }
+            item.session.enqueuePackedVideo(payload, isKeyframe: packet.isKeyframe)
+        }
+    }
+
+    private func currentControlStateLocked() -> (anyReady: Bool, targetRate: Int, anyDatagrams: Bool) {
+        (entries.values.contains { $0.canSend },
+         currentTargetRateLocked(),
+         entries.values.contains { $0.usesDatagrams })
+    }
+
+    private func pushControlState(_ state: (anyReady: Bool, targetRate: Int, anyDatagrams: Bool)) {
+        ScreenStreamer.setClientsReady(state.anyReady)
+        ScreenStreamer.setDynamicBitrate(state.targetRate)
+        ScreenStreamer.setLossyDatagramMode(state.anyDatagrams)
+    }
+
+    private func currentTargetRateLocked() -> Int {
+        let cap = CongestionEstimator.maxFactor(forBaseBitrate: baseTargetBitrate)
+        let factor = min(cap, entries.values.map(\.bitrateFactor).min() ?? 1.0)
+        return Int(Double(baseTargetBitrate) * factor)
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
 /// Menu-bar host: listens for client connections, tracks sessions, and
 /// coordinates screen streaming and power state for them.
 @MainActor
@@ -36,9 +188,16 @@ final class HostServer: ObservableObject {
     /// What was asked for while it was (the inner nil is the Mac's own layout); done next.
     private var mirrorSizeAfterStart: RDMirrorSize??
     private var mirrorSizeRetries = 0
+    /// Brief initial grace on fresh connect so `setQuality` + `setSizedMirror` can arrive
+    /// before starting capture on the Mac's native display only to tear it right back down.
+    private var initialCaptureTask: Task<Void, Never>?
+    /// Codec last requested by a client, preserved before capture has started.
+    private var preferredCodec: RDCodec?
     /// Puts the desktop size and the Dock back a while after the last client left.
     private var sessionSettingsReset: DispatchWorkItem?
-    @Published var preset: RDQualityPreset = .high
+    @Published var preset: RDQualityPreset = .high {
+        didSet { sessionGate.setBaseTargetBitrate(preset.targetBitrate) }
+    }
     @Published var lastError: String?
     /// Why screen capture last failed; cleared once capture runs again.
     @Published var captureError: String?
@@ -67,7 +226,7 @@ final class HostServer: ObservableObject {
     @Published private(set) var isBlockingLocalInput = false
     @Published private(set) var localInputBlockError: String?
 
-    static let computerName: String = Host.current().localizedName ?? "Mac"
+    nonisolated static let computerName: String = Host.current().localizedName ?? "Mac"
 
     /// Unauthenticated connections allowed at once (in total and per remote address); more are refused.
     private static let maxPendingSessions = 16
@@ -85,6 +244,8 @@ final class HostServer: ObservableObject {
     private var hostStateBroadcastWorkItem: DispatchWorkItem?
     private var capsLockTimer: Timer?
     private var lastBroadcastHostState: HostStateMsg?
+    private var lastBroadcastRunningApps: [RDRunningApp]?
+    private var runningAppsDebounceTask: Task<Void, Never>?
     private static let hostStateDebounce: TimeInterval = 0.5
 
     /// First IPv4 address on a physical interface (en0…), for display in the menu.
@@ -115,13 +276,21 @@ final class HostServer: ObservableObject {
     private var quicListener: NWListener?
     /// The UDP port QUIC listens on, once its listener is ready.
     private var quicPort: UInt16?
+    /// SHA-256 of the QUIC TLS leaf certificate, used to channel-bind QUIC sessions.
+    private var quicTLSCertHash: Data?
+    /// Listeners and QUIC stream acceptance run off `@MainActor` so network accept/handshake
+    /// traffic is never stalled behind AppKit/menu UI work.
+    private let acceptQueue = DispatchQueue(label: "LocalDesktop.accept", qos: .userInteractive)
+    let sessionGate = SessionGate(baseTargetBitrate: RDQualityPreset.high.targetBitrate)
     /// Incoming QUIC connections, kept until they close (a session cancels its own).
     private lazy var quicAcceptor = QUICAcceptor(
-        queue: .main,
+        queue: acceptQueue,
         log: { HostLog.write($0) },
         onStream: { [weak self] stream, group, firstBytes in
-            MainActor.assumeIsolated {
-                self?.accept(stream, transport: .quic, group: group, initialData: firstBytes)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.accept(stream, transport: .quic, group: group, initialData: firstBytes)
+                }
             }
         })
     /// Connections still performing the handshake.
@@ -140,16 +309,9 @@ final class HostServer: ObservableObject {
     }
 
     private init() {
-        ScreenStreamer.shared.onVideoPacket = { [weak self] data, isKeyframe, width, height, codec in
-            // Hop to main in order; ClientSession (and its cipher) lives there.
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    for session in self.activeSessions {
-                        session.sendVideoFrame(data, isKeyframe: isKeyframe, width: width, height: height, codec: codec)
-                    }
-                }
-            }
+        let gate = sessionGate
+        ScreenStreamer.shared.onVideoPacket = { packet in
+            gate.broadcastVideo(packet)
         }
         ScreenStreamer.shared.onCaptureStopped = { [weak self] error in
             self?.captureDidStop(error)
@@ -224,7 +386,7 @@ final class HostServer: ObservableObject {
                    let bid = activeApp.bundleIdentifier {
                     server.appSwitcher.trackActivation(bid)
                 }
-                server.broadcastRunningApps()
+                server.scheduleBroadcastRunningApps()
             }
         }
     }
@@ -333,9 +495,6 @@ final class HostServer: ObservableObject {
             parameters.serviceClass = .interactiveVideo
             parameters.allowLocalEndpointReuse = true
             parameters.includePeerToPeer = false
-            if let ipOptions = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-                ipOptions.version = .v4
-            }
             let preferredPort = NWEndpoint.Port(rawValue: RDService.defaultPort) ?? .any
             let newListener: NWListener
             if let specific = try? NWListener(using: parameters, on: preferredPort) {
@@ -345,26 +504,31 @@ final class HostServer: ObservableObject {
             }
             newListener.service = advertisedService()
             newListener.newConnectionHandler = { [weak self] connection in
-                MainActor.assumeIsolated {
-                    self?.accept(connection, transport: .tcp)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self?.accept(connection, transport: .tcp)
+                    }
                 }
             }
             newListener.stateUpdateHandler = { [weak self] state in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    switch state {
-                    case .ready:
-                        self.port = newListener.port?.rawValue ?? 0
-                        self.readvertise()
-                    case .failed(let error):
-                        self.lastError = "Server error: \(error.localizedDescription)"
-                    default:
-                        break
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        switch state {
+                        case .ready:
+                            self.port = newListener.port?.rawValue ?? 0
+                            self.readvertise()
+                        case .failed(let error):
+                            self.lastError = "Server error: \(error.localizedDescription)"
+                        default:
+                            break
+                        }
                     }
                 }
             }
             listener = newListener
-            newListener.start(queue: .main)
+            sessionGate.setRunning(true)
+            newListener.start(queue: acceptQueue)
             startQUICListener(on: preferredPort)
             running = true
             lastError = nil
@@ -398,11 +562,13 @@ final class HostServer: ObservableObject {
         hostStateBroadcastWorkItem = nil
         lastBroadcastHostState = nil
         updateLocalInputBlocking()
+        sessionGate.setRunning(false)
         listener?.cancel()
         listener = nil
         quicListener?.cancel()
         quicListener = nil
         quicPort = nil
+        quicTLSCertHash = nil
         quicAcceptor.cancelAll()
         ScreenStreamer.shared.stop()
         updateFrameGate()
@@ -461,27 +627,34 @@ final class HostServer: ObservableObject {
 
     func setPreset(_ newPreset: RDQualityPreset) {
         preset = newPreset
-        Task { await ScreenStreamer.shared.updatePreset(newPreset) }
+        Task { await ScreenStreamer.shared.updatePreset(newPreset, targetBitrate: encoderBitrate) }
     }
 
     /// Streams another display, chosen in the menu or by a client; unknown ids are ignored.
     func setDisplay(_ id: CGDirectDisplayID) {
         guard selectedDisplayID != id, displays.contains(where: { $0.id == id }) else { return }
+        cancelInitialCapture()
         selectedDisplayID = id
         guard running, !activeSessions.isEmpty else { return }
-        restartCapture()
+        restartCapture(debounced: false)
     }
 
     /// Lays the desktop out at `size` and streams that (the Mac's main display mirrors a
     /// virtual display of that size), or goes back to the Mac's own layout with nil.
     func setSizedMirror(_ size: RDMirrorSize?) {
+        cancelInitialCapture()
         let wanted = size.map(SizedMirror.clamped)
         HostLog.write("size wanted=\(wanted?.label ?? "own") current=\(mirrorSize?.label ?? "own") headless=\(isHeadlessClosedLid) | \(HostLog.displaySummary())")
         guard !isStartingSizedMirror else {
             mirrorSizeAfterStart = .some(wanted)
             return
         }
-        guard wanted != mirrorSize else { return }
+        if wanted == mirrorSize {
+            if wanted != nil, running, !activeSessions.isEmpty, !isHeadlessClosedLid, !ScreenStreamer.shared.isRunning {
+                restartCapture(debounced: false)
+            }
+            return
+        }
         guard let wanted else {
             pendingMirrorSize = nil
             mirrorSizeRetries = 0
@@ -545,7 +718,17 @@ final class HostServer: ObservableObject {
         mirrorSize = wanted
         selectedDisplayID = id
         refreshDisplays()
-        restartCapture()
+        if ScreenStreamer.shared.isRunning, ScreenStreamer.shared.currentDisplay == id {
+            let codec = preferredCodec ?? ScreenStreamer.shared.currentCodec
+            Task { [weak self] in
+                guard let self, !self.activeSessions.isEmpty, ScreenStreamer.shared.currentDisplay == id else { return }
+                await ScreenStreamer.shared.updateConfiguration(preset: self.preset,
+                                                                codec: codec,
+                                                                targetBitrate: self.encoderBitrate)
+            }
+        } else {
+            restartCapture(debounced: false)
+        }
     }
 
     /// The desktop size and the hidden Dock outlive the last client for a while: a client
@@ -587,47 +770,79 @@ final class HostServer: ObservableObject {
         selectedDisplayID = displayBeforeSizedMirror
         displayBeforeSizedMirror = nil
         refreshDisplays()
-        if running, !activeSessions.isEmpty { restartCapture() }
+        if running, !activeSessions.isEmpty { restartCapture(debounced: false) }
     }
 
     func setCodec(_ codec: RDCodec) {
-        Task { await ScreenStreamer.shared.updateConfiguration(preset: preset, codec: codec) }
+        preferredCodec = codec
+        Task { await ScreenStreamer.shared.updateConfiguration(preset: preset, codec: codec, targetBitrate: encoderBitrate) }
     }
 
-    /// Debounced capture restart; superseded restarts are expected and not errors.
-    private func restartCapture(codec: RDCodec? = nil) {
+    private func cancelInitialCapture() {
+        initialCaptureTask?.cancel()
+        initialCaptureTask = nil
+    }
+
+    private func scheduleInitialCapture(delayMs: UInt64 = 75, codec: RDCodec? = nil) {
+        initialCaptureTask?.cancel()
+        if let codec { preferredCodec = codec }
+        initialCaptureTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+            guard !Task.isCancelled, let self,
+                  !self.activeSessions.isEmpty,
+                  !self.isStartingSizedMirror,
+                  !ScreenStreamer.shared.isRunning else { return }
+            self.initialCaptureTask = nil
+            await self.performCaptureRestart(codec: self.preferredCodec, debounced: false)
+        }
+    }
+
+    /// Capture start/restart; `debounced: true` collapses rapid display/wake bursts while
+    /// a stream is already running, whereas explicit switches start without delay.
+    private func restartCapture(codec: RDCodec? = nil, debounced: Bool = true) {
+        cancelInitialCapture()
         Task {
-            // The last client may have left between scheduling this and running it.
-            guard !activeSessions.isEmpty else { return }
-            // With the lid shut and no external display there is nothing capture can use
-            // until the lid opens (or a display is attached); `lidStateChanged` retries then.
-            guard !isHeadlessClosedLid else { return }
-            let requested = selectedDisplayID
-            do {
-                try await ScreenStreamer.shared.restart(displayID: requested, preset: preset,
-                                                        codec: codec ?? ScreenStreamer.shared.currentCodec)
-                captureError = nil
-                closedLidWakeCheckTask?.cancel()
-                closedLidWakeCheckTask = nil
-                if isDisplaySleeping {
-                    isDisplaySleeping = false
-                    isHostLocked = Self.readIsLocked()
-                    broadcastHostState()
-                }
-                // The chosen display was gone and capture fell back to another one.
-                let streamed = ScreenStreamer.shared.currentDisplay
-                if requested != nil, streamed != requested, selectedDisplayID == requested {
-                    selectedDisplayID = streamed
-                }
-            } catch is CancellationError {
-            } catch where ScreenStreamer.isDisplayUnavailable(error) {
-                // Nothing to capture until a display wakes or returns; the observers restart it then.
-            } catch {
-                captureError = "Screen capture: \(error.localizedDescription)"
+            await performCaptureRestart(codec: codec, debounced: debounced)
+        }
+    }
+
+    private func performCaptureRestart(codec: RDCodec? = nil, debounced: Bool = true) async {
+        // The last client may have left between scheduling this and running it.
+        guard !activeSessions.isEmpty else { return }
+        // Wait for virtual display setup to finish rather than capturing a transient screen.
+        guard !isStartingSizedMirror else { return }
+        // With the lid shut and no external display there is nothing capture can use
+        // until the lid opens (or a display is attached); `lidStateChanged` retries then.
+        guard !isHeadlessClosedLid else { return }
+        let requested = selectedDisplayID
+        let targetCodec = codec ?? preferredCodec ?? ScreenStreamer.shared.currentCodec
+        do {
+            try await ScreenStreamer.shared.restart(displayID: requested,
+                                                    preset: preset,
+                                                    codec: targetCodec,
+                                                    targetBitrate: encoderBitrate,
+                                                    debounced: debounced)
+            captureError = nil
+            closedLidWakeCheckTask?.cancel()
+            closedLidWakeCheckTask = nil
+            if isDisplaySleeping {
+                isDisplaySleeping = false
+                isHostLocked = Self.readIsLocked()
+                broadcastHostState()
             }
-            if activeSessions.isEmpty {
-                ScreenStreamer.shared.stop()
+            // The chosen display was gone and capture fell back to another one.
+            let streamed = ScreenStreamer.shared.currentDisplay
+            if requested != nil, streamed != requested, selectedDisplayID == requested {
+                selectedDisplayID = streamed
             }
+        } catch is CancellationError {
+        } catch where ScreenStreamer.isDisplayUnavailable(error) {
+            // Nothing to capture until a display wakes or returns; the observers restart it then.
+        } catch {
+            captureError = "Screen capture: \(error.localizedDescription)"
+        }
+        if activeSessions.isEmpty {
+            ScreenStreamer.shared.stop()
         }
     }
 
@@ -682,36 +897,40 @@ final class HostServer: ObservableObject {
             HostLog.write("QUIC: listener unavailable; TCP only")
             return
         }
-        newListener.newConnectionGroupHandler = { [weak self] group in
-            MainActor.assumeIsolated {
-                guard let self, self.running else { return group.cancel() }
-                self.quicAcceptor.accept(group)
-            }
+        quicTLSCertHash = RDSelfSignedIdentity.certificateHash(of: identity)
+        let acceptor = self.quicAcceptor
+        let gate = self.sessionGate
+        newListener.newConnectionGroupHandler = { group in
+            guard gate.isRunning else { return group.cancel() }
+            acceptor.accept(group)
         }
         newListener.stateUpdateHandler = { [weak self, weak newListener] state in
-            MainActor.assumeIsolated {
-                guard let self, let newListener, self.quicListener === newListener else { return }
-                switch state {
-                case .ready:
-                    self.quicPort = newListener.port?.rawValue
-                    HostLog.write("QUIC: listening on UDP \(self.quicPort ?? 0)")
-                    self.readvertise()
-                case .failed(let error):
-                    newListener.cancel()
-                    self.quicListener = nil
-                    self.quicPort = nil
-                    self.readvertise()
-                    HostLog.write("QUIC: listener failed (\(error.localizedDescription))")
-                    if !isRetry, preferredPort != .any {
-                        self.startQUICListener(on: .any, isRetry: true)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let newListener, self.quicListener === newListener else { return }
+                    switch state {
+                    case .ready:
+                        self.quicPort = newListener.port?.rawValue
+                        HostLog.write("QUIC: listening on UDP \(self.quicPort ?? 0)")
+                        self.readvertise()
+                    case .failed(let error):
+                        newListener.cancel()
+                        self.quicListener = nil
+                        self.quicPort = nil
+                        self.quicTLSCertHash = nil
+                        self.readvertise()
+                        HostLog.write("QUIC: listener failed (\(error.localizedDescription))")
+                        if !isRetry, preferredPort != .any {
+                            self.startQUICListener(on: .any, isRetry: true)
+                        }
+                    default:
+                        break
                     }
-                default:
-                    break
                 }
             }
         }
         quicListener = newListener
-        newListener.start(queue: .main)
+        newListener.start(queue: acceptQueue)
     }
 
     private func accept(_ connection: NWConnection, transport: RDTransport, group: NWConnectionGroup? = nil,
@@ -734,7 +953,13 @@ final class HostServer: ObservableObject {
             group?.cancel()
             return
         }
-        let session = ClientSession(connection: connection, server: self, remoteAddress: address, quicGroup: group,
+        let session = ClientSession(connection: connection,
+                                    server: self,
+                                    sessionGate: sessionGate,
+                                    remoteAddress: address,
+                                    quicGroup: group,
+                                    quicAcceptor: transport == .quic ? quicAcceptor : nil,
+                                    quicTLSCertHash: transport == .quic ? quicTLSCertHash : nil,
                                     initialData: initialData)
         HostLog.write("session from \(address) over \(transport == .quic ? "QUIC" : "TCP")")
         pendingSessions.append(session)
@@ -775,23 +1000,44 @@ final class HostServer: ObservableObject {
         let state = hostStateMessage
         session.sendHostState(state)
         lastBroadcastHostState = state
-        session.sendRunningApps(appSwitcher.runningApps())
         session.sendHardwareControls(HardwareController.getState())
         session.sendDisplays(displaysMessage)
+        // Defer app-icon PNG enumeration so it cannot head-of-line block initial
+        // display metadata, pongs, or early video frames on QUIC Stream 0.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self, weak session] in
+            MainActor.assumeIsolated {
+                guard let self, let session,
+                      self.activeSessions.contains(where: { $0 === session }) else { return }
+                let apps = self.appSwitcher.runningApps()
+                session.sendRunningApps(apps)
+                self.lastBroadcastRunningApps = apps
+            }
+        }
 
         updateClientName()
         updateFrameGate()
         updateLocalInputBlocking()
-        if let keyframe = ScreenStreamer.shared.lastKeyframe {
-            session.sendVideoFrame(keyframe.data, isKeyframe: true, width: keyframe.width, height: keyframe.height, codec: keyframe.codec)
+        if ScreenStreamer.shared.isRunning {
+            if let keyframe = ScreenStreamer.shared.lastKeyframe {
+                session.enqueueEncodedPacket(keyframe)
+            }
+            ScreenStreamer.shared.requestKeyframe()
+        } else if !isStartingSizedMirror {
+            scheduleInitialCapture()
         }
-        restartCapture()
     }
 
     func sessionDidEnd(_ session: ClientSession) {
         HostLog.write("session ended, \(activeSessions.filter { $0 !== session }.count) left")
         pendingSessions.removeAll { $0 === session }
         activeSessions.removeAll { $0 === session }
+        if activeSessions.isEmpty {
+            lastBroadcastRunningApps = nil
+            runningAppsDebounceTask?.cancel()
+            runningAppsDebounceTask = nil
+            cancelInitialCapture()
+            preferredCodec = nil
+        }
         clipboard.update()
         updateFrameGate()
         updateLocalInputBlocking()
@@ -818,18 +1064,17 @@ final class HostServer: ObservableObject {
 
     /// A session's send backlog changed; capture only encodes while someone can take a frame.
     func updateFrameGate() {
-        ScreenStreamer.shared.setClientsReady(activeSessions.contains { $0.canSendFrame })
+        sessionGate.refreshGateAndBitrate()
     }
 
     /// One encoder serves every client, so it runs at the rate the slowest one can take.
     func updateBitrate() {
-        ScreenStreamer.shared.setDynamicBitrate(encoderBitrate)
+        sessionGate.setBaseTargetBitrate(preset.targetBitrate)
     }
 
     /// The bitrate the shared encoder runs at.
     var encoderBitrate: Int {
-        let factor = activeSessions.map(\.bitrateFactor).min() ?? 1.0
-        return Int(Double(preset.targetBitrate) * factor)
+        sessionGate.currentEncoderBitrate
     }
 
     private func updateClientName() {
@@ -895,12 +1140,26 @@ final class HostServer: ObservableObject {
     }
 
     func handleRefreshVideoRequest() {
-        restartCapture()
+        restartCapture(debounced: false)
+    }
+
+    private func scheduleBroadcastRunningApps() {
+        runningAppsDebounceTask?.cancel()
+        runningAppsDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            self?.broadcastRunningApps()
+        }
     }
 
     func broadcastRunningApps() {
-        guard !activeSessions.isEmpty else { return }
+        guard !activeSessions.isEmpty else {
+            lastBroadcastRunningApps = nil
+            return
+        }
         let apps = appSwitcher.runningApps()
+        guard apps != lastBroadcastRunningApps else { return }
+        lastBroadcastRunningApps = apps
         for session in activeSessions {
             session.sendRunningApps(apps)
         }
@@ -1005,7 +1264,8 @@ final class HostServer: ObservableObject {
 
     func applyPresetFromClient(_ raw: Int, showRemoteCursor: Bool? = nil, codec requestedCodec: RDCodec? = nil) {
         let newPreset = RDQualityPreset.from(raw)
-        let newCodec = requestedCodec ?? ScreenStreamer.shared.currentCodec
+        if let requestedCodec { preferredCodec = requestedCodec }
+        let newCodec = requestedCodec ?? preferredCodec ?? ScreenStreamer.shared.currentCodec
         var needsRestart = false
 
         if let showCursor = showRemoteCursor, ScreenStreamer.shared.showRemoteCursor != showCursor {
@@ -1018,8 +1278,20 @@ final class HostServer: ObservableObject {
             needsRestart = true
         }
 
-        if needsRestart {
-            restartCapture(codec: newCodec)
+        if ScreenStreamer.shared.isRunning {
+            if needsRestart {
+                Task { await ScreenStreamer.shared.updateConfiguration(preset: preset,
+                                                                     codec: newCodec,
+                                                                     targetBitrate: encoderBitrate) }
+            }
+        } else if !isStartingSizedMirror {
+            if initialCaptureTask != nil {
+                // Allow a `setSizedMirror` riding right behind `setQuality` to arrive
+                // before starting capture on the Mac's native display.
+                scheduleInitialCapture(delayMs: 35, codec: newCodec)
+            } else if needsRestart {
+                restartCapture(codec: newCodec, debounced: false)
+            }
         }
     }
 

@@ -36,17 +36,45 @@ private final class LoopbackHost: @unchecked Sendable {
     private var framesSent: UInt32 = 0
     /// Answers `videoDatagrams` by sending `datagramFrames` as datagrams, in this order.
     var sendDatagramVideo = false
+    /// Enable QUIC TLS channel binding (`quicTLSBound`) during `hello`/`serverHello`.
+    var enableTLSBinding = false
+    /// When set alongside `enableTLSBinding`, injects a wrong leaf cert hash into handshake proof.
+    var forgeTLSCertHash = false
+    /// Enable dedicated 2nd QUIC video stream (`authOK.supportsVideoStream`) and deliver frames on it.
+    var useDedicatedVideoStream = false
+    /// After receiving `videoStreamAttach`, automatically send frame 2 on dedicated stream
+    /// (and optionally frame 3 back on control stream if `switchBackAfterDedicatedFrame` is true).
+    var dedicatedStreamFrame: Data?
+    var switchBackFrame: Data?
+    /// Enable XOR parity FEC on datagram sends, and optionally drop piece 0 of each frame.
+    var enableDatagramFEC = false
+    var dropFirstDatagramDataPiece = false
     /// (number, payload, keyframe); pieces of each frame are sent in reverse order.
     var datagramFrames: [(UInt32, Data, Bool)] = []
-    /// After the datagram frames: `videoStream {nextFrame}` and this frame on the stream.
+    /// Optional delay before sending `datagramFrames` (lets `videoStreamAttach` complete first).
+    var datagramSendDelay: TimeInterval = 0
+    /// After the datagram frames: `videoStream {nextFrame}` and this frame on the stream,
+    /// optionally resuming onto the dedicated video stream while injecting a late stale datagram.
     var resumeStreamFrame: (UInt32, Data)?
+    var resumeOnDedicatedVideoStream = false
+    var sendLateDatagramAfterResume: (UInt32, Data)?
     /// What the client's `videoDatagrams` said.
     var offeredCanResume: Bool?
+    var offeredFEC: Bool?
+    var offeredUnsealed: Bool?
+    /// Whether `videoStreamAttach` arrived on a 2nd QUIC stream and was verified.
+    private(set) var receivedVideoStreamAttach = false
     /// The last `frameAck` number.
     var lastFrameAck: UInt32 = 0
     private var reader = RDFrameReader()
     private var sendCipher: RDCipher?
     private var receiveCipher: RDCipher?
+    private var tlsCertHash: Data?
+    private var quicTLSBound = false
+    private var videoStream: NWConnection?
+    private var videoStreamReader = RDFrameReader()
+    private var videoStreamSendCipher: RDCipher?
+    private var videoStreamReceiveCipher: RDCipher?
     private var transcript = Data()
     private var deviceId = ""
 
@@ -59,6 +87,7 @@ private final class LoopbackHost: @unchecked Sendable {
             let key = P256.Signing.PrivateKey()
             let certificate = try RDSelfSignedIdentity.makeCertificate(for: key)
             let identity = try XCTUnwrap(RDSelfSignedIdentity.identity(key: key, certificate: certificate))
+            tlsCertHash = RDSelfSignedIdentity.certificateHash(of: identity)
             listener = try NWListener(using: try XCTUnwrap(RDQUIC.serverParameters(identity: identity)), on: .any)
         } else {
             listener = try NWListener(using: .tcp, on: .any)
@@ -99,6 +128,7 @@ private final class LoopbackHost: @unchecked Sendable {
     }
 
     func stop() {
+        videoStream?.cancel()
         connection?.cancel()
         datagramFlow?.cancel()
         quicAcceptor?.cancelAll()
@@ -109,20 +139,56 @@ private final class LoopbackHost: @unchecked Sendable {
         guard sendDatagramVideo, let group, let videoKey,
               let flow = RDQUIC.makeDatagramFlow(on: group) else { return }
         datagramFlow = flow
-        let packetizer = RDVideoPacketizer(key: videoKey)
+        let packetizer = RDVideoPacketizer(key: (quicTLSBound && offeredUnsealed == true) ? nil : videoKey,
+                                           fecEnabled: enableDatagramFEC && offeredFEC == true)
         flow.stateUpdateHandler = { [self] state in
             guard case .ready = state else { return }
-            for (number, payload, keyframe) in datagramFrames {
-                let pieces = packetizer.datagrams(frame: number, payload: payload, isKeyframe: keyframe,
-                                                  maxDatagramSize: min(maxSize, 1200))!
-                for piece in pieces.reversed() {
-                    flow.send(content: piece, completion: .idempotent)
+            let sendDatagramsAndResume: @Sendable () -> Void = { [self] in
+                for (number, payload, keyframe) in datagramFrames {
+                    let pieces = packetizer.datagrams(frame: number, payload: payload, isKeyframe: keyframe,
+                                                      maxDatagramSize: min(maxSize, 1200))!
+                    var droppedOneDataPiece = false
+                    for piece in pieces.reversed() {
+                        let isParity = (piece[8] & RDVideoDatagram.fecParityFlag) != 0
+                        if dropFirstDatagramDataPiece, !isParity, !droppedOneDataPiece {
+                            droppedOneDataPiece = true
+                            continue
+                        }
+                        flow.send(content: piece, completion: .idempotent)
+                    }
+                }
+                guard let (next, payload) = resumeStreamFrame else { return }
+                queue.asyncAfter(deadline: .now() + 0.25) { [self] in
+                    let onDedicated = resumeOnDedicatedVideoStream && videoStream != nil
+                    write(try! sendCipher!.seal(.videoStream,
+                                                 RDJSON.encode(VideoStreamMsg(nextFrame: next,
+                                                                              onVideoStream: onDedicated ? true : nil,
+                                                                              leavingDatagrams: true))))
+                    queue.asyncAfter(deadline: .now() + 0.03) { [self] in
+                        if let (lateNum, latePayload) = sendLateDatagramAfterResume,
+                           let latePieces = packetizer.datagrams(frame: lateNum, payload: latePayload,
+                                                                 isKeyframe: true, maxDatagramSize: min(maxSize, 1200)) {
+                            for piece in latePieces {
+                                flow.send(content: piece, completion: .idempotent)
+                            }
+                        }
+                        queue.asyncAfter(deadline: .now() + 0.03) { [self] in
+                            if onDedicated, let stream = videoStream {
+                                let wireFrame = quicTLSBound
+                                    ? RDFrame.pack(.frame, payload: payload)
+                                    : (try! videoStreamSendCipher!.seal(.frame, payload))
+                                stream.send(content: wireFrame, completion: .contentProcessed { _ in })
+                            } else {
+                                write(try! sendCipher!.seal(.frame, payload))
+                            }
+                        }
+                    }
                 }
             }
-            guard let (next, payload) = resumeStreamFrame else { return }
-            queue.asyncAfter(deadline: .now() + 0.3) { [self] in
-                write(try! sendCipher!.seal(.videoStream, RDJSON.encode(VideoStreamMsg(nextFrame: next))))
-                write(try! sendCipher!.seal(.frame, payload))
+            if datagramSendDelay > 0 {
+                queue.asyncAfter(deadline: .now() + datagramSendDelay, execute: sendDatagramsAndResume)
+            } else {
+                sendDatagramsAndResume()
             }
         }
         flow.start(queue: queue)
@@ -172,19 +238,26 @@ private final class LoopbackHost: @unchecked Sendable {
                 write(RDFrame.pack(.authFailed, payload: RDJSON.encode(msg)))
                 return
             }
+            let certHashForHandshake: Data? = enableTLSBinding
+                ? (forgeTLSCertHash ? RDCrypto.sha256(Data("wrong-cert".utf8)) : tlsCertHash)
+                : nil
             let response = RDHandshake.respond(to: hello,
                                                identityKey: identity.publicKey.rawRepresentation,
                                                serverId: serverId,
                                                serverName: "Loopback Mac",
+                                               tlsCertHash: certHashForHandshake,
                                                sign: { [identity, forgeSignature] message in
                 let signature = try? identity.signature(for: message)
                 return forgeSignature ? signature.map { Data($0.reversed()) } : signature
             })!
             transcript = response.transcript
+            quicTLSBound = response.serverHello.quicTLSBound == true
             write(RDFrame.pack(.serverHello, payload: RDJSON.encode(response.serverHello)))
             sendCipher = RDCipher(key: response.keys.serverToClient)
             receiveCipher = RDCipher(key: response.keys.clientToServer)
             videoKey = response.keys.videoDatagrams
+            videoStreamSendCipher = RDCipher(key: response.keys.videoStream)
+            videoStreamReceiveCipher = RDCipher(key: response.keys.videoStream)
 
         case .authPin:
             let msg = RDJSON.decode(AuthPinMsg.self, from: payload)!
@@ -215,6 +288,8 @@ private final class LoopbackHost: @unchecked Sendable {
         case .videoDatagrams:
             let offer = RDJSON.decode(VideoDatagramsMsg.self, from: payload)!
             offeredCanResume = offer.canResumeStream
+            offeredFEC = offer.fec
+            offeredUnsealed = offer.unsealed
             startDatagramVideo(maxSize: offer.maxSize)
 
         default:
@@ -223,11 +298,57 @@ private final class LoopbackHost: @unchecked Sendable {
     }
 
     private func authenticate(trusted: Bool) {
-        var burst = seal(.authOK, AuthOKMsg(serverName: "Loopback Mac", trusted: trusted, macAddress: nil))
+        if useDedicatedVideoStream, let group, let acceptor = quicAcceptor {
+            acceptor.registerExtraStreamHandler(for: group, handler: { [self] stream, firstData in
+                self.handleExtraVideoStream(stream, initialData: firstData)
+            }, then: { [self] in
+                self.sendAuthOKBurst(trusted: trusted, supportsVideoStream: true)
+            })
+        } else {
+            sendAuthOKBurst(trusted: trusted, supportsVideoStream: false)
+        }
+    }
+
+    private func sendAuthOKBurst(trusted: Bool, supportsVideoStream: Bool) {
+        var burst = seal(.authOK, AuthOKMsg(serverName: "Loopback Mac",
+                                            trusted: trusted,
+                                            macAddress: nil,
+                                            supportsVideoStream: supportsVideoStream ? true : nil))
         burst.append(try! sendCipher!.seal(.runningApps, largeMessage))
         burst.append(try! sendCipher!.seal(.frame, RDFrameCodec.pack(width: 2, height: 2, codec: .hevc, data: Data([0, 0, 0, 1, 0x26]))))
         framesSent = 1
         write(burst)
+    }
+
+    private func handleExtraVideoStream(_ stream: NWConnection, initialData: Data) {
+        videoStream = stream
+        videoStreamReader = RDFrameReader()
+        videoStreamReader.append(initialData)
+        guard let frame = try? videoStreamReader.nextFrame(),
+              let plain = try? videoStreamReceiveCipher?.open(header: frame.header, body: frame.body),
+              frame.wire == .videoStreamAttach,
+              RDJSON.decode(VideoStreamAttachMsg.self, from: plain) != nil else {
+            stream.cancel()
+            return
+        }
+        receivedVideoStreamAttach = true
+        receivedLock.lock()
+        _received.append(.videoStreamAttach)
+        receivedLock.unlock()
+
+        write(seal(.videoStream, VideoStreamMsg(nextFrame: 2, onVideoStream: true)))
+        if let dedicatedStreamFrame {
+            let wireFrame = quicTLSBound
+                ? RDFrame.pack(.frame, payload: dedicatedStreamFrame)
+                : (try! videoStreamSendCipher!.seal(.frame, dedicatedStreamFrame))
+            stream.send(content: wireFrame, completion: .contentProcessed { _ in })
+            if let switchBackFrame {
+                queue.asyncAfter(deadline: .now() + 0.15) { [self] in
+                    write(seal(.videoStream, VideoStreamMsg(nextFrame: 3, onVideoStream: false)))
+                    write(try! sendCipher!.seal(.frame, switchBackFrame))
+                }
+            }
+        }
     }
 
     private func seal<T: Encodable>(_ wire: RDWire, _ message: T) -> Data {
@@ -539,6 +660,141 @@ final class LoopbackTests: XCTestCase {
         let (connection, log) = connect()
         wait(for: [log.expectation("failure") { log.failure != nil }], timeout: 5)
         XCTAssertNil(log.serverIdentity, "the client must not accept a serverHello it can't verify")
+        connection.cancel()
+    }
+
+    func testQUICTLSChannelBindingUnsealedDatagramsAndFECLossRecovery() throws {
+        let quicHost = LoopbackHost()
+        quicHost.enableTLSBinding = true
+        quicHost.sendDatagramVideo = true
+        quicHost.enableDatagramFEC = true
+        quicHost.dropFirstDatagramDataPiece = true
+        let frame = RDFrameCodec.packAVCC(width: 64,
+                                          height: 64,
+                                          codec: .hevc,
+                                          parameterSets: [Data([0x40, 0x01])],
+                                          data: Data((0..<4500).map { UInt8($0 % 251) }))
+        quicHost.datagramFrames = [(2, frame, true)]
+        let quicPort = try quicHost.start(quic: true)
+        defer { quicHost.stop() }
+
+        let (connection, log) = connect(quicPort: quicPort)
+        wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
+        connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
+        wait(for: [log.expectation("stream frame + FEC-recovered unsealed datagram frame") { log.snapshot.video.count >= 2 }], timeout: 5)
+
+        XCTAssertEqual(quicHost.offeredFEC, true)
+        XCTAssertEqual(quicHost.offeredUnsealed, true)
+        XCTAssertEqual(log.snapshot.video[1], frame)
+        XCTAssertEqual(connection.drainStats().lost, 0)
+        XCTAssertNil(log.failure)
+        connection.cancel()
+    }
+
+    func testQUICTLSBindingRejectsMismatchedCertDigest() throws {
+        let quicHost = LoopbackHost()
+        quicHost.enableTLSBinding = true
+        quicHost.forgeTLSCertHash = true
+        let quicPort = try quicHost.start(quic: true)
+        defer { quicHost.stop() }
+
+        let (connection, log) = connect(quicPort: quicPort)
+        wait(for: [log.expectation("TLS binding mismatch rejected") { log.failure != nil }], timeout: 5)
+        XCTAssertNil(log.serverIdentity)
+        connection.cancel()
+    }
+
+    func testDedicatedQUICVideoStreamAttachesStreamsAndFallsBackCleanly() throws {
+        let quicHost = LoopbackHost()
+        quicHost.enableTLSBinding = true
+        quicHost.useDedicatedVideoStream = true
+        let frame2 = RDFrameCodec.packAVCC(width: 128,
+                                           height: 72,
+                                           codec: .hevc,
+                                           parameterSets: [Data([0x40, 0x01])],
+                                           data: Data(repeating: 0x2A, count: 1024))
+        let frame3 = RDFrameCodec.packAVCC(width: 128,
+                                           height: 72,
+                                           codec: .hevc,
+                                           parameterSets: [],
+                                           data: Data(repeating: 0x3B, count: 512))
+        quicHost.dedicatedStreamFrame = frame2
+        quicHost.switchBackFrame = frame3
+        let quicPort = try quicHost.start(quic: true)
+        defer { quicHost.stop() }
+
+        let (connection, log) = connect(quicPort: quicPort)
+        wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
+        connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
+        wait(for: [log.expectation("dedicated video stream + fallback frame") { log.snapshot.video.count >= 3 }], timeout: 5)
+
+        XCTAssertTrue(quicHost.receivedVideoStreamAttach)
+        XCTAssertEqual(log.snapshot.video[1], frame2)
+        XCTAssertEqual(log.snapshot.video[2], frame3)
+        let deadline = Date().addingTimeInterval(2)
+        while quicHost.lastFrameAck != 3, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(quicHost.lastFrameAck, 3)
+
+        connection.send(.ping, RDJSON.encode(PingMsg(t: 99)))
+        wait(for: [log.expectation("control stream stays healthy") { log.pongs > 0 }], timeout: 5)
+        XCTAssertNil(log.failure)
+        connection.cancel()
+    }
+
+    func testDedicatedVideoStreamPreservesReassemblerForDatagramsAndResumesCleanly() throws {
+        let quicHost = LoopbackHost()
+        quicHost.enableTLSBinding = true
+        quicHost.useDedicatedVideoStream = true
+        quicHost.sendDatagramVideo = true
+        quicHost.enableDatagramFEC = true
+        quicHost.datagramSendDelay = 0.2
+        quicHost.resumeOnDedicatedVideoStream = true
+        let frame2 = RDFrameCodec.packAVCC(width: 128,
+                                           height: 72,
+                                           codec: .hevc,
+                                           parameterSets: [Data([0x40, 0x01])],
+                                           data: Data(repeating: 0x2A, count: 1024))
+        let frame3 = RDFrameCodec.packAVCC(width: 128,
+                                           height: 72,
+                                           codec: .hevc,
+                                           parameterSets: [Data([0x40, 0x01])],
+                                           data: Data((0..<3200).map { UInt8($0 % 251) }))
+        let staleDatagramFrame = RDFrameCodec.packAVCC(width: 128,
+                                                       height: 72,
+                                                       codec: .hevc,
+                                                       parameterSets: [],
+                                                       data: Data(repeating: 0xEE, count: 512))
+        let frame4 = RDFrameCodec.packAVCC(width: 128,
+                                           height: 72,
+                                           codec: .hevc,
+                                           parameterSets: [Data([0x40, 0x01])],
+                                           data: Data(repeating: 0x4C, count: 768))
+        quicHost.dedicatedStreamFrame = frame2
+        quicHost.datagramFrames = [(3, frame3, true)]
+        quicHost.sendLateDatagramAfterResume = (4, staleDatagramFrame)
+        quicHost.resumeStreamFrame = (4, frame4)
+        let quicPort = try quicHost.start(quic: true)
+        defer { quicHost.stop() }
+
+        let (connection, log) = connect(quicPort: quicPort)
+        wait(for: [log.expectation("serverHello") { log.serverIdentity != nil }], timeout: 5)
+        connection.send(.authPin, RDJSON.encode(AuthPinMsg(pin: "1234", trust: false, deviceKey: nil)))
+        wait(for: [log.expectation("stream -> dedicated stream -> datagrams -> dedicated stream") {
+            log.snapshot.video.count >= 4
+        }], timeout: 5)
+
+        XCTAssertTrue(quicHost.receivedVideoStreamAttach)
+        XCTAssertEqual(log.snapshot.video[1], frame2)
+        XCTAssertEqual(log.snapshot.video[2], frame3)
+        XCTAssertEqual(log.snapshot.video[3], frame4)
+        let deadline = Date().addingTimeInterval(2)
+        while quicHost.lastFrameAck != 4, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(quicHost.lastFrameAck, 4)
+        XCTAssertNil(log.failure)
         connection.cancel()
     }
 }

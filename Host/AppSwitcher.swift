@@ -1,18 +1,64 @@
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Running-app list (most recently used first), app activation, and Show Desktop
 /// for the client's app switcher.
 @MainActor
 final class AppSwitcher {
     private var iconCache: [String: String] = [:]
+    private var inFlightIcons: Set<String> = []
     private var mruOrder: [String] = []
     private var appsHiddenForDesktop: [String] = []
+
+    init() {
+        prewarmIcons()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.prewarmIcons()
+            }
+        }
+    }
 
     func trackActivation(_ bundleId: String) {
         if let idx = mruOrder.firstIndex(of: bundleId) {
             mruOrder.remove(at: idx)
         }
         mruOrder.insert(bundleId, at: 0)
+    }
+
+    func prewarmIcons() {
+        var toEncode: [(bundleId: String, cgImage: CGImage)] = []
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard let bundleId = app.bundleIdentifier, !bundleId.isEmpty,
+                  iconCache[bundleId] == nil, !inFlightIcons.contains(bundleId),
+                  let cgImage = Self.rasterizeIconCGImage(for: app) else { continue }
+            inFlightIcons.insert(bundleId)
+            toEncode.append((bundleId, cgImage))
+        }
+        guard !toEncode.isEmpty else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            var encoded: [(String, String)] = []
+            encoded.reserveCapacity(toEncode.count)
+            for (bundleId, cgImage) in toEncode {
+                if let png = Self.encodePNG(cgImage) {
+                    encoded.append((bundleId, png.base64EncodedString()))
+                }
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                for (bundleId, _) in toEncode {
+                    self.inFlightIcons.remove(bundleId)
+                }
+                for (bundleId, base64) in encoded {
+                    self.iconCache[bundleId] = base64
+                }
+            }
+        }
     }
 
     func runningApps() -> [RDRunningApp] {
@@ -69,7 +115,6 @@ final class AppSwitcher {
 
     func toggleShowDesktop() {
         if !appsHiddenForDesktop.isEmpty {
-            // Restore previously hidden apps
             for bundleId in appsHiddenForDesktop {
                 NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first?.unhide()
             }
@@ -78,7 +123,6 @@ final class AppSwitcher {
             }
             appsHiddenForDesktop.removeAll()
         } else {
-            // Hide all visible apps to reveal desktop
             var toHide: [String] = []
             if let activeApp = NSWorkspace.shared.frontmostApplication,
                let bid = activeApp.bundleIdentifier, bid != "com.apple.finder" {
@@ -104,28 +148,27 @@ final class AppSwitcher {
         if let cached = iconCache[bundleId] {
             return cached
         }
-        guard let icon = app.icon else { return nil }
-        let size = NSSize(width: 64, height: 64)
-        guard let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: 64,
-            pixelsHigh: 64,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ) else { return nil }
-        rep.size = size
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        icon.draw(in: NSRect(origin: .zero, size: size))
-        NSGraphicsContext.restoreGraphicsState()
-        guard let pngData = rep.representation(using: .png, properties: [:]) else { return nil }
-        let base64 = pngData.base64EncodedString()
+        // Fallback if requested before prewarm finished.
+        guard let cgImage = Self.rasterizeIconCGImage(for: app),
+              let png = Self.encodePNG(cgImage) else { return nil }
+        let base64 = png.base64EncodedString()
         iconCache[bundleId] = base64
         return base64
+    }
+
+    private static func rasterizeIconCGImage(for app: NSRunningApplication) -> CGImage? {
+        guard let icon = app.icon else { return nil }
+        var rect = NSRect(origin: .zero, size: NSSize(width: 64, height: 64))
+        return icon.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    nonisolated private static func encodePNG(_ cgImage: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data as CFMutableData, UTType.png.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return data as Data
     }
 }

@@ -29,10 +29,8 @@ final class SizedMirror {
     /// The display that mirrors the virtual one, to undo it on `stop()`.
     private var mirroredDisplay: CGDirectDisplayID?
 
-    static var isAvailable: Bool {
-        ["CGVirtualDisplay", "CGVirtualDisplayDescriptor", "CGVirtualDisplaySettings", "CGVirtualDisplayMode"]
-            .allSatisfy { NSClassFromString($0) != nil }
-    }
+    nonisolated static let isAvailable: Bool = ["CGVirtualDisplay", "CGVirtualDisplayDescriptor", "CGVirtualDisplaySettings", "CGVirtualDisplayMode"]
+        .allSatisfy { NSClassFromString($0) != nil }
 
     static func clamped(_ size: RDMirrorSize) -> RDMirrorSize {
         RDMirrorSize(width: min(max(size.width, sideRange.lowerBound), sideRange.upperBound),
@@ -50,7 +48,8 @@ final class SizedMirror {
     func start(size requested: RDMirrorSize) async -> CGDirectDisplayID? {
         let size = Self.clamped(requested)
         if let display = virtualDisplay, let id = displayID, CGDisplayIsOnline(id) != 0 {
-            guard Self.apply(size, to: display) else { return nil }
+            guard Self.apply(size, to: display),
+                  await Self.waitUntil({ Self.hasSize(size, id) }) else { return nil }
             self.size = size
             mirrorReturnedDisplays()
             return id
@@ -62,9 +61,9 @@ final class SizedMirror {
         // (and, mirrored by the main display, it becomes the main display itself).
         // macOS can refuse the change right after the display appears, so try a few times.
         var mirrored: CGDirectDisplayID?
-        for attempt in 0..<4 where mirrored == nil {
+        for attempt in 0..<6 where mirrored == nil {
             guard let target = Self.displayToMirror(excluding: id) else { break }
-            if attempt > 0 { usleep(200_000) }
+            if attempt > 0 { try? await Task.sleep(for: .milliseconds(80)) }
             if Self.mirror(target, to: id) { mirrored = target }
         }
         // With the lid shut there is no panel to mirror: the virtual display is the whole
@@ -186,7 +185,7 @@ final class SizedMirror {
         let deadline = Date().addingTimeInterval(2)
         while !condition() {
             if Date() >= deadline { return false }
-            try? await Task.sleep(for: .milliseconds(50))
+            try? await Task.sleep(for: .milliseconds(15))
         }
         return true
     }

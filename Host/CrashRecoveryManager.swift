@@ -2,17 +2,36 @@ import Foundation
 import AppKit
 import Darwin
 
-/// Manages crash recovery and supervisor watchdog monitoring for LocalDesktop.
+/// Pure policy helpers for crash circuit-breaking and awake-time hang detection.
+enum CrashRecoveryPolicy {
+    static let maxCrashesInWindow = 5
+    static let crashWindowSeconds: TimeInterval = 60.0
+    static let heartbeatIntervalSeconds: TimeInterval = 5.0
+    /// 7 missed 5s heartbeats of *awake* system uptime (`CLOCK_UPTIME_RAW`, pauses during sleep).
+    static let hangTimeoutNanoseconds: UInt64 = 35_000_000_000
+
+    static func evaluateRestart(history timestamps: [TimeInterval], now: TimeInterval) -> (allowed: Bool, updated: [TimeInterval]) {
+        var recent = timestamps.filter { now - $0 < crashWindowSeconds && $0 <= now + 5.0 }
+        recent.append(now)
+        return (recent.count <= maxCrashesInWindow, recent)
+    }
+
+    static func isHung(lastHeartbeatUptimeNs: UInt64, currentUptimeNs: UInt64) -> Bool {
+        currentUptimeNs >= lastHeartbeatUptimeNs && (currentUptimeNs - lastHeartbeatUptimeNs) >= hangTimeoutNanoseconds
+    }
+}
+
+/// Manages crash recovery and hang-aware supervisor watchdog monitoring for LocalDesktop.
 ///
 /// Architecture:
-/// 1. When the host app launches, it registers POSIX signal handlers and spawns a detached
-///    lightweight supervisor process (`--supervisor <pid> <bundlePath>`).
-/// 2. The supervisor monitors the host's PID using a kernel event filter (`kqueue` / `NOTE_EXIT`).
-/// 3. If the host terminates cleanly (Quit, `applicationWillTerminate`, or SIGTERM),
-///    a clean-exit sentinel named after its PID is written, and the supervisor exits without restarting.
-/// 4. If the host terminates abnormally (SIGSEGV, SIGBUS, a Swift trap, Force Quit, etc.), the
-///    supervisor finds no sentinel, checks the rate-limit circuit-breaker (max 5 restarts in 60s),
-///    and relaunches the app via `/usr/bin/open -n <bundlePath> --args --recovered`.
+/// 1. When the host app launches, it registers POSIX signal handlers, disables App Nap
+///    while awake, and spawns a detached supervisor (`--supervisor <pid> <bundlePath>`)
+///    connected via a non-blocking heartbeat pipe.
+/// 2. The host writes 1 byte onto the pipe every 5 s on the main runloop.
+/// 3. The supervisor monitors `NOTE_EXIT`, the heartbeat pipe, and an awake-uptime
+///    (`CLOCK_UPTIME_RAW`) timer inside one `kqueue` loop.
+/// 4. On abnormal exit—or a confirmed main-runloop hang (excluding sleep and attached
+///    debuggers)—it checks the circuit breaker (max 5 restarts in 60s) and relaunches.
 @MainActor
 final class CrashRecoveryManager {
     static let shared = CrashRecoveryManager()
@@ -24,6 +43,9 @@ final class CrashRecoveryManager {
     private let crashLogFileURL: URL
     private var isStarted = false
     private var terminationSource: DispatchSourceSignal?
+    private var heartbeatPipe: Pipe?
+    private var heartbeatTimer: Timer?
+    private var activityToken: NSObjectProtocol?
 
     private init() {
         appSupportDir = Self.appSupportDirectory()
@@ -45,13 +67,19 @@ final class CrashRecoveryManager {
 
     // MARK: - Main Application Lifecycle
 
-    /// Starts supervisor watchdog and registers crash signal handlers for the host process.
+    /// Starts supervisor watchdog, heartbeat timer, and crash signal handlers for the host process.
     func start() {
         guard !isStarted else { return }
         isStarted = true
 
         // A stale sentinel from an earlier process with a recycled PID would hide a crash.
         try? FileManager.default.removeItem(at: Self.cleanExitURL(in: appSupportDir, pid: getpid()))
+
+        // Keep runloop timers responsive while the Mac is awake without blocking idle sleep.
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "LocalDesktop background service and watchdog heartbeat"
+        )
 
         Self.installSignalHandlers(logPath: crashLogFileURL.path)
         installTerminationHandler()
@@ -66,8 +94,16 @@ final class CrashRecoveryManager {
     /// A no-op in an instance that never started recovery (e.g. a duplicate that is quitting).
     func markCleanExit() {
         guard isStarted else { return }
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        if let token = activityToken {
+            ProcessInfo.processInfo.endActivity(token)
+            activityToken = nil
+        }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         try? timestamp.write(to: Self.cleanExitURL(in: appSupportDir, pid: getpid()), atomically: true, encoding: .utf8)
+        try? heartbeatPipe?.fileHandleForWriting.close()
+        heartbeatPipe = nil
     }
 
     /// `kill`, `pkill`, and system shutdown send SIGTERM; treat it like Quit.
@@ -89,18 +125,46 @@ final class CrashRecoveryManager {
         let bundlePath = Bundle.main.bundlePath
         let execURL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
 
+        let pipe = Pipe()
+        let writeFD = pipe.fileHandleForWriting.fileDescriptor
+        let flags = fcntl(writeFD, F_GETFL)
+        if flags >= 0 {
+            _ = fcntl(writeFD, F_SETFL, flags | O_NONBLOCK)
+        }
+
         let proc = Process()
         proc.executableURL = execURL
         proc.arguments = ["--supervisor", "\(myPID)", bundlePath]
-        proc.standardInput = FileHandle.nullDevice
+        proc.standardInput = pipe.fileHandleForReading
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
 
         do {
             try proc.run()
+            try? pipe.fileHandleForReading.close()
+            heartbeatPipe = pipe
+            startHeartbeatTimer()
         } catch {
             Self.appendLog("Failed to spawn crash supervisor: \(error.localizedDescription)", to: crashLogFileURL)
         }
+    }
+
+    private func startHeartbeatTimer() {
+        heartbeatTimer?.invalidate()
+        sendHeartbeatByte()
+        let timer = Timer(timeInterval: CrashRecoveryPolicy.heartbeatIntervalSeconds, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sendHeartbeatByte()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        heartbeatTimer = timer
+    }
+
+    private func sendHeartbeatByte() {
+        guard let writeFD = heartbeatPipe?.fileHandleForWriting.fileDescriptor, writeFD >= 0 else { return }
+        var byte: UInt8 = 0x01
+        _ = Darwin.write(writeFD, &byte, 1)
     }
 
     // MARK: - Supervisor Mode
@@ -124,21 +188,101 @@ final class CrashRecoveryManager {
             appendLog("[Supervisor] \(msg)", to: logURL)
         }
 
-        // Wait for the parent process to exit using kqueue
+        var st = stat()
+        let hasHeartbeatPipe = fstat(STDIN_FILENO, &st) == 0 && (st.st_mode & S_IFMT) == S_IFIFO
+        if hasHeartbeatPipe {
+            let flags = fcntl(STDIN_FILENO, F_GETFL)
+            if flags >= 0 {
+                _ = fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK)
+            }
+        }
+
         let kq = kqueue()
         guard kq >= 0 else { return }
 
-        var ke = kevent(
-            ident: UInt(parentPID),
-            filter: Int16(EVFILT_PROC),
-            flags: UInt16(EV_ADD | EV_ENABLE | EV_ONESHOT),
-            fflags: UInt32(NOTE_EXIT),
-            data: 0,
-            udata: nil
-        )
+        var changes: [kevent] = [
+            kevent(ident: UInt(parentPID),
+                   filter: Int16(EVFILT_PROC),
+                   flags: UInt16(EV_ADD | EV_ENABLE | EV_ONESHOT),
+                   fflags: UInt32(NOTE_EXIT),
+                   data: 0,
+                   udata: nil)
+        ]
+        if hasHeartbeatPipe {
+            changes.append(
+                kevent(ident: UInt(STDIN_FILENO),
+                       filter: Int16(EVFILT_READ),
+                       flags: UInt16(EV_ADD | EV_ENABLE),
+                       fflags: 0,
+                       data: 0,
+                       udata: nil)
+            )
+            changes.append(
+                kevent(ident: 1,
+                       filter: Int16(EVFILT_TIMER),
+                       flags: UInt16(EV_ADD | EV_ENABLE),
+                       fflags: 0,
+                       data: 5_000,
+                       udata: nil)
+            )
+        }
 
-        var event = kevent()
-        _ = kevent(kq, &ke, 1, &event, 1, nil)
+        _ = kevent(kq, &changes, Int32(changes.count), nil, 0, nil)
+
+        var lastHeartbeatNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        var drainBuf = [UInt8](repeating: 0, count: 64)
+        var hungTriggered = false
+
+        loop: while true {
+            var event = kevent()
+            let n = kevent(kq, nil, 0, &event, 1, nil)
+            if n <= 0 {
+                if errno == EINTR { continue }
+                break
+            }
+            if (event.flags & UInt16(EV_ERROR)) != 0 {
+                break
+            }
+            switch event.filter {
+            case Int16(EVFILT_PROC):
+                break loop
+            case Int16(EVFILT_READ):
+                while Darwin.read(STDIN_FILENO, &drainBuf, drainBuf.count) > 0 {
+                    lastHeartbeatNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                }
+                if (event.flags & UInt16(EV_EOF)) != 0 {
+                    // Parent closed the pipe; wait briefly for NOTE_EXIT.
+                    var ts = timespec(tv_sec: 1, tv_nsec: 0)
+                    var exitEv = kevent()
+                    _ = kevent(kq, nil, 0, &exitEv, 1, &ts)
+                    break loop
+                }
+            case Int16(EVFILT_TIMER):
+                if FileManager.default.fileExists(atPath: cleanExitURL.path) {
+                    break loop
+                }
+                let nowNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                if CrashRecoveryPolicy.isHung(lastHeartbeatUptimeNs: lastHeartbeatNs, currentUptimeNs: nowNs) {
+                    if isProcessTraced(pid: parentPID) {
+                        lastHeartbeatNs = nowNs
+                        continue
+                    }
+                    hungTriggered = true
+                    logSupervisor("Hang detected for parent process \(parentPID) (no heartbeat for 35s awake time). Sending SIGABRT...")
+                    kill(parentPID, SIGABRT)
+                    var ts = timespec(tv_sec: 2, tv_nsec: 0)
+                    var exitEv = kevent()
+                    _ = kevent(kq, nil, 0, &exitEv, 1, &ts)
+                    if kill(parentPID, 0) == 0 {
+                        kill(parentPID, SIGKILL)
+                        usleep(100_000)
+                    }
+                    break loop
+                }
+            default:
+                break
+            }
+        }
         close(kq)
 
         // Give the file system a moment (150ms) to settle any write from applicationWillTerminate
@@ -151,8 +295,8 @@ final class CrashRecoveryManager {
             return
         }
 
-        // Abnormal termination detected! Check circuit-breaker
-        logSupervisor("Abnormal exit detected for parent process \(parentPID). Checking crash circuit breaker...")
+        // Abnormal termination or confirmed hang detected! Check circuit-breaker
+        logSupervisor("\(hungTriggered ? "Hang" : "Abnormal exit") detected for parent process \(parentPID). Checking crash circuit breaker...")
 
         var timestamps: [Double] = []
         if let data = try? Data(contentsOf: historyURL),
@@ -160,26 +304,32 @@ final class CrashRecoveryManager {
             timestamps = list
         }
 
-        let now = Date().timeIntervalSince1970
-        // Retain only events from the last 60 seconds
-        timestamps = timestamps.filter { now - $0 < 60.0 }
-        timestamps.append(now)
-
-        if let encoded = try? JSONEncoder().encode(timestamps) {
+        let decision = CrashRecoveryPolicy.evaluateRestart(history: timestamps, now: Date().timeIntervalSince1970)
+        if let encoded = try? JSONEncoder().encode(decision.updated) {
             try? encoded.write(to: historyURL)
         }
 
-        if timestamps.count > 5 {
-            logSupervisor("Crash loop detected (\(timestamps.count) crashes within 60s). Pausing auto-relaunch.")
+        if !decision.allowed {
+            logSupervisor("Crash loop detected (\(decision.updated.count) crashes within 60s). Pausing auto-relaunch.")
             return
         }
 
-        logSupervisor("Circuit breaker OK (crash \(timestamps.count)/5 in 60s). Relaunching \(bundlePath)...")
+        logSupervisor("Circuit breaker OK (crash \(decision.updated.count)/\(CrashRecoveryPolicy.maxCrashesInWindow) in 60s). Relaunching \(bundlePath)...")
         usleep(250_000)
         let openProc = Process()
         openProc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         openProc.arguments = ["-n", bundlePath, "--args", recoveredArgument]
         try? openProc.run()
+    }
+
+    nonisolated private static func isProcessTraced(pid: Int32) -> Bool {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.size
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else {
+            return false
+        }
+        return (info.kp_proc.p_flag & P_TRACED) != 0
     }
 
     // MARK: - POSIX Signal Handlers

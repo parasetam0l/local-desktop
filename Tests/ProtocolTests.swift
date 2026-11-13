@@ -1,5 +1,7 @@
 import XCTest
 import CryptoKit
+import CoreMedia
+import CoreVideo
 
 /// Runs both halves of the v2 handshake in memory, the way `ClientConnection`
 /// (client) and `ClientSession` (host) do.
@@ -272,6 +274,11 @@ final class DisplayMessageTests: XCTestCase {
         // Off is a message without a size.
         let off = try XCTUnwrap(RDJSON.decode(RDSetSizedMirrorMsg.self, from: RDJSON.encode(RDSetSizedMirrorMsg(size: nil))))
         XCTAssertNil(off.size)
+
+        let oldAuth = try XCTUnwrap(RDJSON.decode(AuthOKMsg.self, from: Data(#"{"serverName":"Mac","trusted":true}"#.utf8)))
+        XCTAssertNil(oldAuth.sizedMirrorAvailable)
+        let newAuth = AuthOKMsg(serverName: "Mac", trusted: true, macAddress: nil, supportsVideoStream: true, sizedMirrorAvailable: true)
+        XCTAssertEqual(RDJSON.decode(AuthOKMsg.self, from: RDJSON.encode(newAuth))?.sizedMirrorAvailable, true)
     }
 
     func testDesktopSizeFillsThePictureAreaEitherWayUp() {
@@ -486,5 +493,189 @@ final class PINSecurityTests: XCTestCase {
             blockIndex += 1
         }
         return derived.prefix(length)
+    }
+}
+
+final class TransportAndMediaUpgradeTests: XCTestCase {
+    func testFrameCodecPackAVCCAndUnpackPacketSlice() {
+        let vps = Data([0x40, 0x01, 0x0C])
+        let sps = Data([0x42, 0x01, 0x01, 0x01])
+        let pps = Data([0x44, 0x01, 0xC0])
+        let avccBody = Data([0x00, 0x00, 0x00, 0x04, 0x26, 0x01, 0xAF, 0x00])
+
+        let avccPayload = RDFrameCodec.packAVCC(width: 1920,
+                                                height: 1080,
+                                                codec: .hevc,
+                                                parameterSets: [vps, sps, pps],
+                                                data: avccBody)
+        // Put inside a larger Data slice to verify non-zero startIndex handling.
+        let prefixed = Data([0xFF, 0xEE]) + avccPayload
+        let slice = prefixed.dropFirst(2)
+        let unpacked = RDFrameCodec.unpackPacket(slice)
+        XCTAssertEqual(unpacked?.width, 1920)
+        XCTAssertEqual(unpacked?.height, 1080)
+        XCTAssertEqual(unpacked?.codec, .hevc)
+        XCTAssertEqual(unpacked?.isAVCC, true)
+        XCTAssertEqual(unpacked.map { Data($0.data) }, avccPayload.dropFirst(RDFrameCodec.headerLength))
+
+        let annexBPayload = RDFrameCodec.pack(width: 1280, height: 720, codec: .h264, data: Data([0, 0, 0, 1, 0x65]))
+        let unpackedAnnexB = RDFrameCodec.unpackPacket(annexBPayload)
+        XCTAssertEqual(unpackedAnnexB?.width, 1280)
+        XCTAssertEqual(unpackedAnnexB?.height, 720)
+        XCTAssertEqual(unpackedAnnexB?.codec, .h264)
+        XCTAssertEqual(unpackedAnnexB?.isAVCC, false)
+    }
+
+    func testHandshakeTLSBindingRejectsMismatchedCertHashAndDerivesVideoStreamKey() throws {
+        let hostIdentity = Curve25519.Signing.PrivateKey()
+        let clientEphemeral = RDCrypto.makePrivateKey()
+        let certHash = RDCrypto.sha256(Data("real-cert".utf8))
+        let hello = HelloMsg(deviceId: "dev-1",
+                             deviceName: "iPad",
+                             pubKey: clientEphemeral.publicKey.rawRepresentation,
+                             avcc: true,
+                             quicTLSBound: true)
+        let serverId = RDHandshake.serverId(for: hostIdentity.publicKey.rawRepresentation)
+        let response = try XCTUnwrap(RDHandshake.respond(to: hello,
+                                                         identityKey: hostIdentity.publicKey.rawRepresentation,
+                                                         serverId: serverId,
+                                                         serverName: "Mac",
+                                                         tlsCertHash: certHash) {
+            try? hostIdentity.signature(for: $0)
+        })
+        XCTAssertEqual(response.serverHello.quicTLSBound, true)
+
+        let matchingTranscript = RDHandshake.transcriptHash(clientKey: clientEphemeral.publicKey.rawRepresentation,
+                                                            deviceId: hello.deviceId,
+                                                            serverKey: response.serverHello.pubKey,
+                                                            serverIdentity: response.serverHello.identityKey,
+                                                            serverId: response.serverHello.serverId,
+                                                            tlsCertHash: certHash)
+        XCTAssertTrue(RDHandshake.isValidSignature(response.serverHello.signature,
+                                                 publicKey: response.serverHello.identityKey,
+                                                 message: RDHandshake.serverProof(transcript: matchingTranscript)))
+        let clientKeys = try XCTUnwrap(RDHandshake.sessionKeys(privateKey: clientEphemeral,
+                                                               peerPublicKey: response.serverHello.pubKey,
+                                                               transcript: matchingTranscript))
+        var hostVideoStream = RDCipher(key: response.keys.videoStream)
+        var clientVideoStream = RDCipher(key: clientKeys.videoStream)
+        let sealed = try clientVideoStream.seal(.videoStreamAttach, RDJSON.encode(VideoStreamAttachMsg()))
+        let plain = try hostVideoStream.open(header: sealed.prefix(5), body: sealed.dropFirst(5))
+        XCTAssertEqual(RDJSON.decode(VideoStreamAttachMsg.self, from: plain)?.version, 1)
+
+        // Mismatched certificate hash (e.g. active TLS proxy) must fail verification.
+        let wrongTranscript = RDHandshake.transcriptHash(clientKey: clientEphemeral.publicKey.rawRepresentation,
+                                                         deviceId: hello.deviceId,
+                                                         serverKey: response.serverHello.pubKey,
+                                                         serverIdentity: response.serverHello.identityKey,
+                                                         serverId: response.serverHello.serverId,
+                                                         tlsCertHash: RDCrypto.sha256(Data("mitm-cert".utf8)))
+        XCTAssertFalse(RDHandshake.isValidSignature(response.serverHello.signature,
+                                                  publicKey: response.serverHello.identityKey,
+                                                  message: RDHandshake.serverProof(transcript: wrongTranscript)))
+    }
+
+    func testFrameReaderSliceDecryptionAndZeroCopyConcatenation() throws {
+        let key = SymmetricKey(size: .bits256)
+        var sender = RDCipher(key: key)
+        var receiver = RDCipher(key: key)
+        let f1 = try sender.seal(.ping, Data("one".utf8))
+        let f2 = try sender.seal(.pong, Data("two-longer".utf8))
+        let f3 = try sender.seal(.ping, Data("three-split".utf8))
+
+        var reader = RDFrameReader()
+        reader.append(f1 + f2 + f3.prefix(3))
+        let first = try XCTUnwrap(try reader.nextFrame())
+        XCTAssertEqual(try receiver.open(header: first.header, body: first.body), Data("one".utf8))
+
+        let second = try XCTUnwrap(try reader.nextFrame())
+        XCTAssertGreaterThan(second.header.startIndex, 0)
+        XCTAssertEqual(try receiver.open(header: second.header, body: second.body), Data("two-longer".utf8))
+        XCTAssertNil(try reader.nextFrame())
+
+        reader.append(f3.dropFirst(3))
+        let third = try XCTUnwrap(try reader.nextFrame())
+        XCTAssertEqual(try receiver.open(header: third.header, body: third.body), Data("three-split".utf8))
+    }
+
+    func testEncodedVideoPacketAndHardwareDecodeAVCCAndAnnexB() throws {
+        let encoder = HardwareVideoEncoder()
+        var captured: EncodedVideoPacket?
+        let done = expectation(description: "encoded keyframe")
+        encoder.onPacket = { packet in
+            if captured == nil {
+                captured = packet
+                done.fulfill()
+            }
+        }
+        encoder.setup(width: 64, height: 64, fps: 30, bitrate: 1_000_000, codec: .h264)
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                         64,
+                                         64,
+                                         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                         nil,
+                                         &pixelBuffer)
+        XCTAssertEqual(status, kCVReturnSuccess)
+        if let pixelBuffer {
+            encoder.encode(pixelBuffer: pixelBuffer, pts: CMTime(value: 0, timescale: 30), forceKeyframe: true)
+            wait(for: [done], timeout: 5)
+        }
+        encoder.teardown()
+
+        let packet = try XCTUnwrap(captured)
+        XCTAssertFalse(packet.parameterSets.isEmpty)
+        XCTAssertFalse(packet.avccData.isEmpty)
+
+        // Verify AVCC pack + VideoDecoder AVCC fast path (with non-zero Data slice startIndex)
+        let avccWire = packet.packAVCC()
+        let unpackedAVCC = try XCTUnwrap(RDFrameCodec.unpackPacket(avccWire))
+        XCTAssertTrue(unpackedAVCC.isAVCC)
+
+        let decoderAVCC = VideoDecoder()
+        var avccSamples = 0
+        decoderAVCC.decode(data: unpackedAVCC.data, isAVCC: true, codec: .h264) { sample in
+            XCTAssertTrue(CMSampleBufferIsValid(sample))
+            avccSamples += 1
+        }
+        XCTAssertEqual(avccSamples, 1)
+
+        // Verify Annex-B conversion + VideoDecoder Annex-B path (with non-zero Data slice startIndex)
+        let annexBWire = packet.packAnnexB()
+        let unpackedAnnexB = try XCTUnwrap(RDFrameCodec.unpackPacket(annexBWire))
+        XCTAssertFalse(unpackedAnnexB.isAVCC)
+
+        let decoderAnnexB = VideoDecoder()
+        var annexBSamples = 0
+        decoderAnnexB.decode(data: unpackedAnnexB.data, isAVCC: false, codec: .h264) { sample in
+            XCTAssertTrue(CMSampleBufferIsValid(sample))
+            annexBSamples += 1
+        }
+        XCTAssertEqual(annexBSamples, 1)
+    }
+
+    func testCrashRecoveryPolicyCircuitBreakerAndAwakeHangCheck() {
+        var history: [TimeInterval] = []
+        let t0: TimeInterval = 1_000
+        for i in 0..<CrashRecoveryPolicy.maxCrashesInWindow {
+            let eval = CrashRecoveryPolicy.evaluateRestart(history: history, now: t0 + Double(i) * 5)
+            XCTAssertTrue(eval.allowed)
+            history = eval.updated
+        }
+        // 6th crash inside the 60 s window trips the circuit breaker.
+        let blocked = CrashRecoveryPolicy.evaluateRestart(history: history, now: t0 + 30)
+        XCTAssertFalse(blocked.allowed)
+
+        // After the window expires, crashes age out and relaunching is permitted again.
+        let recovered = CrashRecoveryPolicy.evaluateRestart(history: history,
+                                                            now: t0 + CrashRecoveryPolicy.crashWindowSeconds + 30)
+        XCTAssertTrue(recovered.allowed)
+        XCTAssertEqual(recovered.updated.count, 1)
+
+        // Sleep pauses CLOCK_UPTIME_RAW, so awake uptime delta governs hang detection.
+        XCTAssertFalse(CrashRecoveryPolicy.isHung(lastHeartbeatUptimeNs: 10_000_000_000,
+                                                currentUptimeNs: 44_999_999_999))
+        XCTAssertTrue(CrashRecoveryPolicy.isHung(lastHeartbeatUptimeNs: 10_000_000_000,
+                                               currentUptimeNs: 10_000_000_000 + CrashRecoveryPolicy.hangTimeoutNanoseconds))
     }
 }

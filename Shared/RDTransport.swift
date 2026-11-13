@@ -31,9 +31,12 @@ enum RDQUIC {
     /// falls back to TCP.
     static let fallbackDelay: TimeInterval = 1.0
 
-    /// Client parameters: accepts any server certificate (see the type's note).
-    static func clientParameters(verifyQueue: DispatchQueue) -> NWParameters {
-        parameters(clientOptions(verifyQueue: verifyQueue))
+    /// Client parameters: accepts any server certificate at TLS setup, while optionally
+    /// reporting the peer leaf certificate's SHA-256 digest so `RDHandshake` can bind
+    /// the TLS tunnel to the pinned host identity key.
+    static func clientParameters(verifyQueue: DispatchQueue,
+                                 onPeerCertificateHash: (@Sendable (Data) -> Void)? = nil) -> NWParameters {
+        parameters(clientOptions(verifyQueue: verifyQueue, onPeerCertificateHash: onPeerCertificateHash))
     }
 
     /// Opens a datagram flow on `group` with the group's own QUIC options object and
@@ -50,12 +53,21 @@ enum RDQUIC {
         return NWConnection(from: group, using: options)
     }
 
-    private static func clientOptions(verifyQueue: DispatchQueue) -> NWProtocolQUIC.Options {
+    private static func clientOptions(verifyQueue: DispatchQueue,
+                                      onPeerCertificateHash: (@Sendable (Data) -> Void)?) -> NWProtocolQUIC.Options {
         let options = makeOptions()
         // As tested with the host's group listener (0 kept the host's group from becoming ready).
         options.initialMaxStreamsBidirectional = 1
-        sec_protocol_options_set_verify_block(options.securityProtocolOptions, { _, _, complete in
-            // Trust comes from our handshake on top, never from this certificate.
+        sec_protocol_options_set_verify_block(options.securityProtocolOptions, { _, trust, complete in
+            if let onPeerCertificateHash {
+                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+                   let leaf = chain.first {
+                    let der = SecCertificateCopyData(leaf) as Data
+                    onPeerCertificateHash(RDCrypto.sha256(der))
+                }
+            }
+            // Trust comes from our handshake on top (which checks this cert digest when bound).
             complete(true)
         }, verifyQueue)
         return options
@@ -70,11 +82,8 @@ enum RDQUIC {
         guard let secIdentity = sec_identity_create(identity) else { return nil }
         let options = makeOptions()
         sec_protocol_options_set_local_identity(options.securityProtocolOptions, secIdentity)
-        // The control stream that carries the whole protocol. A connection group client
-        // (`NWMultiplexGroup`) holds stream 0 open without using it and opens its own
-        // next, and may replace a control stream that failed once; the host takes the
-        // first stream that becomes ready.
-        options.initialMaxStreamsBidirectional = 3
+        // Control stream + optional dedicated video stream + retries + unused stream 0.
+        options.initialMaxStreamsBidirectional = 8
         options.initialMaxStreamsUnidirectional = 0
         return options
     }
@@ -100,9 +109,6 @@ enum RDQUIC {
         params.serviceClass = .interactiveVideo
         params.allowLocalEndpointReuse = true
         params.includePeerToPeer = false
-        if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            ipOptions.version = .v4
-        }
         return params
     }
 }
@@ -180,6 +186,14 @@ enum RDSelfSignedIdentity {
         guard let secKey = SecKeyCreateWithData(key.x963Representation as CFData,
                                                 attributes as CFDictionary, nil) else { return nil }
         return SecIdentityCreate(nil, cert, secKey)
+    }
+
+    /// SHA-256 of the leaf certificate's DER bytes, for QUIC TLS channel binding.
+    static func certificateHash(of identity: SecIdentity) -> Data? {
+        var cert: SecCertificate?
+        guard SecIdentityCopyCertificate(identity, &cert) == errSecSuccess, let cert else { return nil }
+        let der = SecCertificateCopyData(cert) as Data
+        return RDCrypto.sha256(der)
     }
 
     private static func der(_ tag: UInt8, _ content: Data) -> Data {

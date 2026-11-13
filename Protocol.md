@@ -13,8 +13,11 @@ Only `hello`, `serverHello`, and a version-rejecting `authFailed` are sent in th
 Every other message is encrypted (see [Encryption](#encryption)), so its payload is
 `ciphertext || tag(16)`.
 
-Plaintext payloads are JSON, except video frames: `[u16 width BE][u16 height BE][u8 codec][Annex-B data]`
-with codec `1` = H.264 and `2` = HEVC (H.265).
+Plaintext payloads are JSON, except video frames: `[u16 width BE][u16 height BE][u8 rawCodec][frame bytes]`.
+`rawCodec & 0x7F` selects the codec (`1` = H.264, `2` = HEVC). When bit `0x80` is clear,
+`frame bytes` are Annex-B NALUs; when bit `0x80` is set (negotiated via `hello.avcc: true`),
+`frame bytes` are native length-prefixed AVCC preceded by parameter sets:
+`[u8 paramCount][([u16 length BE][param]) × paramCount][avcc NALU bytes]`.
 
 Size limits: 16 KiB per message before authentication, 1 MiB client → host afterwards,
 32 MiB host → client (video). Frames with an unknown type are decrypted and ignored, so
@@ -24,18 +27,19 @@ newer message types don't break older peers.
 
 | Type | Name                  | Direction | Body (JSON) |
 |------|-----------------------|-----------|-------------|
-| 0x01 | hello                 | C → S     | `{version, deviceId, deviceName, pubKey}` |
-| 0x02 | serverHello           | S → C     | `{version, serverId, serverName, pubKey, identityKey, signature}` |
+| 0x01 | hello                 | C → S     | `{version, deviceId, deviceName, pubKey, avcc?, quicTLSBound?}` — `avcc` advertises native AVCC video support; `quicTLSBound` asks the host to bind its QUIC TLS certificate digest into the handshake |
+| 0x02 | serverHello           | S → C     | `{version, serverId, serverName, pubKey, identityKey, signature, quicTLSBound?}` |
 | 0x03 | authPin               | C → S 🔒  | `{pin, trust, deviceKey?}` |
 | 0x04 | authDevice            | C → S 🔒  | `{signature}` |
-| 0x05 | authOK                | S → C 🔒  | `{serverName, trusted, macAddress?}` |
+| 0x05 | authOK                | S → C 🔒  | `{serverName, trusted, macAddress?, supportsVideoStream?, sizedMirrorAvailable?}` |
 | 0x06 | authFailed            | S → C 🔒  | `{reason, kind?, retryAfter?}` — kind: `incorrectPin`, `lockedOut`, `busy`, `untrusted`, `tooManyAttempts`, `unsupportedVersion` |
-| 0x10 | frame                 | S → C 🔒  | binary (see above) |
+| 0x10 | frame                 | S → C 🔒  | binary (see above); plaintext on a dedicated QUIC video stream when `quicTLSBound` is active |
 | 0x11 | requestKeyframe       | C → S 🔒  | `{reason?}` |
 | 0x12 | frameAck              | C → S 🔒  | binary `[frame u32]` big-endian: the highest video frame number received, sent on receipt of each frame. The host numbers every video frame it sends on a connection from 1, on the stream and as datagrams alike, so over the stream alone this is the count of `frame` messages received; with datagrams, numbers it skips were lost (frames completed but discarded while waiting for a keyframe are still acked). A host that has seen one holds new frames while the oldest unconfirmed one is 120 ms old or 8 are unconfirmed, and sets the bitrate from the delivery times instead of `networkStats` (from 1.2.29) |
-| 0x13 | videoDatagrams        | C → S 🔒  | `{maxSize}` — QUIC only, after `authOK`: send video as datagrams (see Transports); `maxSize` is the largest datagram the client's connection accepts. From 1.2.30 the host keeps video on the stream until a 5-second window there shows no frame held back and under 25 ms average delivery, then switches once its datagram flow is ready; until then frames stay on the stream. `canResumeStream: true` (clients from 1.2.30) lets the host move video back to the stream with `videoStream` when datagrams keep losing frames. Hosts that don't know it keep using the stream (from 1.2.29) |
+| 0x13 | videoDatagrams        | C → S 🔒  | `{maxSize, canResumeStream?, fec?, unsealed?}` — QUIC only, after `authOK`: offers UDP video datagrams (see Transports); `maxSize` is the largest datagram the client's connection accepts. When video shares the control stream (no dedicated `videoStreamAttach`), the host promotes to datagrams after a 5-second window with no frame held back and under 25 ms average delivery; dedicated `QUIC video stream` sessions stay on their isolated stream. `canResumeStream: true` lets the host move lossy datagrams back to stream delivery with `videoStream`; `fec: true` enables interleaved XOR block-parity datagrams; `unsealed: true` (honored only when `quicTLSBound` was verified) skips redundant app-layer ChaCha20-Poly1305 on video datagrams |
 | 0x14 | transportNote         | C → S 🔒  | `{quicFallback}` — a note for the host's log, sent after `authOK`: by a client that tried QUIC and fell back to TCP ("fell back to TCP: …"), or by a QUIC client whose datagram flow didn't come up within 2 s ("no video datagrams …"), with the reason and timed QUIC events (at most 1,000 characters), for the host's log only (from 1.2.29) |
-| 0x15 | videoStream           | S → C 🔒  | `{nextFrame}` — QUIC only: video leaves datagrams for the stream again (two 5 s windows in a row with 3 or more lost frames), and the next stream frame is number `nextFrame`; the client ignores datagrams from then on. Sent only to clients whose `videoDatagrams` carried `canResumeStream: true` (from 1.2.30) |
+| 0x15 | videoStream           | S → C 🔒  | `{nextFrame, onVideoStream?, leavingDatagrams?}` — QUIC only: moves video between the control stream (`onVideoStream: false`), the dedicated 2nd QUIC video stream (`onVideoStream: true`), or leaves datagrams for stream delivery (`leavingDatagrams: true`, or legacy hosts omitting `onVideoStream`). The next stream frame is number `nextFrame`; only when leaving datagrams does the client tear down its datagram reassembler and ignore later datagrams |
+| 0x16 | videoStreamAttach     | C → S 🔒  | `{version}` — QUIC only: sent as the first message on a client-opened 2nd bidirectional QUIC stream, sealed with the session's `rd-v2 video stream` key so the host binds that stream exclusively to video for this session |
 | 0x20 | mouseMoveAbs          | both 🔒   | `{x, y}` — frame pixel space; the host echoes the resulting cursor position |
 | 0x21 | mouseMoveRel          | C → S 🔒  | `{dx, dy}` — screen points |
 | 0x22 | mouseDown             | C → S 🔒  | `{button}` (0 left, 1 right) |
@@ -81,11 +85,14 @@ Client                                                   Host
   │                   Ed25519 identityKey, signature}     │
   │
   │  transcript = SHA-256("rd-handshake-v2", clientKey, deviceId,
-  │                       serverKey, identityKey, serverId)   (each field u32-length-prefixed)
+  │                       serverKey, identityKey, serverId
+  │                       [, "rd-quic-tls-v1", tlsCertSHA256]) (each u32-length-prefixed)
   │  signature  = Ed25519(identity, "rd-server-auth-v2" || transcript)
   │  serverId   = hex(SHA-256(identityKey)[0..<16])
   │  keys       = HKDF-SHA256(X25519 secret, salt: transcript,
-  │                           info: "rd-v2 client->server" / "rd-v2 server->client")
+  │                           info: "rd-v2 client->server" / "rd-v2 server->client" /
+  │                                 "rd-v2 video datagrams server->client" /
+  │                                 "rd-v2 video stream")
   │
   │ Paired device:                                        │
   │ authDevice {Ed25519(deviceKey, "rd-device-auth-v2" || transcript)} 🔒 ─▶│
@@ -140,9 +147,11 @@ From 1.2.29 the Mac listens on two transports that carry exactly the same byte s
 - **TCP** on the advertised port (default 52341). Always available; old clients and
   hosts reached without TXT information (recent hosts, a typed address) use only this.
 - **QUIC** on UDP, same port number when free (else `qport`), ALPN `localdesktop/1`.
-  The whole protocol runs over **one client-opened bidirectional stream**; the Mac allows
-  stream per QUIC connection (the first to become ready; a connection-group client also
-  announces a stream it never uses) and treats it like a TCP connection.
+  The protocol runs over dual-stack IPv4/IPv6 sockets (`initialMaxStreamsBidirectional = 8`).
+  All control, input, ack, and keepalive traffic uses the primary client-opened bidirectional
+  stream; when `authOK.supportsVideoStream` is `true`, the client may open a second
+  bidirectional stream and send `videoStreamAttach` (encrypted with `rd-v2 video stream`)
+  to isolate video frames from control/input head-of-line blocking.
 
 A client that sees `quic=1` tries QUIC first and falls back to TCP, starting the attempt
 over (new `hello`, new ephemeral key), when QUIC isn't ready within about 1 s or fails
@@ -150,29 +159,39 @@ before `serverHello` (the 1 s becomes 2 s when the QUIC handshake finished but t
 stream isn't ready yet). After `serverHello` there is no fallback: a failure ends the
 connection as it would on TCP. A Bonjour service whose `qport` differs is reached over TCP.
 
-**TLS carries no trust.** QUIC requires TLS 1.3, so the Mac presents a self-signed P-256
-certificate (made once, kept in `~/Library/Application Support/localdesktop.host/quic-tls.*`)
-and the client accepts any certificate. Authentication and confidentiality come only from
-the handshake above (identity-key signature, PIN pairing, device signature) and its
-session keys, exactly as over TCP; TLS is an extra, unauthenticated layer.
+**QUIC TLS channel binding.** QUIC requires TLS 1.3, so the Mac presents a self-signed
+P-256 certificate (kept in `~/Library/Application Support/localdesktop.host/quic-tls.*`).
+By default TLS carries no trust and confidentiality comes strictly from the handshake and
+`ChaCha20-Poly1305` on every frame. When the client records the peer leaf certificate's
+SHA-256 DER digest during TLS verification and sets `hello.quicTLSBound: true`, the host
+folds `"rd-quic-tls-v1" || tlsCertHash` into `transcript`, signs it with the Ed25519 identity
+key, and replies `serverHello.quicTLSBound: true`. Because the QUIC TLS 1.3 channel is now
+cryptographically bound to the host's Ed25519 identity, app-layer ChaCha20-Poly1305 is
+omitted on bulk video datagrams (`videoDatagrams.unsealed: true`) and dedicated-stream video
+frames while control, auth, input, and clipboard frames remain app-layer AEAD encrypted.
 
 ### Video datagrams (QUIC, from 1.2.29)
 
 QUIC connections enable datagrams (RFC 9221, max frame size 65,535). After `authOK` a
 client with a ready datagram flow sends `videoDatagrams {maxSize}`; the host then sends
 each `frame` payload (what the `frame` message would carry) as datagrams instead, while
-every other message stays on the stream. Each datagram is one piece:
+every other message stays on the stream. Each datagram is one piece (or parity block):
 
 ```
-[frame u32][piece u16][count u16][flags u8] | ChaCha20-Poly1305(piece) | tag (16)
+[frame u32][piece u16][count u16][flags u8] | body [| tag (16)]
 ```
 
-big-endian; `flags` bit 0 = keyframe. Pieces are sized so a datagram fits the smaller
-of the host's reported maximum datagram size and `maxSize` (1,200 bytes if unknown).
-The header is the AEAD's associated data. The key is
+big-endian; `flags` bit `0` (`0x01`) = keyframe, bit `1` (`0x02`) = XOR block-parity FEC
+packet. Pieces are sized so a datagram fits the smaller of the host's reported maximum
+datagram size and `maxSize` (1,200 bytes if unknown). When sealed (`unsealed` absent/false),
+the header is the AEAD's associated data, the key is
 `HKDF-SHA256(shared secret, salt: transcript, info: "rd-v2 video datagrams server->client")`,
-and the nonce is explicit: `[0x01][0 0 0][frame u32][piece u16][0 0]` (the stream
-cipher's implicit counter can't survive loss or reordering).
+and the explicit nonce is `[0x01][parityFlag][0 0][frame u32][piece u16][0 0]`
+(`parityFlag` = `0x01` for parity datagrams, `0x00` for data pieces). When `fec: true`,
+multi-piece frames (`>= 2` pieces) emit one parity datagram per group of up to `5` pieces
+(splitting 6 as 3+3), interleaved round-robin across groups so short contiguous burst losses
+hit distinct XOR groups with body `[groupStart u16][groupLen u8][xorLen u16][XOR bytes]`,
+allowing single-datagram loss recovery per group without waiting for a keyframe.
 
 The client rebuilds frames and hands them to the decoder complete and in order:
 anything at or below the highest completed frame (old, duplicate, replayed) is ignored;
@@ -189,5 +208,7 @@ doesn't wait for it forever, and the
 The host paces datagrams (from 1.2.30): a frame up to 24,000 bytes leaves at once, the
 rest at four times the encoder's bitrate (at least 40 Mbit/s), so a keyframe doesn't hit
 the network as one burst. If two 5-second windows in a row each lose 3 or more frames,
-the host sends `videoStream {nextFrame}` to a client that offered `canResumeStream` and
-goes back to stream video for the rest of the connection, with a fresh keyframe.
+the host sends `videoStream {nextFrame, leavingDatagrams: true}` to a client that offered
+`canResumeStream` (including when no `frameAck`s return during consecutive 5-second windows
+after expired frames accumulate) and goes back to stream video (on the dedicated video
+stream if attached, else the control stream) for the rest of the connection, with a fresh keyframe.

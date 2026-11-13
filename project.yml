@@ -121,6 +121,9 @@ targets:
       - Shared/RDVideoDatagrams.swift
       - Shared/ClosedLidWakePolicy.swift
       - Host/PINSecurity.swift
+      - Host/HostLog.swift
+      - Host/CrashRecoveryManager.swift
+      - Host/VideoEncoder.swift
       - Host/QUICAcceptor.swift
       - Host/LocalInputBlocker.swift
       - Host/CongestionEstimator.swift
@@ -128,6 +131,7 @@ targets:
       - iOS/ClientConnection.swift
       - iOS/ClientLog.swift
       - iOS/AppUpdater.swift
+      - iOS/VideoDecoder.swift
 schemes:
   LocalDesktopHost:
     build:

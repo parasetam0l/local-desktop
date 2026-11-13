@@ -4,14 +4,12 @@ import CoreMedia
 import CoreVideo
 import ScreenCaptureKit
 
-typealias EncodedKeyframe = (data: Data, width: Int, height: Int, codec: RDCodec)
-
 /// State shared between the main actor and the capture / encoder threads.
 /// Everything mutable is guarded by `lock`.
 final class CaptureState: @unchecked Sendable {
     private let lock = NSLock()
     private var _frameSize: CGSize = .zero
-    private var _lastKeyframe: EncodedKeyframe?
+    private var _lastKeyframe: EncodedVideoPacket?
     private var _lastFrameTime: Date = .distantPast
     private var _forceNextKeyframe = false
     private var _isCapturing = false
@@ -22,32 +20,33 @@ final class CaptureState: @unchecked Sendable {
     private var _pendingFrame: (buffer: CVPixelBuffer, pts: CMTime)?
     /// The SCStream whose frames we accept; frames from a superseded stream are dropped.
     private var _activeStream: ObjectIdentifier?
-    private var _onVideoPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)?
+    private var _onVideoPacket: ((EncodedVideoPacket) -> Void)?
 
     let encoder = HardwareVideoEncoder()
+    var encoderBitrate: Int { encoder.currentBitrate }
 
     init() {
-        encoder.onPacket = { [weak self] data, isKeyframe, width, height, codec in
+        encoder.onPacket = { [weak self] packet in
             guard let self else { return }
             self.lock.lock()
-            self._frameSize = CGSize(width: width, height: height)
-            if isKeyframe {
-                self._lastKeyframe = (data, width, height, codec)
+            self._frameSize = CGSize(width: packet.width, height: packet.height)
+            if packet.isKeyframe {
+                self._lastKeyframe = packet
             }
             let callback = self._onVideoPacket
             self.lock.unlock()
 
-            callback?(data, isKeyframe, width, height, codec)
+            callback?(packet)
         }
     }
 
-    var onVideoPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)? {
+    var onVideoPacket: ((EncodedVideoPacket) -> Void)? {
         get { withLock { _onVideoPacket } }
         set { withLock { _onVideoPacket = newValue } }
     }
 
     var frameSize: CGSize { withLock { _frameSize } }
-    var lastKeyframe: EncodedKeyframe? { withLock { _lastKeyframe } }
+    var lastKeyframe: EncodedVideoPacket? { withLock { _lastKeyframe } }
     var timeSinceLastFrame: TimeInterval { withLock { Date().timeIntervalSince(_lastFrameTime) } }
 
     func requestKeyframe() {
@@ -132,11 +131,14 @@ final class CaptureState: @unchecked Sendable {
 @MainActor
 final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     static let shared = ScreenStreamer()
+    /// Shared capture/encoder state accessed off `@MainActor` by capture and session queues.
+    nonisolated static let sharedState = CaptureState()
+    nonisolated private static let captureQueue = DispatchQueue(label: "rd.capture", qos: .userInteractive)
 
-    nonisolated let state = CaptureState()
+    nonisolated let state = ScreenStreamer.sharedState
 
     /// Called on the encoder's callback thread.
-    var onVideoPacket: ((Data, Bool, Int, Int, RDCodec) -> Void)? {
+    nonisolated var onVideoPacket: ((EncodedVideoPacket) -> Void)? {
         get { state.onVideoPacket }
         set { state.onVideoPacket = newValue }
     }
@@ -145,16 +147,16 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     var onCaptureStopped: ((Error) -> Void)?
 
     private(set) var currentDisplay: CGDirectDisplayID = CGMainDisplayID()
-    var frameSize: CGSize { state.frameSize }
-    var lastKeyframe: EncodedKeyframe? { state.lastKeyframe }
-    var timeSinceLastFrame: TimeInterval { state.timeSinceLastFrame }
+    nonisolated var frameSize: CGSize { state.frameSize }
+    nonisolated var lastKeyframe: EncodedVideoPacket? { state.lastKeyframe }
+    nonisolated var timeSinceLastFrame: TimeInterval { state.timeSinceLastFrame }
 
     private var stream: SCStream?
     private var preset: RDQualityPreset = .high
     private(set) var currentCodec: RDCodec = .hevc
     var showRemoteCursor: Bool = false
     private var runningDisplay: CGDirectDisplayID?
-    private let captureQueue = DispatchQueue(label: "rd.capture", qos: .userInteractive)
+    nonisolated private var captureQueue: DispatchQueue { Self.captureQueue }
     private var restartDebounceTask: Task<Void, Error>?
     /// Bumped whenever capture is torn down, so a `start()` that was suspended
     /// while another start/stop ran knows it has been superseded.
@@ -184,22 +186,42 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    func requestKeyframe() {
-        state.requestKeyframe()
+    nonisolated static func requestKeyframe() {
+        sharedState.requestKeyframe()
     }
 
-    func setClientsReady(_ ready: Bool) {
-        if state.setClientsReady(ready) {
-            let state = self.state
+    nonisolated static func setClientsReady(_ ready: Bool) {
+        if sharedState.setClientsReady(ready) {
+            let state = sharedState
             captureQueue.async { state.encodePendingFrame() }
         }
     }
 
-    func start(displayID: CGDirectDisplayID?, preset newPreset: RDQualityPreset, codec: RDCodec = .hevc, forceRestart: Bool = false) async throws {
+    nonisolated static func setDynamicBitrate(_ newBitrate: Int) {
+        sharedState.encoder.setDynamicBitrate(newBitrate)
+    }
+
+    nonisolated static func setLossyDatagramMode(_ anyDatagrams: Bool) {
+        sharedState.encoder.setKeyFrameIntervalDuration(anyDatagrams ? 2.5 : 30.0)
+    }
+
+    nonisolated func requestKeyframe() {
+        Self.requestKeyframe()
+    }
+
+    nonisolated func setClientsReady(_ ready: Bool) {
+        Self.setClientsReady(ready)
+    }
+
+    func start(displayID: CGDirectDisplayID?,
+               preset newPreset: RDQualityPreset,
+               codec: RDCodec = .hevc,
+               targetBitrate: Int? = nil,
+               forceRestart: Bool = false) async throws {
         let target = displayID ?? CGMainDisplayID()
         if !forceRestart, runningDisplay == target, stream != nil {
             if newPreset != preset || codec != currentCodec {
-                await updateConfiguration(preset: newPreset, codec: codec)
+                await updateConfiguration(preset: newPreset, codec: codec, targetBitrate: targetBitrate)
             }
             return
         }
@@ -222,7 +244,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             width: Int32(config.width),
             height: Int32(config.height),
             fps: preset.fps,
-            bitrate: preset.targetBitrate,
+            bitrate: targetBitrate ?? preset.targetBitrate,
             codec: currentCodec
         )
 
@@ -240,30 +262,44 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         state.activate(stream: newStream)
     }
 
-    /// Debounced full restart; overlapping calls collapse into the last one.
-    func restart(displayID: CGDirectDisplayID? = nil, preset newPreset: RDQualityPreset? = nil, codec: RDCodec? = nil) async throws {
+    /// Full restart; when `debounced` is true and a stream is already running, overlapping
+    /// calls collapse after 150 ms. Cold starts and immediate switches skip the sleep.
+    func restart(displayID: CGDirectDisplayID? = nil,
+                 preset newPreset: RDQualityPreset? = nil,
+                 codec: RDCodec? = nil,
+                 targetBitrate: Int? = nil,
+                 debounced: Bool = true) async throws {
         restartDebounceTask?.cancel()
         let targetID = displayID ?? runningDisplay ?? currentDisplay
         let targetPreset = newPreset ?? preset
         let targetCodec = codec ?? currentCodec
 
         let task = Task { @MainActor in
-            try await Task.sleep(nanoseconds: 150_000_000)
-            try Task.checkCancellation()
-            try await self.start(displayID: targetID, preset: targetPreset, codec: targetCodec, forceRestart: true)
+            if debounced, self.stream != nil {
+                try await Task.sleep(nanoseconds: 150_000_000)
+                try Task.checkCancellation()
+            }
+            try await self.start(displayID: targetID,
+                                 preset: targetPreset,
+                                 codec: targetCodec,
+                                 targetBitrate: targetBitrate,
+                                 forceRestart: true)
             self.requestKeyframe()
         }
         restartDebounceTask = task
         try await task.value
     }
 
-    func updatePreset(_ newPreset: RDQualityPreset) async {
-        await updateConfiguration(preset: newPreset, codec: currentCodec)
+    func updatePreset(_ newPreset: RDQualityPreset, targetBitrate: Int? = nil) async {
+        await updateConfiguration(preset: newPreset, codec: currentCodec, targetBitrate: targetBitrate)
     }
 
-    func updateConfiguration(preset newPreset: RDQualityPreset, codec newCodec: RDCodec) async {
+    func updateConfiguration(preset newPreset: RDQualityPreset, codec newCodec: RDCodec, targetBitrate: Int? = nil) async {
+        restartDebounceTask?.cancel()
+        restartDebounceTask = nil
         preset = newPreset
         currentCodec = newCodec
+        let effectiveBitrate = targetBitrate ?? preset.targetBitrate
         guard let stream else { return }
         let content = try? await SCShareableContent.current
         guard self.stream === stream,
@@ -273,15 +309,25 @@ final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             width: Int32(config.width),
             height: Int32(config.height),
             fps: preset.fps,
-            bitrate: preset.targetBitrate,
+            bitrate: effectiveBitrate,
             codec: currentCodec
         )
-        try? await stream.updateConfiguration(config)
-        requestKeyframe()
+        do {
+            try await stream.updateConfiguration(config)
+            requestKeyframe()
+        } catch {
+            HostLog.write("capture updateConfiguration failed (\(error.localizedDescription)); restarting")
+            try? await start(displayID: runningDisplay,
+                             preset: preset,
+                             codec: currentCodec,
+                             targetBitrate: effectiveBitrate,
+                             forceRestart: true)
+            requestKeyframe()
+        }
     }
 
-    func setDynamicBitrate(_ newBitrate: Int) {
-        state.encoder.setDynamicBitrate(newBitrate)
+    nonisolated func setDynamicBitrate(_ newBitrate: Int) {
+        Self.setDynamicBitrate(newBitrate)
     }
 
     func stop() {

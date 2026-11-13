@@ -90,4 +90,117 @@ final class VideoDatagramTests: XCTestCase {
         let tooBig = payload((RDVideoDatagram.maxPieces + 1) * RDVideoDatagram.minPieceBody)
         XCTAssertNil(packetizer.datagrams(frame: 1, payload: tooBig, isKeyframe: true, maxDatagramSize: 0))
     }
+
+    func testFECParityRecoversSingleLossInGroup() {
+        let fecPacketizer = RDVideoPacketizer(key: key, fecEnabled: true)
+        let data = payload(3200, seed: 11)
+        // 5 pieces + 1 parity packet (6 total); lose data piece index 2.
+        let all = fecPacketizer.datagrams(frame: 1, payload: data, isKeyframe: true, maxDatagramSize: 700)!
+        let parityFlag = RDVideoDatagram.fecParityFlag
+        let dataPieces = all.filter { ($0[8] & parityFlag) == 0 }
+        let parityPieces = all.filter { ($0[8] & parityFlag) != 0 }
+        XCTAssertEqual(dataPieces.count, 5)
+        XCTAssertEqual(parityPieces.count, 1)
+
+        var assembler = RDVideoReassembler(key: key)
+        var delivered: [Data] = []
+        var acked: UInt32?
+        for datagram in (dataPieces.enumerated().compactMap { $0.offset == 2 ? nil : $0.element } + parityPieces).reversed() {
+            let out = assembler.receive(datagram)
+            delivered += out.frames
+            if let a = out.acked { acked = a }
+            XCTAssertEqual(out.dropped, 0)
+            XCTAssertFalse(out.needsKeyframe)
+        }
+        XCTAssertEqual(delivered, [data])
+        XCTAssertEqual(acked, 1)
+    }
+
+    func testFECSlicesSixPiecesIntoThreePlusThreeGroups() {
+        let fecPacketizer = RDVideoPacketizer(key: key, fecEnabled: true)
+        // With maxDatagramSize=310, body is 280 B -> 1650 B yields 6 data pieces (3+3 groups).
+        let data = payload(1650, seed: 3)
+        let all = fecPacketizer.datagrams(frame: 1, payload: data, isKeyframe: true, maxDatagramSize: 310)!
+        let parityFlag = RDVideoDatagram.fecParityFlag
+        let dataPieces = all.filter { ($0[8] & parityFlag) == 0 }
+        let parityPieces = all.filter { ($0[8] & parityFlag) != 0 }
+        XCTAssertEqual(dataPieces.count, 6)
+        XCTAssertEqual(parityPieces.count, 2)
+
+        // Drop piece 1 (group 0) and piece 4 (group 1) simultaneously.
+        let surviving = dataPieces.enumerated().compactMap { ($0.offset == 1 || $0.offset == 4) ? nil : $0.element } + parityPieces
+        var assembler = RDVideoReassembler(key: key)
+        let delivered = surviving.flatMap { assembler.receive($0).frames }
+        XCTAssertEqual(delivered, [data])
+    }
+
+    func testFECCannotRecoverTwoLossesInSameGroup() {
+        let fecPacketizer = RDVideoPacketizer(key: key, fecEnabled: true)
+        let all = fecPacketizer.datagrams(frame: 1, payload: payload(2500), isKeyframe: true, maxDatagramSize: 600)!
+        let parityFlag = RDVideoDatagram.fecParityFlag
+        let dataPieces = all.filter { ($0[8] & parityFlag) == 0 }
+        let parityPieces = all.filter { ($0[8] & parityFlag) != 0 }
+        let incomplete = Array(dataPieces.dropFirst(2)) + parityPieces
+
+        var assembler = RDVideoReassembler(key: key)
+        for datagram in incomplete {
+            XCTAssertTrue(assembler.receive(datagram).frames.isEmpty)
+        }
+        let next = fecPacketizer.datagrams(frame: 2, payload: payload(100), isKeyframe: false, maxDatagramSize: 600)!
+        let out = next.map { assembler.receive($0) }
+        XCTAssertTrue(out.allSatisfy { $0.frames.isEmpty })
+        XCTAssertTrue(out.contains { $0.needsKeyframe })
+        XCTAssertGreaterThanOrEqual(out.reduce(0) { $0 + $1.dropped }, 1)
+    }
+
+    func testUnsealedTLSBoundDatagramsSupportFECAndOutOfOrder() {
+        let unsealedPacketizer = RDVideoPacketizer(key: nil, fecEnabled: true)
+        let data = payload(3200, seed: 29)
+        let all = unsealedPacketizer.datagrams(frame: 1, payload: data, isKeyframe: true, maxDatagramSize: 700)!
+        let parityFlag = RDVideoDatagram.fecParityFlag
+        let dataPieces = all.filter { ($0[8] & parityFlag) == 0 }
+        let parityPieces = all.filter { ($0[8] & parityFlag) != 0 }
+        let withSingleLoss = (Array(dataPieces.dropFirst()) + parityPieces).shuffled()
+
+        var assembler = RDVideoReassembler(key: nil)
+        let delivered = withSingleLoss.flatMap { assembler.receive($0).frames }
+        XCTAssertEqual(delivered, [data])
+    }
+
+    func testInterleavedFECRecoversConsecutiveBurstLoss() {
+        let fecPacketizer = RDVideoPacketizer(key: key, fecEnabled: true)
+        // 1650 B at maxDatagramSize=310 splits into 6 data pieces (groups [0..<3] and [3..<6]) + 2 parities.
+        let data = payload(1650, seed: 19)
+        let all = fecPacketizer.datagrams(frame: 1, payload: data, isKeyframe: true, maxDatagramSize: 310)!
+        XCTAssertEqual(all.count, 8)
+
+        // Drop two adjacent wire packets [0, 1] at the front of the burst; interleaving puts them
+        // in different XOR groups so both recover without requesting a keyframe.
+        let afterBurstDrop = Array(all.dropFirst(2))
+        var assembler = RDVideoReassembler(key: key)
+        var delivered: [Data] = []
+        for datagram in afterBurstDrop {
+            let out = assembler.receive(datagram)
+            delivered += out.frames
+            XCTAssertFalse(out.needsKeyframe)
+            XCTAssertEqual(out.dropped, 0)
+        }
+        XCTAssertEqual(delivered, [data])
+    }
+
+    func testFECProtectsSmallMultiPiecePFrame() {
+        let fecPacketizer = RDVideoPacketizer(key: key, fecEnabled: true)
+        let pFrame = payload(800, seed: 7)
+        // At maxDatagramSize=500, splits into 2 data pieces + 1 parity packet even when not a keyframe.
+        let all = fecPacketizer.datagrams(frame: 2, payload: pFrame, isKeyframe: false, maxDatagramSize: 500)!
+        let parityFlag = RDVideoDatagram.fecParityFlag
+        let dataPieces = all.filter { ($0[8] & parityFlag) == 0 }
+        let parityPieces = all.filter { ($0[8] & parityFlag) != 0 }
+        XCTAssertEqual(dataPieces.count, 2)
+        XCTAssertEqual(parityPieces.count, 1)
+
+        var assembler = RDVideoReassembler(key: key, lastFrame: 1)
+        let recovered = (Array(dataPieces.dropFirst()) + parityPieces).flatMap { assembler.receive($0).frames }
+        XCTAssertEqual(recovered, [pFrame])
+    }
 }

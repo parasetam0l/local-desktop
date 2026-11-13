@@ -100,7 +100,17 @@ final class ClientSession: ObservableObject {
     @Published private(set) var macWindowActions = false
     /// The Mac's front window as last reported (see `requestFrontWindow`).
     @Published private(set) var frontWindow: RDFrontWindowMsg?
-    @Published var showDebugHUD = false
+    @Published var showDebugHUD = false {
+        didSet {
+            if showDebugHUD {
+                currentRTT = lastRTT
+                rawRTT = latestRawRTT
+                if let protocolName = connection?.currentTransportLabel {
+                    transportProtocol = protocolName
+                }
+            }
+        }
+    }
     /// Watch only: no pointer, scroll or keyboard input reaches the Mac.
     @Published var isViewOnly = false
     /// The outcome of something the user asked the Mac for, to show for a moment.
@@ -114,7 +124,10 @@ final class ClientSession: ObservableObject {
     @Published private(set) var liveBitrateMbps: Double = 0.0
     @Published private(set) var liveDecodeMs: Double = 0.0
     @Published private(set) var currentRTT: Double = 0.0
+    @Published private(set) var rawRTT: Double = 0.0
+    @Published private(set) var transportProtocol: String = ""
     private var lastRTT = 0.0
+    private var latestRawRTT = 0.0
     private(set) var serverMacAddress: String?
 
     var displayName: String {
@@ -225,6 +238,11 @@ final class ClientSession: ObservableObject {
         endpoint = target
         quicAdvert = quic
         actualEndpoint = nil
+        lastRTT = 0.0
+        latestRawRTT = 0.0
+        currentRTT = 0.0
+        rawRTT = 0.0
+        transportProtocol = ""
         hostDescription = describe(target)
         phase = .connecting
         video.reset()
@@ -320,7 +338,9 @@ final class ClientSession: ObservableObject {
             handleMessage(wire, payload: payload)
         case .pong(let rttMs):
             lastPongAt = Date()
-            lastRTT = rttMs
+            latestRawRTT = rttMs
+            // Fast EWMA smooths single off-channel Wi-Fi scan spikes while still tracking real latency shifts.
+            lastRTT = lastRTT > 0 ? (lastRTT * 0.65 + rttMs * 0.35) : rttMs
             reportNetworkStatsIfNeeded()
         case .closed:
             if phase == .connected {
@@ -483,8 +503,16 @@ final class ClientSession: ObservableObject {
             mirrorRequestTimeout?.cancel()
             appliedDefaultHideDock = false
             sentTextFocusPreference = false
+            sizedMirrorAvailable = msg.sizedMirrorAvailable ?? false
             clipboardImage.reset()
             handleAuthOK(msg, attempt: attempt)
+            if showDebugHUD, let protocolName = connection?.currentTransportLabel {
+                transportProtocol = protocolName
+            }
+            if phase == .connected, sizedMirrorAvailable, desktopSize != .macOwn, pictureArea.width >= 1 {
+                appliedDesktopSize = true
+                applyDesktopSize(byUser: false)
+            }
             if phase == .connected, sharesClipboard {
                 // Macs before 1.2.21 ignore this.
                 sendJSON(.setClipboardSharing, RDSetClipboardSharingMsg(enabled: true))
@@ -680,7 +708,7 @@ final class ClientSession: ObservableObject {
             fail("Connection lost (no heartbeat)")
             return
         }
-        sendJSON(.ping, PingMsg(t: Date().timeIntervalSince1970))
+        connection?.sendPing()
     }
 
     private func stopPing() {
@@ -704,6 +732,8 @@ final class ClientSession: ObservableObject {
             liveBitrateMbps = (Double(network.bytes) * 8.0) / (elapsed * 1_000_000.0)
             liveDecodeMs = decoded.decodeMs
             currentRTT = lastRTT
+            rawRTT = latestRawRTT
+            transportProtocol = network.transportProtocol
         }
 
         sendJSON(.networkStats, NetworkStatsMsg(rttMs: lastRTT,
@@ -1127,15 +1157,22 @@ final class ClientSession: ObservableObject {
     }
 
     /// The device was turned (or the session view was first laid out). The desktop
-    /// follows a moment later, so that one turn asks the Mac once.
+    /// follows a moment later, so that one turn asks the Mac once; initial layout right
+    /// after connecting asks immediately without adding a debounce stall.
     private func pictureAreaChanged() {
         pictureAreaUpdate?.cancel()
+        if !appliedDesktopSize, sizedMirrorAvailable, phase == .connected {
+            guard pictureArea.width >= 1 else { return }
+            appliedDesktopSize = true
+            if desktopSize != .macOwn { applyDesktopSize(byUser: false) }
+            return
+        }
         let update = DispatchWorkItem { [weak self] in
             guard let self, self.appliedDesktopSize, self.desktopSize != .macOwn else { return }
             self.applyDesktopSize(byUser: false)
         }
         pictureAreaUpdate = update
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: update)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: update)
     }
 
     /// Hides the Mac's Dock for the session or shows it again; the Mac confirms with `hostState`.

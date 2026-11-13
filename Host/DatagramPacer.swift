@@ -17,24 +17,24 @@ final class DatagramPacer: @unchecked Sendable {
     /// The pacing rate is the encoder's bitrate times this, at least `minRate`.
     static let rateMultiple = 4.0
     static let minRate = 40_000_000
-    /// About 58 KB, some 50 ms of video at full rate.
-    static let maxInStack = 48
+    /// About 28 KB (~25 ms of video at full rate), bounding stack queue bursts.
+    static let maxInStack = 24
 
     private let queue = DispatchQueue(label: "rd.datagram-pacer", qos: .userInteractive)
-    private let send: (Data, @escaping @Sendable () -> Void) -> Void
+    private let send: @Sendable (Data, @escaping @Sendable () -> Void) -> Void
     private var inStack = 0
-    private var pending: [(datagram: Data, done: (() -> Void)?)] = []
+    private var pending: [(datagram: Data, done: (@Sendable () -> Void)?)] = []
     private var head = 0
     private var bytesPerSecond = Double(minRate) / 8
     private var credit = Double(burstBytes)
     private var lastRefill: TimeInterval = 0
     private var timer: DispatchSourceTimer?
-    private let now: () -> TimeInterval
+    private let now: @Sendable () -> TimeInterval
 
     /// `send(datagram, processed)` runs on the pacer's queue and calls `processed` (on
     /// any queue) once the network stack has taken the datagram off its hands.
-    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         send: @escaping (Data, @escaping @Sendable () -> Void) -> Void) {
+    init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         send: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void) {
         self.now = now
         self.send = send
     }
@@ -55,7 +55,7 @@ final class DatagramPacer: @unchecked Sendable {
 
     /// Queues one frame's datagrams; `done` runs on the pacer's queue once the last
     /// of them was handed to the network.
-    func enqueue(_ datagrams: [Data], done: @escaping () -> Void) {
+    func enqueue(_ datagrams: [Data], done: @escaping @Sendable () -> Void) {
         guard !datagrams.isEmpty else { return queue.async(execute: done) }
         queue.async {
             for (index, datagram) in datagrams.enumerated() {

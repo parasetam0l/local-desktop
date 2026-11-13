@@ -46,6 +46,7 @@ final class ClientConnection: @unchecked Sendable {
         var frames = 0
         /// Video frames lost or discarded on the datagram path.
         var lost = 0
+        var transportProtocol = ""
     }
 
     private let queue: DispatchQueue
@@ -59,7 +60,16 @@ final class ClientConnection: @unchecked Sendable {
     private var group: NWConnectionGroup?
     private var datagramFlow: NWConnection?
     private var videoKey: SymmetricKey?
+    private var videoStreamKey: SymmetricKey?
+    private var observedTLSCertHash: Data?
+    private var quicTLSBound = false
+    private var videoStreamConnection: NWConnection?
+    private var videoStreamReader = RDFrameReader()
+    private var videoStreamReceiveCipher: RDCipher?
+    private var videoStreamActive = false { didSet { syncTransportLabel() } }
+    private var pendingVideoStreamFrames: [Data] = []
     private var reassembler: RDVideoReassembler?
+    private var datagramsActive = false { didSet { syncTransportLabel() } }
     private var isAuthenticated = false
     private var offeredDatagrams = false
     private var lastLossKeyframeRequest: TimeInterval = 0
@@ -70,7 +80,7 @@ final class ClientConnection: @unchecked Sendable {
     private var quicFallbackReason: String?
     private var streamRetried = false
     /// The transport currently in use.
-    private var transport: RDTransport
+    private var transport: RDTransport { didSet { syncTransportLabel() } }
     private var reportedReady = false
     private let deviceId: String
     private let deviceName: String
@@ -109,6 +119,30 @@ final class ClientConnection: @unchecked Sendable {
 
     private let statsLock = NSLock()
     private var stats = Stats()
+    private var _transportLabel = ""
+
+    private var transportLabel: String {
+        switch transport {
+        case .tcp: return "TCP"
+        case .quic:
+            if datagramsActive { return "QUIC·D" }
+            if videoStreamActive { return "QUIC·S" }
+            return "QUIC"
+        }
+    }
+
+    var currentTransportLabel: String {
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        return _transportLabel
+    }
+
+    private func syncTransportLabel() {
+        let label = transportLabel
+        statsLock.lock()
+        _transportLabel = label
+        statsLock.unlock()
+    }
 
     /// - Parameter quicEndpoint: where to try QUIC first; nil connects over TCP only.
     init(to endpoint: NWEndpoint,
@@ -133,6 +167,7 @@ final class ClientConnection: @unchecked Sendable {
             connection = NWConnection(to: endpoint, using: Self.makeParameters())
         }
         reader.maxPayload = RDService.maxHandshakePayload
+        syncTransportLabel()
     }
 
     static func makeParameters() -> NWParameters {
@@ -145,9 +180,6 @@ final class ClientConnection: @unchecked Sendable {
         params.serviceClass = .interactiveVideo
         params.allowLocalEndpointReuse = true
         params.includePeerToPeer = false
-        if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            ipOptions.version = .v4
-        }
         return params
     }
 
@@ -190,8 +222,12 @@ final class ClientConnection: @unchecked Sendable {
         if case .service = quicEndpoint {
             return resolveQUICService(quicEndpoint)
         }
-        let group = NWConnectionGroup(with: NWMultiplexGroup(to: quicEndpoint),
-                                      using: RDQUIC.clientParameters(verifyQueue: queue))
+        observedTLSCertHash = nil
+        quicTLSBound = false
+        let parameters = RDQUIC.clientParameters(verifyQueue: queue) { [weak self] hash in
+            self?.observedTLSCertHash = hash
+        }
+        let group = NWConnectionGroup(with: NWMultiplexGroup(to: quicEndpoint), using: parameters)
         self.group = group
         group.stateUpdateHandler = { [weak self, weak group] state in
             guard let self, let group, self.group === group, !self.isFinished else { return }
@@ -222,9 +258,6 @@ final class ClientConnection: @unchecked Sendable {
     /// (with the service's port, which QUIC shares) is then dialled as a group.
     private func resolveQUICService(_ service: NWEndpoint) {
         let params = NWParameters.udp
-        if let ip = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            ip.version = .v4
-        }
         let resolver = NWConnection(to: service, using: params)
         quicResolver = resolver
         resolver.stateUpdateHandler = { [weak self, weak resolver] state in
@@ -319,12 +352,16 @@ final class ClientConnection: @unchecked Sendable {
         quicResolver = nil
         connection?.stateUpdateHandler = nil
         connection?.cancel()
+        tearDownVideoStream()
         datagramFlow?.stateUpdateHandler = nil
         datagramFlow?.cancel()
         datagramFlow = nil
         group?.stateUpdateHandler = nil
         group?.cancel()
         group = nil
+        observedTLSCertHash = nil
+        quicTLSBound = false
+        videoStreamKey = nil
         transport = .tcp
         ephemeralKey = nil
         reader = RDFrameReader()
@@ -344,20 +381,32 @@ final class ClientConnection: @unchecked Sendable {
         queue.async { self.write(wire, payload, then: nil) }
     }
 
+    /// Stamps `ping` on `queue` right before encryption/send so main-thread UI scheduling
+    /// does not inflate the measured RTT.
+    func sendPing() {
+        queue.async {
+            let payload = RDJSON.encode(PingMsg(t: ProcessInfo.processInfo.systemUptime))
+            self.write(.ping, payload, then: nil)
+        }
+    }
+
     /// Sends a last message and closes once it has been written.
     func sendAndClose(_ wire: RDWire, _ payload: Data) {
         queue.async {
             guard !self.isFinished else { return }
             let connection = self.connection
+            let videoStream = self.videoStreamConnection
             let group = self.group
             self.write(wire, payload) {
                 connection?.cancel()
+                videoStream?.cancel()
                 group?.cancel()
             }
             self.isFinished = true
             // Don't hang on to a connection whose peer stopped reading.
             self.queue.asyncAfter(deadline: .now() + 2) {
                 connection?.cancel()
+                videoStream?.cancel()
                 group?.cancel()
             }
         }
@@ -366,7 +415,8 @@ final class ClientConnection: @unchecked Sendable {
     func drainStats() -> Stats {
         statsLock.lock()
         defer { statsLock.unlock() }
-        let current = stats
+        var current = stats
+        current.transportProtocol = _transportLabel
         stats = Stats()
         return current
     }
@@ -439,6 +489,9 @@ final class ClientConnection: @unchecked Sendable {
         isFinished = true
         quicResolver?.cancel()
         connection?.cancel()
+        videoStreamConnection?.cancel()
+        videoStreamConnection = nil
+        pendingVideoStreamFrames.removeAll()
         datagramFlow?.cancel()
         group?.cancel()
         if let event {
@@ -449,13 +502,18 @@ final class ClientConnection: @unchecked Sendable {
     private func sendHello() {
         let key = RDCrypto.makePrivateKey()
         ephemeralKey = key
-        let hello = HelloMsg(deviceId: deviceId, deviceName: deviceName, pubKey: key.publicKey.rawRepresentation)
+        let tlsBound = (transport == .quic && observedTLSCertHash != nil)
+        let hello = HelloMsg(deviceId: deviceId,
+                             deviceName: deviceName,
+                             pubKey: key.publicKey.rawRepresentation,
+                             avcc: true,
+                             quicTLSBound: tlsBound ? true : nil)
         write(.hello, RDJSON.encode(hello), then: nil)
     }
 
     private func receive() {
         guard let current = connection else { return }
-        current.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] chunk, _, isComplete, error in
+        current.receive(minimumIncompleteLength: 1, maximumLength: 262_144) { [weak self] chunk, _, isComplete, error in
             // A dropped QUIC attempt may still deliver a last callback; ignore it.
             guard let self, !self.isFinished, self.connection === current else { return }
             if let error {
@@ -517,46 +575,54 @@ final class ClientConnection: @unchecked Sendable {
             diagReceived[wire, default: 0] += 1
             switch wire {
             case .frame:
-                // Confirmed on arrival, before decoding: the host paces itself on what
-                // reached the device, not on what it handed to its own network stack.
-                // Stream frames are numbered by their position on the stream.
-                framesReceived &+= 1
-                let number = framesReceived
-                if var assembler = reassembler {
-                    // Datagrams took over; a stream frame older than one they delivered
-                    // can't be decoded in order.
-                    let fresh = assembler.noteStreamFrame(number)
-                    reassembler = assembler
-                    guard fresh else {
-                        countLost(1)
-                        requestLossKeyframe()
-                        continue
-                    }
-                }
-                sendFrameAck(number)
-                onVideoFrame(plain)
+                deliverStreamVideoFrame(plain)
             case .serverHello:
                 finish(.failed("Protocol error: repeated handshake"))
             case .videoStream:
-                // The host left datagrams; stream frames go on from `nextFrame`, and
-                // datagrams still arriving are ignored.
+                // Initial dedicated-stream attach sets `onVideoStream: true` while datagrams
+                // have not started; only clear `reassembler` when actually leaving datagrams
+                // (or talking to an older host that omits `onVideoStream`).
                 guard let msg = RDJSON.decode(VideoStreamMsg.self, from: plain) else { continue }
-                reassembler = nil
+                let leavingDatagrams = (msg.leavingDatagrams == true) || datagramsActive || (msg.onVideoStream == nil)
+                if leavingDatagrams {
+                    datagramsActive = false
+                    reassembler = nil
+                }
                 framesReceived = msg.nextFrame &- 1
-                ClientLog.write("video back on the QUIC stream at frame \(msg.nextFrame)")
+                if msg.onVideoStream == true {
+                    videoStreamActive = true
+                    if !pendingVideoStreamFrames.isEmpty {
+                        let buffered = pendingVideoStreamFrames
+                        pendingVideoStreamFrames.removeAll()
+                        for framePayload in buffered {
+                            deliverStreamVideoFrame(framePayload)
+                        }
+                    }
+                    ClientLog.write("video on dedicated QUIC stream at frame \(msg.nextFrame)")
+                } else {
+                    videoStreamActive = false
+                    pendingVideoStreamFrames.removeAll()
+                    ClientLog.write("video back on the QUIC stream at frame \(msg.nextFrame)")
+                }
             case .pong:
                 guard let msg = RDJSON.decode(PingMsg.self, from: plain) else { continue }
-                onEvent(.pong(rttMs: max(0.5, (Date().timeIntervalSince1970 - msg.t) * 1000.0)))
+                let elapsed = (ProcessInfo.processInfo.systemUptime - msg.t) * 1000.0
+                onEvent(.pong(rttMs: max(0.5, elapsed)))
             default:
+                var authOKMsg: AuthOKMsg?
                 if wire == .authOK {
                     // Video and app lists can be large; lift the handshake limit before
                     // parsing whatever follows authOK in this same chunk.
                     reader.maxPayload = RDService.maxPayload
+                    authOKMsg = RDJSON.decode(AuthOKMsg.self, from: plain)
                 }
                 onEvent(.message(wire, plain))
                 if wire == .authOK {
                     isAuthenticated = true
                     logStartupDiagnostics(remaining: 15)
+                    if authOKMsg?.supportsVideoStream == true {
+                        openVideoStreamIfNeeded()
+                    }
                     offerDatagramsIfReady()
                     if let reason = quicFallbackReason {
                         quicFallbackReason = nil
@@ -588,11 +654,18 @@ final class ClientConnection: @unchecked Sendable {
             finish(.failed("Handshake failed: the Mac's identity doesn't match its id."))
             return
         }
+        let useBoundTLS = msg.quicTLSBound == true
+        if useBoundTLS, (transport != .quic || observedTLSCertHash == nil) {
+            finish(.failed("Handshake failed: unexpected TLS binding on non-QUIC connection."))
+            return
+        }
+        let boundCertHash = useBoundTLS ? observedTLSCertHash : nil
         let transcript = RDHandshake.transcriptHash(clientKey: key.publicKey.rawRepresentation,
                                                     deviceId: deviceId,
                                                     serverKey: msg.pubKey,
                                                     serverIdentity: msg.identityKey,
-                                                    serverId: msg.serverId)
+                                                    serverId: msg.serverId,
+                                                    tlsCertHash: boundCertHash)
         guard RDHandshake.isValidSignature(msg.signature, publicKey: msg.identityKey,
                                            message: RDHandshake.serverProof(transcript: transcript)),
               let keys = RDHandshake.sessionKeys(privateKey: key, peerPublicKey: msg.pubKey, transcript: transcript) else {
@@ -600,13 +673,132 @@ final class ClientConnection: @unchecked Sendable {
             return
         }
         ephemeralKey = nil
+        quicTLSBound = useBoundTLS
         videoKey = keys.videoDatagrams
+        videoStreamKey = keys.videoStream
         sendCipher = RDCipher(key: keys.clientToServer)
         receiveCipher = RDCipher(key: keys.serverToClient)
         onEvent(.serverHello(ServerIdentity(serverId: msg.serverId,
                                             serverName: msg.serverName,
                                             identityKey: msg.identityKey,
                                             transcript: transcript)))
+    }
+
+    // MARK: Dedicated 2nd QUIC video stream
+
+    private func deliverStreamVideoFrame(_ plain: Data) {
+        // Confirmed on arrival, before decoding: the host paces itself on what
+        // reached the device, not on what it handed to its own network stack.
+        // Stream frames are numbered by their position on the stream.
+        framesReceived &+= 1
+        let number = framesReceived
+        if var assembler = reassembler {
+            // Datagrams took over; a stream frame older than one they delivered
+            // can't be decoded in order.
+            let fresh = assembler.noteStreamFrame(number)
+            reassembler = assembler
+            guard fresh else {
+                countLost(1)
+                requestLossKeyframe()
+                return
+            }
+        }
+        sendFrameAck(number)
+        onVideoFrame(plain)
+    }
+
+    private func openVideoStreamIfNeeded() {
+        guard transport == .quic, videoStreamConnection == nil,
+              let group, group.state == .ready,
+              let key = videoStreamKey,
+              let stream = group.extract() else { return }
+        videoStreamConnection = stream
+        videoStreamReader = RDFrameReader()
+        videoStreamReader.maxPayload = RDService.maxPayload
+        videoStreamReceiveCipher = quicTLSBound ? nil : RDCipher(key: key)
+        videoStreamActive = false
+        pendingVideoStreamFrames.removeAll()
+
+        stream.stateUpdateHandler = { [weak self, weak stream] state in
+            guard let self, let stream, self.videoStreamConnection === stream, !self.isFinished else { return }
+            self.trace("videoStream \(state)")
+            switch state {
+            case .ready:
+                var attachCipher = RDCipher(key: key)
+                guard let sealed = try? attachCipher.seal(.videoStreamAttach, RDJSON.encode(VideoStreamAttachMsg())) else {
+                    self.tearDownVideoStream()
+                    return
+                }
+                stream.send(content: sealed, completion: .contentProcessed { _ in })
+                self.receiveVideoStream(on: stream)
+            case .failed, .cancelled:
+                self.tearDownVideoStream()
+            default:
+                break
+            }
+        }
+        stream.start(queue: queue)
+    }
+
+    private func receiveVideoStream(on stream: NWConnection) {
+        stream.receive(minimumIncompleteLength: 1, maximumLength: 262_144) { [weak self, weak stream] chunk, _, isComplete, error in
+            guard let self, let stream, !self.isFinished, self.videoStreamConnection === stream else { return }
+            if let error {
+                self.trace("videoStream error: \(error)")
+                self.tearDownVideoStream()
+                return
+            }
+            if let chunk, !chunk.isEmpty {
+                self.videoStreamReader.append(chunk)
+                self.processVideoStreamFrames()
+            }
+            if isComplete {
+                self.tearDownVideoStream()
+                return
+            }
+            if !self.isFinished, self.videoStreamConnection === stream {
+                self.receiveVideoStream(on: stream)
+            }
+        }
+    }
+
+    private func processVideoStreamFrames() {
+        while !isFinished, videoStreamConnection != nil {
+            let frame: RDFrameData
+            do {
+                guard let next = try videoStreamReader.nextFrame() else { return }
+                frame = next
+            } catch {
+                tearDownVideoStream()
+                return
+            }
+            countStats(bytes: frame.header.count + frame.body.count, isVideo: frame.wire == .frame)
+            let payload: Data
+            if videoStreamReceiveCipher != nil {
+                guard let plain = try? videoStreamReceiveCipher?.open(header: frame.header, body: frame.body) else {
+                    tearDownVideoStream()
+                    return
+                }
+                payload = plain
+            } else {
+                payload = frame.body
+            }
+            guard frame.wire == .frame else { continue }
+            if videoStreamActive {
+                deliverStreamVideoFrame(payload)
+            } else if pendingVideoStreamFrames.count < 120 {
+                pendingVideoStreamFrames.append(payload)
+            }
+        }
+    }
+
+    private func tearDownVideoStream() {
+        videoStreamConnection?.stateUpdateHandler = nil
+        videoStreamConnection?.cancel()
+        videoStreamConnection = nil
+        videoStreamReceiveCipher = nil
+        videoStreamActive = false
+        pendingVideoStreamFrames.removeAll()
     }
 
     // MARK: Video datagrams
@@ -617,10 +809,16 @@ final class ClientConnection: @unchecked Sendable {
         guard !offeredDatagrams, isAuthenticated, let flow = datagramFlow, flow.state == .ready,
               let videoKey else { return }
         offeredDatagrams = true
-        reassembler = RDVideoReassembler(key: videoKey, lastFrame: framesReceived)
+        let unsealed = quicTLSBound
+        reassembler = RDVideoReassembler(key: unsealed ? nil : videoKey, lastFrame: framesReceived)
         let reported = flow.maximumDatagramSize
         let maxSize = min(RDVideoDatagram.defaultMaxSize, reported > 0 ? reported : RDVideoDatagram.defaultMaxSize)
-        write(.videoDatagrams, RDJSON.encode(VideoDatagramsMsg(maxSize: maxSize, canResumeStream: true)), then: nil)
+        write(.videoDatagrams,
+              RDJSON.encode(VideoDatagramsMsg(maxSize: maxSize,
+                                              canResumeStream: true,
+                                              fec: true,
+                                              unsealed: unsealed ? true : nil)),
+              then: nil)
     }
 
     private func receiveDatagram(on flow: NWConnection) {
@@ -640,6 +838,13 @@ final class ClientConnection: @unchecked Sendable {
     private func handleDatagram(_ datagram: Data) {
         diagDatagrams += 1
         guard var assembler = reassembler else { return }
+        // Once datagrams are accepted, the host has left stream video; hold any subsequent
+        // stream frames until `VideoStreamMsg` re-establishes `framesReceived` (`nextFrame`).
+        if !datagramsActive {
+            datagramsActive = true
+            pendingVideoStreamFrames.removeAll()
+        }
+        videoStreamActive = false
         let output = assembler.receive(datagram)
         reassembler = assembler
         datagramLog.datagrams += 1

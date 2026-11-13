@@ -40,6 +40,9 @@ enum RDWire: UInt8 {
     /// again, and the next stream frame is number `nextFrame`. Sent only to clients whose
     /// `videoDatagrams` said `canResumeStream` (from 1.2.30).
     case videoStream = 0x15
+    /// Client → host on a dedicated QUIC stream after `authOK`: attaches the stream
+    /// for reliable video frames (`RDWire.frame`) isolated from control/input traffic.
+    case videoStreamAttach = 0x16
 
     // Mouse
     case mouseMoveAbs = 0x20
@@ -139,6 +142,9 @@ enum RDCodec: UInt8, CaseIterable, Identifiable {
 
 enum RDFrameCodec {
     static let headerLength = 5
+    /// High bit set on the codec byte means the payload carries native AVCC
+    /// (`[u8 paramCount][([u16 len][param]) * paramCount][avcc NALU data]`) instead of Annex-B.
+    static let avccFlag: UInt8 = 0x80
 
     static func pack(width: Int, height: Int, codec: RDCodec, data: Data) -> Data {
         var out = Data(capacity: headerLength + data.count)
@@ -149,12 +155,34 @@ enum RDFrameCodec {
         return out
     }
 
-    static func unpack(_ payload: Data) -> (width: Int, height: Int, codec: RDCodec, data: Data)? {
+    static func packAVCC(width: Int, height: Int, codec: RDCodec, parameterSets: [Data], data: Data) -> Data {
+        let paramHeaderSize = 1 + parameterSets.reduce(0) { $0 + 2 + $1.count }
+        var out = Data(capacity: headerLength + paramHeaderSize + data.count)
+        out.appendBE16(UInt16(clamping: width))
+        out.appendBE16(UInt16(clamping: height))
+        out.append(codec.rawValue | avccFlag)
+        out.append(UInt8(clamping: parameterSets.count))
+        for ps in parameterSets.prefix(255) {
+            out.appendBE16(UInt16(clamping: ps.count))
+            out.append(ps)
+        }
+        out.append(data)
+        return out
+    }
+
+    static func unpackPacket(_ payload: Data) -> (width: Int, height: Int, codec: RDCodec, isAVCC: Bool, data: Data)? {
         guard payload.count > headerLength else { return nil }
         let width = Int(payload.be16(at: 0))
         let height = Int(payload.be16(at: 2))
-        guard let codec = RDCodec(rawValue: payload[payload.startIndex + 4]) else { return nil }
-        return (width, height, codec, payload.subdata(in: payload.startIndex + headerLength..<payload.endIndex))
+        let rawCodec = payload[payload.startIndex + 4]
+        let isAVCC = (rawCodec & avccFlag) != 0
+        guard let codec = RDCodec(rawValue: rawCodec & ~avccFlag) else { return nil }
+        return (width, height, codec, isAVCC, payload[(payload.startIndex + headerLength)..<payload.endIndex])
+    }
+
+    static func unpack(_ payload: Data) -> (width: Int, height: Int, codec: RDCodec, data: Data)? {
+        guard let packet = unpackPacket(payload) else { return nil }
+        return (packet.width, packet.height, packet.codec, packet.data)
     }
 }
 
@@ -210,6 +238,10 @@ struct HelloMsg: Codable {
     var deviceName: String
     /// Ephemeral X25519 public key for this connection.
     var pubKey: Data
+    /// Client accepts native AVCC video payloads (avoiding Annex-B conversion on both ends).
+    var avcc: Bool? = nil
+    /// Client observed the QUIC/TLS leaf certificate and asks the host to bind it into the handshake.
+    var quicTLSBound: Bool? = nil
 }
 
 struct ServerHelloMsg: Codable {
@@ -223,6 +255,8 @@ struct ServerHelloMsg: Codable {
     var identityKey: Data
     /// Ed25519 signature over `RDHandshake.serverProof(transcript:)`.
     var signature: Data
+    /// True when the host bound its QUIC/TLS certificate digest into `transcript`.
+    var quicTLSBound: Bool? = nil
 }
 
 struct AuthPinMsg: Codable {
@@ -242,6 +276,11 @@ struct AuthOKMsg: Codable {
     var trusted: Bool
     /// Primary MAC address, shared only after authentication (used for Wake-on-LAN).
     var macAddress: String?
+    /// True on QUIC hosts that accept a dedicated second stream for video (`videoStreamAttach`).
+    var supportsVideoStream: Bool? = nil
+    /// True on hosts that support `setSizedMirror`, so clients can request an initial
+    /// desktop size immediately without waiting for `displays`.
+    var sizedMirrorAvailable: Bool? = nil
 }
 
 enum RDAuthFailure: String, Codable {
@@ -313,11 +352,23 @@ struct VideoDatagramsMsg: Codable {
     var maxSize: Int
     /// The client follows `videoStream` back to stream video (from 1.2.30).
     var canResumeStream: Bool?
+    /// Client supports XOR block parity FEC datagrams (`flags & 0x02`).
+    var fec: Bool? = nil
+    /// Client skips redundant app-layer AEAD on video datagrams because QUIC TLS is bound.
+    var unsealed: Bool? = nil
 }
 
 struct VideoStreamMsg: Codable {
     /// The number of the next frame, which comes on the stream.
     var nextFrame: UInt32
+    /// When set, frames move onto (true) or leave (false) the dedicated QUIC video stream.
+    var onVideoStream: Bool? = nil
+    /// True when the host is leaving UDP datagrams and returning video to stream delivery.
+    var leavingDatagrams: Bool? = nil
+}
+
+struct VideoStreamAttachMsg: Codable {
+    var version: Int = 1
 }
 
 struct RequestKeyframeMsg: Codable {

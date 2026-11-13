@@ -107,10 +107,11 @@ final class VideoPipeline: @unchecked Sendable {
     }
 
     private func decode(_ payload: Data) {
-        guard let (width, height, codec, data) = RDFrameCodec.unpack(payload), width > 0, height > 0 else { return }
+        guard let (width, height, codec, isAVCC, data) = RDFrameCodec.unpackPacket(payload),
+              width > 0, height > 0 else { return }
         let start = CACurrentMediaTime()
         let size = CGSize(width: width, height: height)
-        decoder.decode(annexB: data, codec: codec) { sample in
+        decoder.decode(data: data, isAVCC: isAVCC, codec: codec) { sample in
             let elapsedMs = (CACurrentMediaTime() - start) * 1000.0
             if !loggedFirstDecode {
                 loggedFirstDecode = true

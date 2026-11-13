@@ -42,16 +42,23 @@ enum RDHandshake {
         let serverToClient: SymmetricKey
         /// Seals video datagrams host → client (QUIC only, `RDVideoDatagram`).
         let videoDatagrams: SymmetricKey
+        /// Authenticates and optionally seals the dedicated QUIC video stream.
+        let videoStream: SymmetricKey
     }
 
     static func transcriptHash(clientKey: Data,
                                deviceId: String,
                                serverKey: Data,
                                serverIdentity: Data,
-                               serverId: String) -> Data {
+                               serverId: String,
+                               tlsCertHash: Data? = nil) -> Data {
         var hasher = SHA256()
-        let fields = [Data("rd-handshake-v2".utf8), clientKey, Data(deviceId.utf8),
+        var fields = [Data("rd-handshake-v2".utf8), clientKey, Data(deviceId.utf8),
                       serverKey, serverIdentity, Data(serverId.utf8)]
+        if let tlsCertHash {
+            fields.append(Data("rd-quic-tls-v1".utf8))
+            fields.append(tlsCertHash)
+        }
         for field in fields {
             var length = Data()
             length.appendBE32(UInt32(field.count))
@@ -74,7 +81,8 @@ enum RDHandshake {
         }
         return SessionKeys(clientToServer: derive("rd-v2 client->server"),
                            serverToClient: derive("rd-v2 server->client"),
-                           videoDatagrams: derive("rd-v2 video datagrams server->client"))
+                           videoDatagrams: derive("rd-v2 video datagrams server->client"),
+                           videoStream: derive("rd-v2 video stream"))
     }
 
     /// Bytes the host signs with its identity key.
@@ -114,21 +122,25 @@ enum RDHandshake {
                         identityKey: Data,
                         serverId: String,
                         serverName: String,
+                        tlsCertHash: Data? = nil,
                         sign: (Data) -> Data?) -> HostResponse? {
         let ephemeral = RDCrypto.makePrivateKey()
         let serverKey = ephemeral.publicKey.rawRepresentation
+        let boundCertHash = (hello.quicTLSBound == true) ? tlsCertHash : nil
         let transcript = transcriptHash(clientKey: hello.pubKey,
                                         deviceId: hello.deviceId,
                                         serverKey: serverKey,
                                         serverIdentity: identityKey,
-                                        serverId: serverId)
+                                        serverId: serverId,
+                                        tlsCertHash: boundCertHash)
         guard let keys = sessionKeys(privateKey: ephemeral, peerPublicKey: hello.pubKey, transcript: transcript),
               let signature = sign(serverProof(transcript: transcript)) else { return nil }
         let serverHello = ServerHelloMsg(serverId: serverId,
                                          serverName: serverName,
                                          pubKey: serverKey,
                                          identityKey: identityKey,
-                                         signature: signature)
+                                         signature: signature,
+                                         quicTLSBound: boundCertHash != nil ? true : nil)
         return HostResponse(serverHello: serverHello, transcript: transcript, keys: keys)
     }
 

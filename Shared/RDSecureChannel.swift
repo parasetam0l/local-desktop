@@ -92,8 +92,8 @@ struct RDFrameReader {
         let end = headerRange.upperBound + length
         guard end <= buffer.endIndex else { return nil }
         consumed = end - buffer.startIndex
-        return RDFrameData(header: Data(buffer[headerRange]),
+        return RDFrameData(header: buffer[headerRange],
                            wire: wire,
-                           body: Data(buffer[headerRange.upperBound..<end]))
+                           body: buffer[headerRange.upperBound..<end])
     }
 }
