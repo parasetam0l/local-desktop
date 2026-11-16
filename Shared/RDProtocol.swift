@@ -401,6 +401,9 @@ struct HostStateMsg: Codable, Equatable {
     /// Whether the Mac's Caps Lock is on, so the key bar's caps key can light up like the
     /// keyboard's own light (nil from older Macs, which don't say).
     var capsLock: Bool? = nil
+    /// Whether macOS Secure Input is active while local input blocking is on, so
+    /// keyboard input on the Mac isn't blocked right now (nil when off or from older Macs).
+    var secureInputActive: Bool? = nil
 }
 
 /// After a click from a client that asked for these reports: whether the Mac's keyboard

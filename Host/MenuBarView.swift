@@ -39,6 +39,7 @@ struct MenuBarView: View {
         state.selectedDisplay = server.selectedDisplayID
         state.blocksLocalInput = server.blocksLocalInput
         state.isBlockingLocalInput = server.isBlockingLocalInput
+        state.isSecureInputActive = server.isSecureInputActive
         state.localInputBlockError = server.localInputBlockError
         state.devices = auth.devices
         state.launchAtLogin = launchManager.isEnabled

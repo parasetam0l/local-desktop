@@ -224,6 +224,8 @@ final class HostServer: ObservableObject {
     @Published private(set) var blocksLocalInput = UserDefaults.standard.bool(forKey: HostServer.blocksLocalInputKey)
     /// Whether they're blocked right now.
     @Published private(set) var isBlockingLocalInput = false
+    /// Whether macOS Secure Input is active right now while local input blocking is on.
+    @Published private(set) var isSecureInputActive = false
     @Published private(set) var localInputBlockError: String?
 
     nonisolated static let computerName: String = Host.current().localizedName ?? "Mac"
@@ -322,6 +324,13 @@ final class HostServer: ObservableObject {
                 self?.lidStateChanged()
             }
         }
+        inputBlocker.onStateChange = { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.localInputBlockerStateChanged()
+                }
+            }
+        }
 
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked")) { server, _ in
             HostLog.write("screen locked | \(HostLog.displaySummary())")
@@ -331,6 +340,7 @@ final class HostServer: ObservableObject {
         observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsUnlocked")) { server, _ in
             HostLog.write("screen unlocked | \(HostLog.displaySummary())")
             server.isHostLocked = false
+            server.refreshLocalInputBlocking()
             server.scheduleHostStateBroadcast()
         }
         let workspace = NSWorkspace.shared.notificationCenter
@@ -355,6 +365,7 @@ final class HostServer: ObservableObject {
             server.applyPendingMirrorSize()
             // A missed unlock notification mustn't leave a false lock behind.
             server.isHostLocked = Self.readIsLocked()
+            server.refreshLocalInputBlocking()
             server.scheduleHostStateBroadcast()
             if !server.activeSessions.isEmpty, !server.isHeadlessClosedLid {
                 server.restartCapture()
@@ -380,11 +391,13 @@ final class HostServer: ObservableObject {
         ]
         for name in appNotifications {
             observe(workspace, name) { server, name in
-                if name == NSWorkspace.didActivateApplicationNotification,
-                   let activeApp = NSWorkspace.shared.frontmostApplication,
-                   activeApp.activationPolicy == .regular,
-                   let bid = activeApp.bundleIdentifier {
-                    server.appSwitcher.trackActivation(bid)
+                if name == NSWorkspace.didActivateApplicationNotification {
+                    if let activeApp = NSWorkspace.shared.frontmostApplication,
+                       activeApp.activationPolicy == .regular,
+                       let bid = activeApp.bundleIdentifier {
+                        server.appSwitcher.trackActivation(bid)
+                    }
+                    server.inputBlocker.refreshHealth()
                 }
                 server.scheduleBroadcastRunningApps()
             }
@@ -996,6 +1009,7 @@ final class HostServer: ObservableObject {
             InputInjector.wakeDisplay(within: streamedDisplayBounds)
         }
         refreshDisplaySleepState()
+        updateLocalInputBlocking()
 
         let state = hostStateMessage
         session.sendHostState(state)
@@ -1016,7 +1030,6 @@ final class HostServer: ObservableObject {
 
         updateClientName()
         updateFrameGate()
-        updateLocalInputBlocking()
         if ScreenStreamer.shared.isRunning {
             if let keyframe = ScreenStreamer.shared.lastKeyframe {
                 session.enqueueEncodedPacket(keyframe)
@@ -1178,7 +1191,8 @@ final class HostServer: ObservableObject {
                      hasExternalDisplay: hasExternalDisplay,
                      hidesDock: DockHider.isAvailable ? hidesDock : nil,
                      windowActions: true,
-                     capsLock: InputInjector.isCapsLockOn)
+                     capsLock: InputInjector.isCapsLockOn,
+                     secureInputActive: isBlockingLocalInput && isSecureInputActive ? true : nil)
     }
 
     /// Caps Lock can change on the Mac's own keyboard too, and macOS posts nothing for it,
@@ -1230,6 +1244,25 @@ final class HostServer: ObservableObject {
             if !blocksLocalInput { localInputBlockError = nil }
         }
         isBlockingLocalInput = inputBlocker.isActive
+        isSecureInputActive = isBlockingLocalInput && inputBlocker.isSecureInputActive
+    }
+
+    private func refreshLocalInputBlocking() {
+        if inputBlocker.isActive {
+            inputBlocker.refreshHealth()
+        } else {
+            updateLocalInputBlocking()
+        }
+    }
+
+    private func localInputBlockerStateChanged() {
+        let wanted = blocksLocalInput && !activeSessions.isEmpty
+        if wanted && !inputBlocker.isActive {
+            localInputBlockError = "macOS didn't allow it. Check that LocalDesktop is on under Privacy & Security → Accessibility."
+        }
+        isBlockingLocalInput = inputBlocker.isActive
+        isSecureInputActive = isBlockingLocalInput && inputBlocker.isSecureInputActive
+        broadcastHostState()
     }
 
     nonisolated private static func readIsLocked() -> Bool {

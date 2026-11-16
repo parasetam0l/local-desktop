@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 import Foundation
 
@@ -11,9 +12,11 @@ import Foundation
 /// The tap runs on its own thread because every input event on the Mac waits for its
 /// callback. macOS removes the tap with the process, so input comes back even if
 /// LocalDesktop quits or crashes. Password fields (Secure Input) hide keystrokes from
-/// event taps, so typing into one isn't blocked. Key releases pass so nothing stays
-/// pressed. A volume key held when blocking starts keeps acting until it stops, because
-/// its release never reaches the tap.
+/// event taps, so typing into one isn't blocked; `isSecureInputActive` tracks that
+/// state (including when another app leaves Secure Input active after leaving a password
+/// field) and the heartbeat keeps the tap enabled once macOS allows it again. Key
+/// releases pass so nothing stays pressed. A volume key held when blocking starts keeps
+/// acting until it stops, because its release never reaches the tap.
 ///
 /// Sessions run on the main queue, so anything that stalls it, such as a modal alert,
 /// stops sessions from ending or injecting input, and only the Mac's own input can clear
@@ -23,6 +26,7 @@ final class LocalInputBlocker: @unchecked Sendable {
     static let injectedEventTag: Int64 = 0x4C44_6573_6B74 // "LDeskt"
 
     private let lock = NSLock()
+    private let isSecureInputEnabled: @Sendable () -> Bool
     private var tap: CFMachPort?
     private var runLoop: CFRunLoop?
     /// Where LocalDesktop last put the pointer; set before the tap starts, then only on its thread.
@@ -30,15 +34,31 @@ final class LocalInputBlocker: @unchecked Sendable {
     /// How long the main queue may go quiet before the Mac's own input passes.
     static let mainQueueStallLimit: TimeInterval = 3
     private var lastMainQueueBeat: TimeInterval?
+    private var _isSecureInputActive = false
+    private var restartedWhileDisabled = false
     private var heartbeat: DispatchSourceTimer?
+    private var _onStateChange: (@Sendable () -> Void)?
+    var onStateChange: (@Sendable () -> Void)? {
+        get { lock.withLock { _onStateChange } }
+        set { lock.withLock { _onStateChange = newValue } }
+    }
+
+    init(isSecureInputEnabled: @escaping @Sendable () -> Bool = { IsSecureEventInputEnabled() }) {
+        self.isSecureInputEnabled = isSecureInputEnabled
+    }
 
     var isActive: Bool { lock.withLock { tap != nil } }
+    var isSecureInputActive: Bool { lock.withLock { _isSecureInputActive } }
 
     /// Starts blocking. False when macOS refuses the event tap, which needs the
     /// Accessibility permission.
     func start() -> Bool {
         if isActive { return true }
-        heldPosition = CGEvent(source: nil)?.location
+        let initialPosition = CGEvent(source: nil)?.location
+        lock.withLock {
+            heldPosition = initialPosition
+            restartedWhileDisabled = false
+        }
 
         let started = DispatchSemaphore(value: 0)
         nonisolated(unsafe) var created = false
@@ -56,9 +76,11 @@ final class LocalInputBlocker: @unchecked Sendable {
             let runLoop = CFRunLoopGetCurrent()
             CFRunLoopAddSource(runLoop, source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
+            let secure = isSecureInputEnabled()
             lock.withLock {
                 self.tap = tap
                 self.runLoop = runLoop
+                self._isSecureInputActive = secure
             }
             created = true
             started.signal()
@@ -74,10 +96,15 @@ final class LocalInputBlocker: @unchecked Sendable {
 
     /// Runs on the same queue as sessions, so it stops exactly when they do.
     private func startHeartbeat() {
+        heartbeat?.cancel()
         noteMainQueueAlive()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(200))
-        timer.setEventHandler { [weak self] in self?.noteMainQueueAlive() }
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.noteMainQueueAlive()
+            self.refreshHealth()
+        }
         timer.resume()
         heartbeat = timer
     }
@@ -86,19 +113,22 @@ final class LocalInputBlocker: @unchecked Sendable {
         lock.withLock { lastMainQueueBeat = time }
     }
 
-    private var isMainQueueStalled: Bool {
-        guard let beat = lock.withLock({ lastMainQueueBeat }) else { return false }
+    private var isMainQueueStalledLocked: Bool {
+        guard let beat = lastMainQueueBeat else { return false }
         return ProcessInfo.processInfo.systemUptime - beat > Self.mainQueueStallLimit
     }
 
     func stop() {
         heartbeat?.cancel()
         heartbeat = nil
-        lock.withLock { lastMainQueueBeat = nil }
         let (tap, runLoop) = lock.withLock {
             defer {
                 self.tap = nil
                 self.runLoop = nil
+                self.heldPosition = nil
+                self.lastMainQueueBeat = nil
+                self._isSecureInputActive = false
+                self.restartedWhileDisabled = false
             }
             return (self.tap, self.runLoop)
         }
@@ -106,6 +136,57 @@ final class LocalInputBlocker: @unchecked Sendable {
         CGEvent.tapEnable(tap: tap, enable: false)
         CFMachPortInvalidate(tap)
         CFRunLoopStop(runLoop)
+    }
+
+    /// Re-checks Secure Input and verifies macOS didn't leave the tap disabled (e.g.
+    /// after a timeout during Secure Input or across sleep/wake).
+    func refreshHealth() {
+        let tap = lock.withLock { self.tap }
+        guard let tap else { return }
+        evaluateHealth(
+            tapEnabled: { CGEvent.tapIsEnabled(tap: tap) },
+            enableTap: {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                return CGEvent.tapIsEnabled(tap: tap)
+            },
+            restartTap: { [self] in
+                stop()
+                return start()
+            }
+        )
+    }
+
+    func evaluateHealth(tapEnabled: () -> Bool,
+                        enableTap: () -> Bool,
+                        restartTap: () -> Bool) {
+        let secure = isSecureInputEnabled()
+        let (wasSecure, alreadyRestarted) = lock.withLock {
+            let previousSecure = _isSecureInputActive
+            _isSecureInputActive = secure
+            return (previousSecure, restartedWhileDisabled)
+        }
+        var stateChanged = (secure != wasSecure)
+
+        if tapEnabled() {
+            lock.withLock { restartedWhileDisabled = false }
+        } else if enableTap() {
+            lock.withLock { restartedWhileDisabled = false }
+        } else if !secure && !alreadyRestarted {
+            // macOS may keep an old Mach port disabled after wake/unlock or a timeout;
+            // replace it once per disable episode once Secure Input is clear.
+            let restarted = restartTap()
+            let nowSecure = lock.withLock {
+                restartedWhileDisabled = true
+                return _isSecureInputActive
+            }
+            if !restarted || nowSecure != wasSecure {
+                stateChanged = true
+            }
+        }
+
+        if stateChanged {
+            onStateChange?()
+        }
     }
 
     /// The tap's decision: LocalDesktop's own events, the tap's housekeeping and releases
@@ -125,15 +206,16 @@ final class LocalInputBlocker: @unchecked Sendable {
         let isPointerMove = Self.pointerMoves.contains(type)
         if event.getIntegerValueField(.eventSourceUserData) == Self.injectedEventTag {
             if isPointerMove || Self.pointerButtons.contains(type) {
-                heldPosition = event.location
+                lock.withLock { heldPosition = event.location }
             }
             return Unmanaged.passUnretained(event)
         }
+        let (stalled, held) = lock.withLock { (isMainQueueStalledLocked, heldPosition) }
         // A key held when blocking started would otherwise stay pressed. A release does
         // nothing on its own.
-        if Self.isRelease(type, event) || isMainQueueStalled { return Unmanaged.passUnretained(event) }
-        if isPointerMove, let heldPosition {
-            CGWarpMouseCursorPosition(heldPosition)
+        if Self.isRelease(type, event) || stalled { return Unmanaged.passUnretained(event) }
+        if isPointerMove, let held {
+            CGWarpMouseCursorPosition(held)
             CGAssociateMouseAndMouseCursorPosition(1)
         }
         return nil

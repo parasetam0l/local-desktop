@@ -95,6 +95,8 @@ final class ClientSession: ObservableObject {
     @Published private(set) var textFocusReport: (count: Int, editable: Bool) = (0, false)
     /// Whether the Mac blocks its own keyboard and trackpad during sessions (nil before 1.2.4).
     @Published private(set) var blocksMacInput: Bool?
+    /// Whether macOS Secure Input is keeping keyboard input unblocked on the Mac right now.
+    @Published private(set) var isMacSecureInputActive = false
     /// The Mac can close, minimise and place its front window for this device.
     @Published private(set) var macWindowActions = false
     /// The Mac's front window as last reported (see `requestFrontWindow`).
@@ -547,6 +549,7 @@ final class ClientSession: ObservableObject {
             isHostLocked = msg.isLocked
             isDisplaySleeping = msg.isDisplaySleeping
             blocksMacInput = msg.blocksLocalInput
+            isMacSecureInputActive = msg.secureInputActive ?? false
             hidesMacDock = msg.hidesDock
             macCapsLock = msg.capsLock
             macWindowActions = msg.windowActions ?? false
@@ -1188,6 +1191,7 @@ final class ClientSession: ObservableObject {
     func setBlocksMacInput(_ on: Bool) {
         guard phase == .connected, blocksMacInput != nil else { return }
         blocksMacInput = on
+        if !on { isMacSecureInputActive = false }
         sendJSON(.setLocalInputBlock, RDSetLocalInputBlockMsg(enabled: on))
     }
 

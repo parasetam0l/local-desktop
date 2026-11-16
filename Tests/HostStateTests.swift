@@ -37,6 +37,16 @@ final class HostStateTests: XCTestCase {
         let json = String(decoding: RDJSON.encode(state), as: UTF8.self)
         XCTAssertFalse(json.contains("isLidClosed"))
         XCTAssertFalse(json.contains("hasExternalDisplay"))
+        XCTAssertFalse(json.contains("secureInputActive"))
+    }
+
+    func testSecureInputActiveIsOptionalAndRoundTrips() throws {
+        let legacy = Data(#"{"isLocked":false,"isDisplaySleeping":false}"#.utf8)
+        XCTAssertNil(try XCTUnwrap(RDJSON.decode(HostStateMsg.self, from: legacy)).secureInputActive)
+        let state = HostStateMsg(isLocked: false, isDisplaySleeping: false, blocksLocalInput: true, secureInputActive: true)
+        let decoded = try XCTUnwrap(RDJSON.decode(HostStateMsg.self, from: RDJSON.encode(state)))
+        XCTAssertEqual(decoded.secureInputActive, true)
+        XCTAssertNotEqual(decoded, HostStateMsg(isLocked: false, isDisplaySleeping: false, blocksLocalInput: true))
     }
 
     func testALockOnlyCountsOnceTheDisplayIsAwake() {

@@ -101,4 +101,110 @@ final class LocalInputBlockerTests: XCTestCase {
         XCTAssertTrue(covers(29), "trackpad gestures")
         XCTAssertFalse(covers(CGEventType.null.rawValue))
     }
+
+    func testSecureInputStateTransitionsFireCallbackOnlyOnChange() {
+        final class Box: @unchecked Sendable {
+            var secure = false
+            var notifications = 0
+        }
+        let box = Box()
+        let testBlocker = LocalInputBlocker(isSecureInputEnabled: { box.secure })
+        testBlocker.onStateChange = { box.notifications += 1 }
+
+        testBlocker.evaluateHealth(tapEnabled: { true }, enableTap: { true }, restartTap: { false })
+        XCTAssertFalse(testBlocker.isSecureInputActive)
+        XCTAssertEqual(box.notifications, 0)
+
+        box.secure = true
+        testBlocker.evaluateHealth(tapEnabled: { true }, enableTap: { true }, restartTap: { false })
+        XCTAssertTrue(testBlocker.isSecureInputActive)
+        XCTAssertEqual(box.notifications, 1)
+
+        testBlocker.evaluateHealth(tapEnabled: { true }, enableTap: { true }, restartTap: { false })
+        XCTAssertTrue(testBlocker.isSecureInputActive)
+        XCTAssertEqual(box.notifications, 1)
+
+        box.secure = false
+        testBlocker.evaluateHealth(tapEnabled: { true }, enableTap: { true }, restartTap: { false })
+        XCTAssertFalse(testBlocker.isSecureInputActive)
+        XCTAssertEqual(box.notifications, 2)
+
+        testBlocker.stop()
+        XCTAssertFalse(testBlocker.isSecureInputActive)
+    }
+
+    func testDisabledTapReenablesWithoutRestartWhenPossible() {
+        let testBlocker = LocalInputBlocker(isSecureInputEnabled: { false })
+        var enableCalls = 0
+        var restartCalls = 0
+
+        testBlocker.evaluateHealth(
+            tapEnabled: { false },
+            enableTap: {
+                enableCalls += 1
+                return true
+            },
+            restartTap: {
+                restartCalls += 1
+                return true
+            }
+        )
+
+        XCTAssertEqual(enableCalls, 1)
+        XCTAssertEqual(restartCalls, 0)
+    }
+
+    func testDisabledTapWaitsOutSecureInputThenRestartsOncePerEpisode() {
+        final class Box: @unchecked Sendable { var secure = true }
+        let box = Box()
+        let testBlocker = LocalInputBlocker(isSecureInputEnabled: { box.secure })
+        var tapEnabled = false
+        var enableResult = false
+        var restartCalls = 0
+
+        // Disabled while Secure Input is active: tries enable, does not spin-restart.
+        testBlocker.evaluateHealth(tapEnabled: { tapEnabled }, enableTap: { enableResult }, restartTap: {
+            restartCalls += 1
+            return true
+        })
+        XCTAssertEqual(restartCalls, 0)
+
+        // Secure Input clears and tap is still disabled: restarts once.
+        box.secure = false
+        testBlocker.evaluateHealth(tapEnabled: { tapEnabled }, enableTap: { enableResult }, restartTap: {
+            restartCalls += 1
+            return true
+        })
+        XCTAssertEqual(restartCalls, 1)
+
+        // Still disabled on the next tick: guarded against restart loop.
+        testBlocker.evaluateHealth(tapEnabled: { tapEnabled }, enableTap: { enableResult }, restartTap: {
+            restartCalls += 1
+            return true
+        })
+        XCTAssertEqual(restartCalls, 1)
+
+        // Once healthy again, a later disable episode can restart once more.
+        tapEnabled = true
+        testBlocker.evaluateHealth(tapEnabled: { tapEnabled }, enableTap: { enableResult }, restartTap: {
+            restartCalls += 1
+            return true
+        })
+        tapEnabled = false
+        testBlocker.evaluateHealth(tapEnabled: { tapEnabled }, enableTap: { enableResult }, restartTap: {
+            restartCalls += 1
+            return true
+        })
+        XCTAssertEqual(restartCalls, 2)
+    }
+
+    func testFailedRestartNotifiesStateChange() {
+        final class Box: @unchecked Sendable { var notifications = 0 }
+        let box = Box()
+        let testBlocker = LocalInputBlocker(isSecureInputEnabled: { false })
+        testBlocker.onStateChange = { box.notifications += 1 }
+
+        testBlocker.evaluateHealth(tapEnabled: { false }, enableTap: { false }, restartTap: { false })
+        XCTAssertEqual(box.notifications, 1)
+    }
 }

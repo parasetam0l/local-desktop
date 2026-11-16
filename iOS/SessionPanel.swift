@@ -77,57 +77,66 @@ struct SessionPanel: View {
     // MARK: Sections
 
     private var macSection: some View {
-        PanelSection("Mac", footer: session.sizedMirrorAvailable && session.mirrorSize != nil
-                     ? "The Mac's own screen shows the same layout while a desktop size is on." : nil) {
-            if session.sizedMirrorAvailable {
-                PanelMenuRow(title: "Desktop size", value: session.mirrorSize?.label ?? "Mac's own") {
-                    checkButton("Mac's own size", isOn: session.mirrorSize == nil) {
-                        session.setDesktopSize(.macOwn)
-                    }
-                    // Sizes as they are for the way the device is held now; the choice
-                    // follows when it is turned.
-                    Section(DesktopSizeChoice.fillsDeviceTitle) {
-                        ForEach(DesktopSizeChoice.deviceOptions, id: \.choice) { option in
-                            desktopSizeButton(option.choice, name: option.name)
+        VStack(alignment: .leading, spacing: 6) {
+            PanelSection("Mac", footer: session.sizedMirrorAvailable && session.mirrorSize != nil
+                         ? "The Mac's own screen shows the same layout while a desktop size is on." : nil) {
+                if session.sizedMirrorAvailable {
+                    PanelMenuRow(title: "Desktop size", value: session.mirrorSize?.label ?? "Mac's own") {
+                        checkButton("Mac's own size", isOn: session.mirrorSize == nil) {
+                            session.setDesktopSize(.macOwn)
                         }
-                    }
-                    Section("Standard sizes") {
-                        ForEach(DesktopSizeChoice.standardSizes, id: \.self) { size in
-                            desktopSizeButton(.standard(size), name: nil)
+                        // Sizes as they are for the way the device is held now; the choice
+                        // follows when it is turned.
+                        Section(DesktopSizeChoice.fillsDeviceTitle) {
+                            ForEach(DesktopSizeChoice.deviceOptions, id: \.choice) { option in
+                                desktopSizeButton(option.choice, name: option.name)
+                            }
                         }
-                    }
-                }
-            }
-            // Empty with a Mac older than 1.2.1, which doesn't send its displays.
-            if session.displays.count > 1 {
-                let current = session.displays.first { $0.id == session.selectedDisplayId }
-                PanelMenuRow(title: "Screen", value: current?.name ?? "Choose") {
-                    ForEach(session.displays) { display in
-                        checkButton("\(display.name) · \(display.resolution)",
-                                    isOn: display.id == session.selectedDisplayId) {
-                            session.selectDisplay(display.id)
+                        Section("Standard sizes") {
+                            ForEach(DesktopSizeChoice.standardSizes, id: \.self) { size in
+                                desktopSizeButton(.standard(size), name: nil)
+                            }
                         }
                     }
                 }
+                // Empty with a Mac older than 1.2.1, which doesn't send its displays.
+                if session.displays.count > 1 {
+                    let current = session.displays.first { $0.id == session.selectedDisplayId }
+                    PanelMenuRow(title: "Screen", value: current?.name ?? "Choose") {
+                        ForEach(session.displays) { display in
+                            checkButton("\(display.name) · \(display.resolution)",
+                                        isOn: display.id == session.selectedDisplayId) {
+                                session.selectDisplay(display.id)
+                            }
+                        }
+                    }
+                }
+                if let hidesMacDock = session.hidesMacDock {
+                    PanelToggleRow(title: "Hide Mac's Dock",
+                                   isOn: Binding(get: { hidesMacDock }, set: { session.setHidesMacDock($0) }))
+                }
+                PanelToggleRow(title: "Share clipboard", isOn: $session.sharesClipboard)
+                PanelToggleRow(title: "Show keyboard for text fields", isOn: $session.autoKeyboard)
+                PanelToggleRow(title: "Show keyboard in touchpad mode", isOn: $session.autoKeyboardInTouchpad)
+                    .disabled(!session.autoKeyboard)
+                    .opacity(session.autoKeyboard ? 1 : 0.45)
+                PanelButtonRow(title: "Brightness and volume", symbol: "chevron.right") {
+                    showHardwareSheet = true
+                }
+                .adaptiveSheet(isPresented: $showHardwareSheet, padSize: CGSize(width: 400, height: 400)) {
+                    MacHardwareControlsSheet(session: session, isPresented: $showHardwareSheet)
+                }
+                if let blocksMacInput = session.blocksMacInput {
+                    PanelToggleRow(title: "Block Mac's keyboard and trackpad",
+                                   isOn: Binding(get: { blocksMacInput }, set: { session.setBlocksMacInput($0) }))
+                }
             }
-            if let hidesMacDock = session.hidesMacDock {
-                PanelToggleRow(title: "Hide Mac's Dock",
-                               isOn: Binding(get: { hidesMacDock }, set: { session.setHidesMacDock($0) }))
-            }
-            PanelToggleRow(title: "Share clipboard", isOn: $session.sharesClipboard)
-            PanelToggleRow(title: "Show keyboard for text fields", isOn: $session.autoKeyboard)
-            PanelToggleRow(title: "Show keyboard in touchpad mode", isOn: $session.autoKeyboardInTouchpad)
-                .disabled(!session.autoKeyboard)
-                .opacity(session.autoKeyboard ? 1 : 0.45)
-            PanelButtonRow(title: "Brightness and volume", symbol: "chevron.right") {
-                showHardwareSheet = true
-            }
-            .adaptiveSheet(isPresented: $showHardwareSheet, padSize: CGSize(width: 400, height: 400)) {
-                MacHardwareControlsSheet(session: session, isPresented: $showHardwareSheet)
-            }
-            if let blocksMacInput = session.blocksMacInput {
-                PanelToggleRow(title: "Block Mac's keyboard and trackpad",
-                               isOn: Binding(get: { blocksMacInput }, set: { session.setBlocksMacInput($0) }))
+            if session.blocksMacInput == true, session.isMacSecureInputActive {
+                Text("Trackpad and mouse are blocked, but macOS Secure Input is active so keyboard input isn't blocked. If you left a password field, focus another text field or lock and unlock the Mac.")
+                    .font(.caption)
+                    .foregroundStyle(SessionStyle.danger)
+                    .padding(.horizontal, 4)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

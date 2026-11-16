@@ -42,6 +42,7 @@ struct MenuBarState {
     var selectedDisplay: CGDirectDisplayID?
     var blocksLocalInput = false
     var isBlockingLocalInput = false
+    var isSecureInputActive = false
     var localInputBlockError: String?
     var devices: [TrustedDevice] = []
     var launchAtLogin = false
@@ -356,12 +357,19 @@ struct MenuBarContent: View {
 
     private var localInputFooter: String {
         if let error = state.localInputBlockError { return error }
+        if state.isBlockingLocalInput && state.isSecureInputActive {
+            return "Trackpad and mouse are blocked, but macOS Secure Input is active so keyboard input isn't blocked. If you left a password field, focus another text field or lock and unlock the Mac."
+        }
         if state.isBlockingLocalInput { return "Blocked now. Only connected devices can type and click." }
         return "While a device is connected. Input comes back when the last one disconnects."
     }
 
+    private var localInputFooterIsWarning: Bool {
+        state.localInputBlockError != nil || (state.isBlockingLocalInput && state.isSecureInputActive)
+    }
+
     private var streamCard: some View {
-        PanelSection("Stream", footer: localInputFooter, footerIsWarning: state.localInputBlockError != nil) {
+        PanelSection("Stream", footer: localInputFooter, footerIsWarning: localInputFooterIsWarning) {
             PanelValueRow("Quality") {
                 Picker("Quality", selection: Binding(get: { state.preset }, set: { [actions] in actions.setPreset($0) })) {
                     ForEach(RDQualityPreset.allCases) { preset in

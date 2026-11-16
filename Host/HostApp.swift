@@ -68,8 +68,13 @@ struct LocalDesktopApp: App {
             // A lock while this Mac's own keyboard and trackpad are blocked, so someone at
             // it can tell why; an arrow badge while an update is waiting to be looked at.
             if server.isBlockingLocalInput {
-                Image(systemName: "lock.display")
-                    .accessibilityLabel("LocalDesktop, this Mac's keyboard and trackpad are blocked")
+                if server.isSecureInputActive {
+                    Image(systemName: "lock.trianglebadge.exclamationmark")
+                        .accessibilityLabel("LocalDesktop, this Mac's trackpad is blocked, but macOS Secure Input is letting keyboard input through")
+                } else {
+                    Image(systemName: "lock.display")
+                        .accessibilityLabel("LocalDesktop, this Mac's keyboard and trackpad are blocked")
+                }
             } else {
                 Image(systemName: updater.pendingUpdateVersion == nil ? "desktopcomputer" : "desktopcomputer.and.arrow.down")
                     .accessibilityLabel(updater.pendingUpdateVersion == nil
