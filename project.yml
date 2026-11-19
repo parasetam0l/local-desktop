@@ -97,6 +97,7 @@ targets:
         UIBackgroundModes:
           - audio
         NSLocalNetworkUsageDescription: "LocalDesktop scans your local network for Macs to connect to."
+        NSFaceIDUsageDescription: "LocalDesktop uses Face ID to unlock your Mac with the password you saved."
         NSBonjourServices: ["_rd-desktop._tcp"]
         # Updates: the install page (GitHub Pages) serves the latest published
         # release's Ad Hoc build with this manifest. See docs/RELEASING.md.

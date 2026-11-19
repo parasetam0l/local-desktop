@@ -1129,6 +1129,13 @@ final class ClientSession: @unchecked Sendable {
              .setLocalInputBlock, .setSizedMirror, .setHideDock, .setTextFocusReports,
              .setClipboardSharing, .clipboard, .clipboardImage:
             handleControl(wire, payload: payload)
+        case .unlockScreen:
+            guard let msg = RDJSON.decode(RDUnlockScreenMsg.self, from: payload) else { return }
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.server?.typeUnlockPassword(msg.password)
+                }
+            }
         default:
             break
         }

@@ -74,6 +74,9 @@ enum RDWire: UInt8 {
     case setClipboardSharing = 0x5B
     case clipboard = 0x5C
     case clipboardImage = 0x5D
+    /// Client → host: `{password}`, typed into the lock screen followed by Return, only
+    /// while the Mac is locked (Macs that report `HostStateMsg.unlockScreen`).
+    case unlockScreen = 0x5E
     case bye = 0x60
 
     // App Switcher & Actions
@@ -404,6 +407,13 @@ struct HostStateMsg: Codable, Equatable {
     /// Whether macOS Secure Input is active while local input blocking is on, so
     /// keyboard input on the Mac isn't blocked right now (nil when off or from older Macs).
     var secureInputActive: Bool? = nil
+    /// Whether the Mac takes `unlockScreen` (nil from older Macs, which can't).
+    var unlockScreen: Bool? = nil
+}
+
+/// The Mac's login password, sent after Face ID on the device. Never logged.
+struct RDUnlockScreenMsg: Codable {
+    var password: String
 }
 
 /// After a click from a client that asked for these reports: whether the Mac's keyboard

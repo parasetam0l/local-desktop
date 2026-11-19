@@ -99,6 +99,12 @@ final class ClientSession: ObservableObject {
     @Published private(set) var isMacSecureInputActive = false
     /// The Mac can close, minimise and place its front window for this device.
     @Published private(set) var macWindowActions = false
+    /// Whether the Mac can be unlocked from here (`unlockScreen`, newer Macs only).
+    @Published private(set) var macUnlockScreen = false
+    /// Whether this Mac's login password is saved behind Face ID / Touch ID.
+    @Published private(set) var hasUnlockPassword = false
+    /// The last unlock left the Mac locked, so the saved password is probably out of date.
+    @Published private(set) var unlockFailed = false
     /// The Mac's front window as last reported (see `requestFrontWindow`).
     @Published private(set) var frontWindow: RDFrontWindowMsg?
     @Published var showDebugHUD = false {
@@ -553,6 +559,9 @@ final class ClientSession: ObservableObject {
             hidesMacDock = msg.hidesDock
             macCapsLock = msg.capsLock
             macWindowActions = msg.windowActions ?? false
+            macUnlockScreen = msg.unlockScreen ?? false
+            hasUnlockPassword = UnlockPasswordStore.hasPassword(serverId: serverId)
+            if !msg.isLocked { unlockFailed = false }
             if !sentTextFocusPreference {
                 sentTextFocusPreference = true
                 // Macs before 1.2.13 ignore this.
@@ -968,6 +977,44 @@ final class ClientSession: ObservableObject {
 
     func sendText(_ text: String) {
         sendJSON(.textEvent, TextMsg(s: text))
+    }
+
+    // MARK: - Unlock with Face ID
+
+    func saveUnlockPassword(_ password: String) {
+        guard UnlockPasswordStore.save(password, serverId: serverId) else {
+            post("Couldn't save the password", symbol: "exclamationmark.triangle", isFailure: true)
+            return
+        }
+        hasUnlockPassword = true
+        unlockFailed = false
+    }
+
+    func forgetUnlockPassword() {
+        UnlockPasswordStore.delete(serverId: serverId)
+        hasUnlockPassword = false
+        unlockFailed = false
+    }
+
+    /// Face ID / Touch ID, then the Mac types the saved password at its lock screen.
+    func unlockWithBiometrics() async {
+        guard phase == .connected, macUnlockScreen, isHostLocked else { return }
+        let id = serverId
+        switch await UnlockPasswordStore.read(serverId: id, macName: displayName) {
+        case .failure(.cancelled):
+            return
+        case .failure(.missing):
+            hasUnlockPassword = UnlockPasswordStore.hasPassword(serverId: id)
+            post("Saved password is gone. Save it again.", symbol: "key", isFailure: true)
+        case .success(let password):
+            guard phase == .connected, serverId == id, isHostLocked else { return }
+            sendJSON(.unlockScreen, RDUnlockScreenMsg(password: password))
+            try? await Task.sleep(for: .seconds(4))
+            if phase == .connected, serverId == id, isHostLocked {
+                unlockFailed = true
+                post("Mac is still locked. Check the saved password.", symbol: "lock", isFailure: true)
+            }
+        }
     }
 
     /// Text typed on the iOS keyboard, honoring modifiers from the key bar.

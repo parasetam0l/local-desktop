@@ -1192,7 +1192,25 @@ final class HostServer: ObservableObject {
                      hidesDock: DockHider.isAvailable ? hidesDock : nil,
                      windowActions: true,
                      capsLock: InputInjector.isCapsLockOn,
-                     secureInputActive: isBlockingLocalInput && isSecureInputActive ? true : nil)
+                     secureInputActive: isBlockingLocalInput && isSecureInputActive ? true : nil,
+                     unlockScreen: true)
+    }
+
+    /// Types a client's saved login password into the lock screen, then Return. Only while
+    /// macOS says the screen is locked right now, so it can never land in an app's window.
+    /// The password itself is never logged.
+    func typeUnlockPassword(_ password: String) {
+        guard !password.isEmpty else { return }
+        guard Self.readIsLocked() else {
+            HostLog.write("unlock ignored: screen not locked")
+            return
+        }
+        HostLog.write("unlock: typing saved password at lock screen")
+        InputInjector.tickleUserActivity()
+        InputInjector.text(password)
+        let enter = CGKeyCode(RDKey.returnKey.rawValue)
+        InputInjector.key(code: enter, down: true, flags: [])
+        InputInjector.key(code: enter, down: false, flags: [])
     }
 
     /// Caps Lock can change on the Mac's own keyboard too, and macOS posts nothing for it,

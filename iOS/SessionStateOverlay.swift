@@ -261,6 +261,106 @@ struct HostLockedBanner: View {
     }
 }
 
+/// Unlocks the locked Mac with Face ID / Touch ID, or sets that up first. Shown at the
+/// bottom of the screen, only when the Mac supports it and this device has biometrics.
+struct MacUnlockButton: View {
+    @ObservedObject var session: ClientSession
+    @State private var showsPasswordSheet = false
+
+    static func isAvailable(for session: ClientSession) -> Bool {
+        session.isHostLocked && session.macUnlockScreen && UnlockPasswordStore.biometryType != nil
+    }
+
+    var body: some View {
+        let ready = session.hasUnlockPassword && !session.unlockFailed
+        Button {
+            if ready {
+                Task { await session.unlockWithBiometrics() }
+            } else {
+                showsPasswordSheet = true
+            }
+        } label: {
+            Label(ready ? "Unlock Mac" : (session.hasUnlockPassword ? "Update Mac Password" : "Set Up Unlock with \(UnlockPasswordStore.biometryName)"),
+                  systemImage: ready ? UnlockPasswordStore.biometrySymbol : "key.fill")
+                .font(.body.weight(.semibold))
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+                .fixedSize()
+                .foregroundStyle(.white)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 13)
+                .sessionSurface(Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if session.hasUnlockPassword {
+                Button("Change Saved Password", systemImage: "key") { showsPasswordSheet = true }
+                Button("Forget Saved Password", systemImage: "trash", role: .destructive) {
+                    session.forgetUnlockPassword()
+                }
+            }
+        }
+        .sheet(isPresented: $showsPasswordSheet) {
+            UnlockPasswordSheet(session: session)
+        }
+    }
+}
+
+/// Saves the Mac's login password behind Face ID / Touch ID.
+struct UnlockPasswordSheet: View {
+    @ObservedObject var session: ClientSession
+    @Environment(\.dismiss) private var dismiss
+    @State private var password = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("Login password", text: $password)
+                        .textContentType(.password)
+                        .focused($focused)
+                        .submitLabel(.done)
+                        .onSubmit(save)
+                } header: {
+                    Text(session.displayName)
+                } footer: {
+                    Text("Saved on this device only, and readable only with \(UnlockPasswordStore.biometryName). When the Mac is locked, tap Unlock and the Mac types it on its lock screen. It never leaves this device except over the encrypted connection to this Mac.")
+                }
+                if session.hasUnlockPassword {
+                    Section {
+                        Button("Forget Saved Password", role: .destructive) {
+                            session.forgetUnlockPassword()
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Unlock with \(UnlockPasswordStore.biometryName)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", action: save).disabled(password.isEmpty)
+                }
+            }
+            .onAppear { focused = true }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private func save() {
+        guard !password.isEmpty else { return }
+        session.saveUnlockPassword(password)
+        password = ""
+        dismiss()
+        Task { await session.unlockWithBiometrics() }
+    }
+}
+
 private extension View {
     /// The solid card the connection states sit on.
     func stateCard() -> some View {

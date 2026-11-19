@@ -55,4 +55,16 @@ final class HostStateTests: XCTestCase {
         XCTAssertFalse(HostStateMsg.reportsLocked(isLocked: false, isDisplaySleeping: false))
         XCTAssertFalse(HostStateMsg.reportsLocked(isLocked: false, isDisplaySleeping: true))
     }
+
+    func testUnlockScreenIsOptionalAndRoundTrips() throws {
+        let legacy = Data(#"{"isLocked":true,"isDisplaySleeping":false}"#.utf8)
+        XCTAssertNil(try XCTUnwrap(RDJSON.decode(HostStateMsg.self, from: legacy)).unlockScreen)
+        let state = HostStateMsg(isLocked: true, isDisplaySleeping: false, unlockScreen: true)
+        XCTAssertEqual(try XCTUnwrap(RDJSON.decode(HostStateMsg.self, from: RDJSON.encode(state))).unlockScreen, true)
+
+        let unlock = try XCTUnwrap(RDJSON.decode(RDUnlockScreenMsg.self,
+                                                 from: RDJSON.encode(RDUnlockScreenMsg(password: "p@ss wörd\"1"))))
+        XCTAssertEqual(unlock.password, "p@ss wörd\"1")
+        XCTAssertEqual(RDWire(rawValue: 0x5E), .unlockScreen)
+    }
 }

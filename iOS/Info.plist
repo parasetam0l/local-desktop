@@ -30,6 +30,8 @@
 	<array>
 		<string>_rd-desktop._tcp</string>
 	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>LocalDesktop uses Face ID to unlock your Mac with the password you saved.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>LocalDesktop scans your local network for Macs to connect to.</string>
 	<key>UIBackgroundModes</key>

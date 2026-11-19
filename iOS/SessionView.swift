@@ -222,6 +222,15 @@ struct SessionView: View {
                 )
                 .zIndex(40)
 
+                // Unlock with Face ID / Touch ID, at the bottom, clear of the key bar.
+                if MacUnlockButton.isAvailable(for: session) {
+                    MacUnlockButton(session: session)
+                        .padding(.bottom, (dockedKeyBarInset > 0 ? dockedKeyBarInset + 4 : 0) + 28)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .zIndex(45)
+                }
+
                 // Top Overlays: Debug HUD & Mac Locked Banner
                 VStack(spacing: 8) {
                     if session.showDebugHUD {
